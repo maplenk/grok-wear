@@ -94,7 +94,7 @@ public final class VoiceService extends Service {
         PowerManager power=(PowerManager)getSystemService(POWER_SERVICE);KeyguardManager keyguard=(KeyguardManager)getSystemService(KEYGUARD_SERVICE);
         if(!power.isInteractive()||keyguard.isKeyguardLocked()||checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){finish("Ready","Tap Voice chat again while the watch is unlocked.");return START_NOT_STICKY;}
         running=true;callHistoryEpoch=historyEpoch;long mine=++generation;state="Connecting";caption="";speaker="";error="";muted=false;responseIdle=true;drained=true;ending=false;endReady=false;
-        liveStartedAt=0;finishedElapsed=0;callDeadlineElapsed=SystemClock.elapsedRealtime()+300000;syncStatus="Loading shared history";callAccount=null;callContext=null;
+        liveStartedAt=0;finishedElapsed=0;callDeadlineElapsed=SystemClock.elapsedRealtime()+300000;syncStatus="Connecting voice";callAccount=null;callContext=null;
         try{Notification notification=notification();startForeground(NOTIFICATION,notification,ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE|ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
             wake=power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,"grokwear:voice");wake.setReferenceCounted(false);wake.acquire(310000);
         }catch(RuntimeException refused){finish("Ready","Watch could not keep this voice call in the foreground.");return START_NOT_STICKY;}
@@ -105,7 +105,10 @@ public final class VoiceService extends Service {
             JSONObject binding=account.historyBinding();
             if(!binding.getString("agentId").equals(bot.optString("id")))throw new IllegalStateException();
             NativeVoiceSession.Backend lease=account.startupBackend(binding);pipeline.check();
-            VoiceStartup.Result prepared=pipeline.prepare(()->account.continuity.prepare(binding),
+            // Like the official apps, a call starts without preloading chat history: the Bot's
+            // instructions and its lookup tools carry context, and the microphone isn't held
+            // behind history pages or per-message acknowledgements. The binding still saves the call.
+            VoiceStartup.Result prepared=pipeline.prepare(()->new HistoryCoordinator.Context(binding,new org.json.JSONArray()),
                 ()->lease.request("VoiceCallHarnessSession",new JSONObject().put("agentId",bot.getString("id")).put("agentName",bot.getString("name"))),
                 ()->lease.request("MintSandVoiceCallSecret",new JSONObject()),
                 (plan,credential)->post(mine,()->openPreparedSession(mine,account,bot,binding,plan,credential,pipeline)));
@@ -113,9 +116,8 @@ public final class VoiceService extends Service {
             post(mine,()->{
                 try{
                     if(session==null)throw new IllegalStateException("Voice transport missing");
-                    callContext=prepared.history;syncStatus="Connecting voice";emit();
-                    session.provideHistory(prepared.history.turns());
-                }catch(Exception invalid){finish("Call stopped","Shared history could not be prepared safely.");}
+                    callContext=prepared.history;emit();
+                }catch(Exception invalid){finish("Call stopped","Voice could not start safely. Try again.");}
             });
         }catch(Exception failed){String reason=setupReason(failed);post(mine,()->finish("Ready",reason));}});
         return START_NOT_STICKY;
@@ -149,16 +151,16 @@ public final class VoiceService extends Service {
                     public void onFailure(String safe){post(mine,()->finish("Call stopped",safe));}
                     public void onDisconnected(String safe){post(mine,()->finish("Call dropped",safe));}
                 },pipeline.remainingMillis());
-            session.deferHistory();session.preparedStartup(plan,credential,()->account.verifyHistoryBinding(binding,true));
+            session.preparedStartup(plan,credential,()->account.verifyHistoryBinding(binding,true));
             emit();notifyCall();session.start();
-        }catch(Exception invalid){finish("Call stopped","Shared history could not be prepared safely.");}
+        }catch(Exception invalid){finish("Call stopped","Voice could not start safely. Try again.");}
     }
     /** Fixed local messages only: a Failure carries a safe sentence; anything else may hold private detail. */
     private String setupReason(Exception failed){
         if(!online(this))return OFFLINE;
         if(failed instanceof GrokCore.Failure&&failed.getMessage()!=null&&!failed.getMessage().isBlank())return failed.getMessage();
-        if(failed instanceof java.util.concurrent.TimeoutException)return "Your chat took too long to load on this connection. Try again with a stronger signal.";
-        return "Shared history could not be loaded. Check your connection and try again.";
+        if(failed instanceof java.util.concurrent.TimeoutException)return "Voice took too long to connect on this connection. Try again with a stronger signal.";
+        return "Voice could not start. Check your connection and try again.";
     }
     static final String OFFLINE="You're offline. Check Wi-Fi or your watch's connection, then try again.";
     static boolean online(Context context){
@@ -193,7 +195,7 @@ public final class VoiceService extends Service {
             long now=SystemClock.uptimeMillis();announce=now-lastAudioPost>=150;if(announce)lastAudioPost=now;}
         if(announce)post(mine,()->{if(!ending)state="Speaking";emit();});}
     private void startAudio(long mine){if(!valid(mine)||audio!=null)return;
-        syncStatus="Shared history loaded";
+        syncStatus="Connected";
         liveStartedAt=SystemClock.elapsedRealtime();
         audio=new NativeAudio(this,new NativeAudio.Listener(){
             public void input(byte[] pcm,float level){NativeVoiceSession live=session;if(valid(mine)&&!muted&&live!=null){live.sendPcm(pcm);meter(mine,level,true);}}
