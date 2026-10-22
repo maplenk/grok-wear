@@ -390,7 +390,8 @@ public final class NativeVoiceSession {
      * (1008) and superseded (4001) closes are final, as in the official clients.
      */
     private void lineLost(String safe,int code){
-        if(code==1008||code==4001||ending||terminal.get()){disconnect(safe);return;}
+        // A clean (1000), policy (1008) or superseded (4001) close means the server ended the call on purpose.
+        if(code==1000||code==1008||code==4001||ending||terminal.get()){disconnect(safe);return;}
         execute(()->{
             if(reconnecting||!live())return;
             reconnecting=true;ready=false;settingsAccepted=false;settingsSent=false;lostReason=safe;reconnectAttempt=0;reconnects++;

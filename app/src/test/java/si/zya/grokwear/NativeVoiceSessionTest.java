@@ -379,6 +379,7 @@ public final class NativeVoiceSessionTest {
     }
     @Test public void policyCloseEndsTheCallWithoutRedialling()throws Exception {
         try(Fixture f=new Fixture()){f.ready();f.events.closedWith(1008);f.callback("disconnected");assertEquals(1,f.dials.get());}
+        try(Fixture f=new Fixture()){f.ready();f.events.closedWith(1000);f.callback("disconnected");assertEquals(1,f.dials.get());}
     }
     @Test public void droppedLineRedialsTheSameConversationAndCarriesOn()throws Exception {
         try(Fixture f=new Fixture()){
