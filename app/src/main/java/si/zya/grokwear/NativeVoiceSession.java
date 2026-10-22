@@ -168,11 +168,13 @@ public final class NativeVoiceSession {
     // Content-free call counters for the call_stop log line: sizes, counts and protocol event names only.
     private volatile long pcmSent,speechStarts,audioOut,heard,toolCalls;private volatile int seeded,toolsOffered,instructionChars;private volatile String toolNames="",seedShape="";
     private final java.util.Map<String,Integer> eventTypes=new java.util.LinkedHashMap<>();private volatile int eventsAfterReady;
+    // Microphone level only: the loudest sample, frames with speech-level sound, and frames of pure zeros.
+    private volatile int micPeak;private volatile long micFrames,loudFrames,zeroFrames;
     public String protocolDiagnostics(){String types;synchronized(eventTypes){types=eventTypes.toString();}
         return "received="+received+",errors="+protocolErrors+",class="+lastProtocolClass+",code="+lastProtocolCode
         +",ready="+ready+",muted="+muted+",pcm="+pcmSent+",speech="+speechStarts+",heard="+heard+",responses="+responsesSeen+",audio_out="+audioOut
         +",tool_calls="+toolCalls+",seeded="+seeded+"["+seedShape+"],tools="+toolsOffered+"["+toolNames+"],instructions="+instructionChars
-        +",after_ready="+eventsAfterReady+",events="+types;}
+        +",after_ready="+eventsAfterReady+",mic_peak="+micPeak+",mic_frames="+micFrames+",loud="+loudFrames+",zero="+zeroFrames+",events="+types;}
     /** Roles, sizes and character classes of the seeded history, never its text. */
     static String seedShape(JSONArray frames){
         StringBuilder roles=new StringBuilder();int total=0,max=0,nonBmp=0,control=0,lone=0;
@@ -353,6 +355,8 @@ public final class NativeVoiceSession {
     public void sendPcm(byte[] pcm) {
         if(pcm==null||pcm.length==0||pcm.length>16384||pcm.length%2!=0||terminal.get()||muted||ending)return;
         if(!pcmSlots.tryAcquire()){fail("Microphone could not keep up with this voice connection.");return;}
+        int peak=0;for(int i=0;i+1<pcm.length;i+=2){int sample=Math.abs((short)((pcm[i]&0xff)|(pcm[i+1]<<8)));if(sample>peak)peak=sample;}
+        micFrames++;if(peak>micPeak)micPeak=peak;if(peak>=2000)loudFrames++;if(peak==0)zeroFrames++;
         byte[] copy=Arrays.copyOf(pcm,pcm.length);
         if(!execute(()->{
             try {if(ready&&!muted&&!ending){send(new JSONObject().put("type","input_audio_buffer.append").put("audio",codec.encode(copy)));pcmSent+=copy.length;}}
