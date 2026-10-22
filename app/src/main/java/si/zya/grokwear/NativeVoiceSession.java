@@ -166,7 +166,7 @@ public final class NativeVoiceSession {
     private final Set<String> interruptedItems=new HashSet<>();
     /** Fixed diagnostic tokens and counters only; never server messages, IDs or transcripts. */
     // Content-free call counters for the call_stop log line: sizes, counts and protocol event names only.
-    private volatile long pcmSent,speechStarts,audioOut,heard,toolCalls;private volatile int seeded,toolsOffered,instructionChars;private volatile String toolNames="",seedShape="";
+    private volatile long pcmSent,speechStarts,audioOut,heard,toolCalls,toolsServed,toolsRefused;private volatile int seeded,toolsOffered,instructionChars;private volatile String toolNames="",seedShape="";
     private final java.util.Map<String,Integer> eventTypes=new java.util.LinkedHashMap<>();private volatile int eventsAfterReady;
     // Microphone level only: the loudest sample, frames with speech-level sound, and frames of pure zeros.
     private volatile int micPeak;private volatile long micFrames,loudFrames,zeroFrames;
@@ -177,7 +177,7 @@ public final class NativeVoiceSession {
         return "received="+received+",errors="+protocolErrors+",class="+lastProtocolClass+",code="+lastProtocolCode
         +",ready="+ready+",muted="+muted+",pcm="+pcmSent+",speech="+speechStarts+",heard="+heard+",responses="+responsesSeen+",audio_out="+audioOut
         +",voice="+(voiceId.isEmpty()?"default":"bot")+",speed="+voiceSpeed+",language="+(voiceLanguage.isEmpty()?"auto":"hint")
-        +",tool_calls="+toolCalls+",seeded="+seeded+"["+seedShape+"],tools="+toolsOffered+"["+toolNames+"],instructions="+instructionChars
+        +",tool_calls="+toolCalls+",tools_served="+toolsServed+",tools_refused="+toolsRefused+",seeded="+seeded+"["+seedShape+"],tools="+toolsOffered+"["+toolNames+"],instructions="+instructionChars
         +",open_ms="+openMs+",updated_ms="+updatedMs+",ready_ms="+readyMs+",ttfa_ms="+lastTtfaMs+",ttfa_max_ms="+maxTtfaMs
         +",after_ready="+eventsAfterReady+",mic_peak="+micPeak+",mic_frames="+micFrames+",loud="+loudFrames+",zero="+zeroFrames+",events="+types;}
     /** Roles, sizes and character classes of the seeded history, never its text. */
@@ -527,10 +527,12 @@ public final class NativeVoiceSession {
                 if(terminal.get()||ending)return;
                 execute(()->{
                     if(requestedTurn==callerTurn)pendingLookups=Math.max(0,pendingLookups-1);
-                    if(!"served".equals(result.optString("kind",""))) {
+                    // The wire carries the enum name; the official clients map it to "served" before checking.
+                    String kind=result.optString("kind","");
+                    if(!"served".equals(kind)&&!CallHandoff.SERVED.equals(kind)) {toolsRefused++;
                         toolResultForTurn(id,new JSONObject().put("error","The requested read-only tool was not available."),requestedTurn);return;
                     }
-                    Object output=result.opt("output");
+                    Object output=result.opt("output");toolsServed++;
                     toolOutput(id,output==null?new JSONObject():output);
                     if(requestedTurn==callerTurn&&(!(output instanceof JSONObject)||!"silent".equals(((JSONObject)output).optString("plan","")))){toolReplyOwed=true;payToolReply();}
                     else settleIfQuiet();

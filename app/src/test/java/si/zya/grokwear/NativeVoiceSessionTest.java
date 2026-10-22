@@ -18,7 +18,7 @@ public final class NativeVoiceSessionTest {
         volatile byte[] heard;volatile boolean failLookup,cancelled,unheard;volatile long queued;
         volatile NativeVoiceSession.WireEvents events;
         volatile CountDownLatch lookupEntered,lookupRelease;
-        final NativeVoiceSession session;JSONObject settings;
+        final NativeVoiceSession session;JSONObject settings;volatile String toolKind="served";
         Fixture()throws Exception {this(new JSONArray());}
         Fixture(JSONArray history)throws Exception {this(history,"");}
         Fixture(JSONArray history,String greeting)throws Exception {this(history,greeting,false,false,()->{});}
@@ -34,7 +34,7 @@ public final class NativeVoiceSessionTest {
                 tools.add(new JSONObject(body.toString()));
                 if(lookupEntered!=null)lookupEntered.countDown();if(lookupRelease!=null)lookupRelease.await(3,TimeUnit.SECONDS);
                 if(failLookup)throw new Exception("offline fixture failure");
-                return new JSONObject().put("kind","served").put("output",new JSONObject().put("messages",new JSONArray()));
+                return new JSONObject().put("kind",toolKind).put("output",new JSONObject().put("messages",new JSONArray().put(new JSONObject().put("text","found it"))));
             };
             NativeVoiceSession.WireFactory factory=(url,secret,e)->{events=e;e.opened();return new NativeVoiceSession.Wire(){
                 public boolean send(String text){try{sent.add(new JSONObject(text));return true;}catch(Exception ex){throw new AssertionError(ex);}}
@@ -62,6 +62,14 @@ public final class NativeVoiceSessionTest {
         public void onReady(){ready.incrementAndGet();callbacks.add("ready");}
         public boolean hasUnheardReplyAudio(){return unheard;}
         public void close(){session.end();}
+    }
+    @Test public void lookupServedUnderTheWireEnumNameReachesTheModel()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.toolKind="VOICE_CALL_HARNESS_TOOL_OUTCOME_KIND_SERVED";f.ready();f.receive("response.created");
+            f.tool("lookup-1","search_conversations");
+            JSONObject item=f.frame("conversation.item.create").getJSONObject("item");
+            assertEquals("function_call_output",item.getString("type"));assertTrue(item.getString("output"),item.getString("output").contains("found it"));
+        }
     }
     static long nextGraceMs;
     @Test public void mutingMidSentenceSendsSilenceSoTheTurnEnds()throws Exception {
