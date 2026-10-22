@@ -57,6 +57,8 @@ public final class MainActivity extends Activity {
     private String screen="welcome",botName="Main Bot",caption="",speaker="",safeError="";
     private boolean previewMuted,previewSaving;private long previewElapsedMs=42000;
     private BotAccount account;
+    // Pinned Bots: one write at a time, and Home always shows the list the account stored.
+    private String pinSavingId="",pinErrorId="",justPinnedId="",pinFadeId="";private boolean pinSavingTarget,pinGridExpanded;private int pinRequest,pinsFullAt=-1,homeScrollY;private long lastPinsReadElapsed;private JSONObject actionsBot;
     private FrameLayout root;
     private LinearLayout body;
     private BotAvatarView orb;
@@ -110,6 +112,7 @@ public final class MainActivity extends Activity {
         if(screen.equals("signout_confirm")){screen="settings";render();return;}
         if(screen.equals("settings")){leaveSettings();return;}
         if(screen.equals("history_detail")){screen="history";render();return;}
+        if(screen.equals("bot_actions")){closeBotActions();return;}
         if(preview){previewEpoch++;simulated=false;if(isCall()){screen="ready";render();}else if(screen.equals("ready")){screen="bots";render();}else if(!screen.equals("welcome")){screen="ready";render();}else finish();return;}
         if(screen.equals("qr")){cancelLogin();return;}
         if(VoiceService.snapshot().active){moveTaskToBack(true);return;}
@@ -121,6 +124,7 @@ public final class MainActivity extends Activity {
         if(screen.equals("speaking")){speaker=botName;caption="Your next meeting is at ten. You have time for a short walk.";}
         if(screen.equals("thinking")){speaker="You";caption="What is next on my calendar?";}
         if(screen.equals("home_primary")){try{bots=new JSONArray().put(new JSONObject().put("id","preview-primary").put("name","Main Bot").put("lastMessagePreview","Ready when you are"));botPreferences=new JSONObject().put("mainAgentId","preview-primary");}catch(Exception ignored){}screen="bots";}else if(screen.equals("bots")){botPreferences=new JSONObject();}
+        if(java.util.Set.of("home_pinned","home_overflow","bot_actions","pin_error","pins_full","bot_pinned").contains(screen))previewPins(screen);
         if(screen.equals("ready_long")){clearHistory();try{historyEntries.put(new JSONObject().put("id","long-preview").put("role","assistant").put("text","**Research Bot** has an update.\nThe first task is ready for review.\nThe second task is waiting for input.\nThe third task has a draft.\nThe fourth task is ready tomorrow.\nThe fifth task has a short note.\nThe sixth task is still working.\nThe seventh task is waiting.\nThe eighth task is complete.\nThe ninth task needs review.\nThe tenth task has a summary.\nThe final task is done."));}catch(Exception ignored){}screen="ready";}
         if(screen.startsWith("history"))previewHistory(screen);
         render();
@@ -149,6 +153,7 @@ public final class MainActivity extends Activity {
             case "welcome":welcome();break;
             case "qr":qr();break;
             case "bots":botList();break;
+            case "bot_actions":if(actionsBot==null){screen="bots";botList();}else botActions();break;
             case "ready":ready();break;
             case "recent":recent();break;
             case "history":history();break;
@@ -192,7 +197,7 @@ public final class MainActivity extends Activity {
     private java.util.List<JSONObject> orderedBots(){java.util.ArrayList<JSONObject> result=new java.util.ArrayList<>();java.util.HashSet<String> added=new java.util.HashSet<>();JSONArray pins=botPreferences.optJSONArray("pinnedAgentIds");if(pins!=null)for(int p=0;p<pins.length();p++)for(int i=0;i<bots.length();i++){JSONObject b=bots.optJSONObject(i);if(b!=null&&pins.optString(p).equals(b.optString("id"))&&added.add(b.optString("id")))result.add(b);}for(int i=0;i<bots.length();i++){JSONObject b=bots.optJSONObject(i);if(b!=null&&added.add(b.optString("id")))result.add(b);}return result;}
     private JSONObject primaryBot(){String id=botPreferences.optString("mainAgentId","");if(id.isEmpty())return null;for(int i=0;i<bots.length();i++){JSONObject b=bots.optJSONObject(i);if(b!=null&&id.equals(b.optString("id")))return b;}return null;}
     private boolean compactHero(){return side<200;}
-    private JSONObject previewBot(String name,String message,boolean unread){try{return new JSONObject().put("name",name).put("lastMessagePreview",message).put("hasUnread",unread).put("isRunning",!unread);}catch(Exception impossible){return new JSONObject();}}
+    private JSONObject previewBot(String name,String message,boolean unread){try{return new JSONObject().put("id","preview-"+name.toLowerCase(java.util.Locale.ROOT).replace(' ','-')).put("name",name).put("lastMessagePreview",message).put("hasUnread",unread).put("isRunning",!unread);}catch(Exception impossible){return new JSONObject();}}
     private void styleTalk(Button talk){styleTalk(talk,"Talk");}
     private void styleTalk(Button talk,String label){talk.setText(label);talk.setTextSize(label.equals("Talk")?15:12);talk.setCompoundDrawablesWithIntrinsicBounds(new VoiceGlyph(),null,null,null);talk.setCompoundDrawablePadding(dp(6));talk.setSingleLine(true);talk.setEllipsize(android.text.TextUtils.TruncateAt.END);int inset=Math.max(dp(8),(dp(side*.62f)-dp(26)-dp(8)-(int)Math.ceil(talk.getPaint().measureText(label)))/2);talk.setPadding(inset,dp(6),inset,dp(6));}
     private void styleHomeTalk(Button talk,String name){
@@ -213,19 +218,30 @@ public final class MainActivity extends Activity {
     }
     private void primaryAction(JSONObject bot,boolean start){if(preview){choosePreview(bot.optString("name"));if(start)talk();}else chooseBot(bot.optString("id"),start);}
     private void botList(){
-        JSONObject primary=primaryBot();
+        JSONObject primary=primaryBot();java.util.List<JSONObject> pinned=pinnedBots(primary);
+        if(!pinned.isEmpty())markPinHintDone();
         if(primary!=null){FrameLayout.LayoutParams scroll=(FrameLayout.LayoutParams)currentScroll.getLayoutParams();scroll.topMargin=0;scroll.bottomMargin=dp(67);currentScroll.setLayoutParams(scroll);body.setPadding(0,0,0,dp(24));FrameLayout hero=new FrameLayout(this);body.addView(hero,new LinearLayout.LayoutParams(-1,dp(side-67)));
-            BotAvatarView face=new BotAvatarView(this);applyAvatar(face,primary.optString("name"),primary);face.state("ready",WHITE,0);face.running(visible);avatars.add(face);face.setContentDescription(primary.optString("name")+", Primary Bot. Open chat");face.setOnClickListener(v->{navigation++;primaryAction(primary,false);});int faceSize=compactHero()?48:64;FrameLayout.LayoutParams fp=new FrameLayout.LayoutParams(dp(faceSize),dp(faceSize),Gravity.TOP|Gravity.CENTER_HORIZONTAL);fp.topMargin=dp(compactHero()?30:side*.34f-32);hero.addView(face,fp);
+            // With no pins yet, the hero moves up to make room for one hint line.
+            boolean hint=pinned.isEmpty()&&!pinHintDone()&&(preview||botsCached);int lift=hint?18:0;
+            BotAvatarView face=new BotAvatarView(this);applyAvatar(face,primary.optString("name"),primary);face.state("ready",WHITE,0);face.running(visible);avatars.add(face);face.setContentDescription(primary.optString("name")+", Primary Bot. Open chat");face.setOnClickListener(v->{navigation++;primaryAction(primary,false);});int faceSize=compactHero()?48:64;FrameLayout.LayoutParams fp=new FrameLayout.LayoutParams(dp(faceSize),dp(faceSize),Gravity.TOP|Gravity.CENTER_HORIZONTAL);fp.topMargin=dp((compactHero()?30:side*.34f-32)-lift);hero.addView(face,fp);
             TextView star=text("★",16,WHITE);GradientDrawable badge=shape(0xffff9800,12);badge.setStroke(dp(2),Color.BLACK);star.setBackground(badge);star.setContentDescription("Primary Bot");FrameLayout.LayoutParams st=new FrameLayout.LayoutParams(dp(23),dp(23),Gravity.TOP|Gravity.CENTER_HORIZONTAL);st.leftMargin=dp(22);st.topMargin=fp.topMargin+dp(faceSize-21);hero.addView(star,st);
-            TextView name=text(primary.optString("name"),getResources().getConfiguration().fontScale>1.2f?12:16,WHITE);name.setSingleLine(true);name.setEllipsize(android.text.TextUtils.TruncateAt.END);FrameLayout.LayoutParams np=new FrameLayout.LayoutParams(dp(side*.76f),dp(22),Gravity.TOP|Gravity.CENTER_HORIZONTAL);np.topMargin=dp(compactHero()?80:side*.535f-11);hero.addView(name,np);TextView sub=text(MessageText.plain(primary.optString("lastMessagePreview","Ready to talk")),compactHero()?11:12,SECONDARY);sub.setTag("bot_excerpt");sub.setSingleLine(true);sub.setEllipsize(android.text.TextUtils.TruncateAt.END);FrameLayout.LayoutParams xp=new FrameLayout.LayoutParams(dp(side*.76f),dp(20),Gravity.TOP|Gravity.CENTER_HORIZONTAL);xp.topMargin=dp(Math.min(side-88,side*.615f-10));hero.addView(sub,xp);
+            TextView name=text(primary.optString("name"),getResources().getConfiguration().fontScale>1.2f?12:16,WHITE);name.setSingleLine(true);name.setEllipsize(android.text.TextUtils.TruncateAt.END);FrameLayout.LayoutParams np=new FrameLayout.LayoutParams(dp(side*.76f),dp(22),Gravity.TOP|Gravity.CENTER_HORIZONTAL);np.topMargin=dp((compactHero()?80:side*.535f-11)-lift);hero.addView(name,np);TextView sub=text(MessageText.plain(primary.optString("lastMessagePreview","Ready to talk")),compactHero()?11:12,SECONDARY);sub.setTag("bot_excerpt");sub.setSingleLine(true);sub.setEllipsize(android.text.TextUtils.TruncateAt.END);FrameLayout.LayoutParams xp=new FrameLayout.LayoutParams(dp(side*.76f),dp(20),Gravity.TOP|Gravity.CENTER_HORIZONTAL);xp.topMargin=dp(Math.min(side-88,side*.615f-10)-lift);hero.addView(sub,xp);
+            if(hint){TextView line=text("Hold a Bot to pin it",12,SECONDARY);line.setCompoundDrawablesRelativeWithIntrinsicBounds(new PinGlyph(SECONDARY,12,false,false),null,null,null);line.setCompoundDrawablePadding(dp(4));FrameLayout.LayoutParams hp=new FrameLayout.LayoutParams(-2,dp(18),Gravity.TOP|Gravity.CENTER_HORIZONTAL);hp.topMargin=xp.topMargin+dp(22);hero.addView(line,hp);}
             Button talk=button("Talk to "+primary.optString("name","your Primary Bot"),()->primaryAction(primary,true));styleHomeTalk(talk,primary.optString("name","your Primary Bot"));talk.setTag("home_primary_talk");talk.setTextColor(Color.BLACK);talk.setBackground(shape(WHITE,28));talk.setEnabled(!historyStaging()&&!botSelectionPending);FrameLayout.LayoutParams ep=new FrameLayout.LayoutParams(dp(side*.62f),dp(54),Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);ep.bottomMargin=dp(12);root.addView(talk,ep);
-            LinearLayout list=new LinearLayout(this);list.setOrientation(LinearLayout.VERTICAL);list.setPadding(dp(side*.12f),dp(10),dp(side*.12f),0);body.addView(list,new LinearLayout.LayoutParams(-1,-2));body=list;label("Bots",17,WHITE);
-        }else{TextView title=label("Bots",17,WHITE);title.setTypeface(Typeface.create(Typeface.DEFAULT,600,false));gap(8);}
+            View fade=new View(this);fade.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,new int[]{0x00000000,0xff000000}));FrameLayout.LayoutParams fl=new FrameLayout.LayoutParams(-1,dp(18),Gravity.BOTTOM);fl.bottomMargin=dp(67);root.addView(fade,fl);
+            // The fade appears once the list scrolls, so it never dims the hero at rest.
+            final ScrollView home=currentScroll;fade.setAlpha(0);home.getViewTreeObserver().addOnScrollChangedListener(()->fade.setAlpha(Math.min(1f,home.getScrollY()/(float)dp(24))));
+            LinearLayout list=new LinearLayout(this);list.setOrientation(LinearLayout.VERTICAL);list.setPadding(dp(side*.12f),dp(10),dp(side*.12f),0);body.addView(list,new LinearLayout.LayoutParams(-1,-2));body=list;
+            if(!pinned.isEmpty())pinnedGrid(pinned);
+            // Every other Bot pinned: no empty "Bots" header.
+            if(pinned.isEmpty()||bots.length()-1>pinned.size())label("Bots",17,WHITE);
+        }else{TextView title=label("Bots",17,WHITE);title.setTypeface(Typeface.create(Typeface.DEFAULT,600,false));gap(8);if(!pinned.isEmpty())pinnedGrid(pinned);}
         addBotScrollIndicator();
-        if(preview){if(primary==null)botChip("Main Bot",BLUE,()->choosePreview("Main Bot"),previewBot("Main Bot","Latest reply from your Bot",true));botChip("Research Bot",BLUE,()->choosePreview("Research Bot"),previewBot("Research Bot","Your task update is ready",false));action("Settings",()->openSettings());return;}
+        if(preview&&bots.length()<2){if(primary==null)botChip("Main Bot",BLUE,()->choosePreview("Main Bot"),previewBot("Main Bot","Latest reply from your Bot",true));botChip("Research Bot",BLUE,()->choosePreview("Research Bot"),previewBot("Research Bot","Your task update is ready",false));action("Settings",()->openSettings());return;}
         if(botsLoading&&!botsCached)label("Loading Bots…",12,SECONDARY);if(botSelectionPending)label("Switching Bot…",12,SECONDARY);
         if(bots.length()==0&&!botsCached&&!selectedMetadata.optString("id","").isEmpty())botChip(botName,BLUE,()->chooseBot(selectedMetadata.optString("id")),selectedMetadata);
-        else for(JSONObject bot:orderedBots()){if(primary!=null&&primary.optString("id").equals(bot.optString("id")))continue;String name=bot.optString("name","Unnamed Bot"),id=bot.optString("id","");botChip(name,BLUE,()->chooseBot(id),bot);}
+        else{java.util.HashSet<String> shown=new java.util.HashSet<>();for(JSONObject bot:pinned)shown.add(bot.optString("id"));
+            for(JSONObject bot:orderedBots()){if(primary!=null&&primary.optString("id").equals(bot.optString("id")))continue;if(shown.contains(bot.optString("id")))continue;String name=bot.optString("name","Unnamed Bot");botChip(name,BLUE,()->primaryAction(bot,false),bot);}}
         if(!botListError.isEmpty())label(botListError,12,SECONDARY);if(botsCached||!botsLoading){if(bots.length()==0&&botListError.isEmpty())label("No Bots found",14,SECONDARY);action(botsCached?"Refresh":"Try again",()->loadBots());}action("Settings",()->openSettings());
     }
     private void botChip(String name,int accent,Runnable action){botChip(name,accent,action,null);}
@@ -236,7 +252,173 @@ public final class MainActivity extends Activity {
         BotAvatarView face=new BotAvatarView(this);applyAvatar(face,name,metadata);face.state("ready",BLUE,0);face.running(visible);avatars.add(face);row.addView(face,new LinearLayout.LayoutParams(dp(30),dp(30)));
         TextView nameLabel=text(name,15,WHITE);nameLabel.setTag("bot_name");nameLabel.setSingleLine(true);nameLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);LinearLayout names=new LinearLayout(this);names.setOrientation(LinearLayout.VERTICAL);nameLabel.setGravity(Gravity.START);names.addView(nameLabel,new LinearLayout.LayoutParams(-1,-2));String previewText=metadata==null?"":metadata.optString("lastMessagePreview","");if(!previewText.isEmpty()){TextView sub=text(MessageText.plain(previewText),12,SECONDARY);sub.setTag("bot_excerpt");sub.setSingleLine(true);sub.setEllipsize(android.text.TextUtils.TruncateAt.END);sub.setGravity(Gravity.START);names.addView(sub,new LinearLayout.LayoutParams(-1,-2));}row.addView(names,new LinearLayout.LayoutParams(0,-2,1));if(metadata!=null&&(metadata.optBoolean("hasUnread")||metadata.optBoolean("isRunning")||metadata.optBoolean("isRunningTurn")||metadata.optBoolean("isComposingMessage"))){TextView dot=text("•",16,metadata.optBoolean("hasUnread")?BLUE:0xffff9800);dot.setContentDescription(metadata.optBoolean("hasUnread")?"Unread":"Working");row.addView(dot,new LinearLayout.LayoutParams(dp(12),-2));}
         if(selected){TextView check=text("✓",16,BLUE);check.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);row.addView(check,new LinearLayout.LayoutParams(dp(20),-2));}
+        if(metadata!=null&&!metadata.optString("id","").isEmpty()&&!isPrimaryId(metadata.optString("id")))row.setOnLongClickListener(v->{openBotActions(metadata);return true;});
         LinearLayout.LayoutParams rp=new LinearLayout.LayoutParams(-1,dp(getResources().getConfiguration().fontScale>1.2f?60:50));rp.topMargin=dp(4);body.addView(row,rp);
+    }
+    private JSONArray pinIds(){JSONArray pins=botPreferences.optJSONArray("pinnedAgentIds");return pins==null?new JSONArray():pins;}
+    private boolean isPinned(String id){JSONArray pins=pinIds();for(int i=0;i<pins.length();i++)if(id.equals(pins.optString(i)))return true;return false;}
+    private boolean isPrimaryId(String id){return !id.isEmpty()&&id.equals(botPreferences.optString("mainAgentId",""));}
+    private boolean pinsFull(){return pinsFullAt>=0&&pinIds().length()>=pinsFullAt;}
+    /** Pins in account order that are in the roster, without the Primary. Ids not loaded are skipped, never removed. */
+    private java.util.List<JSONObject> pinnedBots(JSONObject primary){
+        java.util.ArrayList<JSONObject> result=new java.util.ArrayList<>();java.util.HashSet<String> added=new java.util.HashSet<>();JSONArray pins=pinIds();
+        for(int p=0;p<pins.length();p++)for(int i=0;i<bots.length();i++){JSONObject b=bots.optJSONObject(i);String id=b==null?"":b.optString("id");
+            if(!id.isEmpty()&&id.equals(pins.optString(p))&&(primary==null||!id.equals(primary.optString("id")))&&added.add(id))result.add(b);}
+        return result;
+    }
+    private boolean pinHintDone(){if(preview)return false;try{return getSharedPreferences("grokwear_ui",MODE_PRIVATE).getBoolean("pin_hint_done",false);}catch(Exception unavailable){return false;}}
+    private void markPinHintDone(){if(preview||pinHintDone())return;try{getSharedPreferences("grokwear_ui",MODE_PRIVATE).edit().putBoolean("pin_hint_done",true).apply();}catch(Exception unavailable){}}
+    /** Two columns of 74 × 70 dp tiles. Nine or more pins fold to seven tiles and a "+N" tile. */
+    private void pinnedGrid(java.util.List<JSONObject> pins){
+        TextView heading=label("Pinned",12,SECONDARY);heading.setTypeface(Typeface.create(Typeface.DEFAULT,500,false));heading.setAccessibilityHeading(true);heading.getLayoutParams().height=dp(24);
+        boolean folded=pins.size()>8&&!pinGridExpanded;int shown=folded?7:pins.size(),cells=shown+(folded?1:0);LinearLayout row=null;
+        for(int i=0;i<cells;i++){
+            if(i%2==0){row=new LinearLayout(this);row.setGravity(Gravity.CENTER_HORIZONTAL);LinearLayout.LayoutParams rp=new LinearLayout.LayoutParams(-1,dp(70));if(i>0)rp.topMargin=dp(6);body.addView(row,rp);}
+            LinearLayout.LayoutParams tp=new LinearLayout.LayoutParams(dp(74),dp(70));if(i%2==1)tp.leftMargin=dp(6);row.addView(i<shown?pinTile(pins.get(i)):moreTile(pins.size()-7),tp);
+        }
+        gap(10);
+    }
+    private View pinTile(JSONObject bot){
+        String id=bot.optString("id",""),name=bot.optString("name","Unnamed Bot");
+        FrameLayout tile=new FrameLayout(this);tile.setClickable(true);tile.setFocusable(true);tile.setEnabled(!botSelectionPending);
+        boolean selected=preview?name.equals(botName):!selectedMetadata.optString("id","").isEmpty()&&id.equals(selectedMetadata.optString("id"));
+        if(selected){View ring=new View(this);GradientDrawable halo=new GradientDrawable();halo.setShape(GradientDrawable.OVAL);halo.setStroke(Math.max(1,Math.round(1.5f*getResources().getDisplayMetrics().density)),WHITE);ring.setBackground(halo);FrameLayout.LayoutParams rl=new FrameLayout.LayoutParams(dp(52),dp(52),Gravity.TOP|Gravity.CENTER_HORIZONTAL);rl.topMargin=dp(3);tile.addView(ring,rl);}
+        BotAvatarView face=new BotAvatarView(this);applyAvatar(face,name,bot);face.state("ready",BLUE,0);face.running(visible);avatars.add(face);face.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        // The avatar view draws its face at 76% of its box: a 58 dp box shows the 44 dp face.
+        tile.addView(face,new FrameLayout.LayoutParams(dp(58),dp(58),Gravity.TOP|Gravity.CENTER_HORIZONTAL));
+        boolean unread=bot.optBoolean("hasUnread"),working=bot.optBoolean("isRunning")||bot.optBoolean("isRunningTurn")||bot.optBoolean("isComposingMessage");
+        if(unread||working){View dot=new View(this);GradientDrawable mark=new GradientDrawable();mark.setShape(GradientDrawable.OVAL);mark.setColor(unread?BLUE:0xffff9800);mark.setStroke(dp(2),Color.BLACK);dot.setBackground(mark);FrameLayout.LayoutParams at=new FrameLayout.LayoutParams(dp(12),dp(12),Gravity.TOP|Gravity.LEFT);at.leftMargin=dp(47);at.topMargin=dp(6);tile.addView(dot,at);}
+        TextView label=text(name,12,WHITE);label.setSingleLine(true);label.setEllipsize(android.text.TextUtils.TruncateAt.END);FrameLayout.LayoutParams lp=new FrameLayout.LayoutParams(-1,dp(16),Gravity.TOP);lp.topMargin=dp(54);tile.addView(label,lp);
+        tile.setContentDescription(name+", pinned"+(unread?", unread":working?", working":"")+(selected?", selected":""));
+        tile.setOnClickListener(v->{navigation++;primaryAction(bot,false);});tile.setOnLongClickListener(v->{openBotActions(bot);return true;});
+        if(id.equals(justPinnedId)){justPinnedId="";tile.setScaleX(.6f);tile.setScaleY(.6f);tile.setAlpha(0);tile.animate().scaleX(1).scaleY(1).alpha(1).setDuration(260).setInterpolator(new android.view.animation.OvershootInterpolator()).start();}
+        return tile;
+    }
+    private View moreTile(int hidden){
+        FrameLayout tile=new FrameLayout(this);tile.setClickable(true);tile.setFocusable(true);
+        TextView disc=text("+"+hidden,16,WHITE);disc.setTypeface(Typeface.create(Typeface.DEFAULT,500,false));GradientDrawable round=new GradientDrawable();round.setShape(GradientDrawable.OVAL);round.setColor(GLASS);disc.setBackground(round);disc.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        FrameLayout.LayoutParams fp=new FrameLayout.LayoutParams(dp(44),dp(44),Gravity.TOP|Gravity.CENTER_HORIZONTAL);fp.topMargin=dp(4);tile.addView(disc,fp);
+        TextView more=text("More",12,SECONDARY);more.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);FrameLayout.LayoutParams lp=new FrameLayout.LayoutParams(-1,dp(16),Gravity.TOP);lp.topMargin=dp(54);tile.addView(more,lp);
+        tile.setContentDescription("Show "+hidden+" more pinned Bots");tile.setOnClickListener(v->{pinGridExpanded=true;renderBotListPreservingScroll();});
+        return tile;
+    }
+    private void openBotActions(JSONObject bot){
+        if(botSelectionPending||isPrimaryId(bot.optString("id")))return;
+        root.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
+        homeScrollY=currentScroll==null?0:currentScroll.getScrollY();actionsBot=bot;navigation++;screen="bot_actions";render();
+    }
+    private void closeBotActions(){
+        actionsBot=null;screen="bots";render();final ScrollView restored=currentScroll;final int y=homeScrollY;
+        restored.post(()->{if(currentScroll==restored&&screen.equals("bots"))restored.scrollTo(0,y);});
+    }
+    /** Long-press sheet: Pin or Unpin, Talk, Open chat. */
+    private void botActions(){
+        JSONObject bot=actionsBot;String name=bot.optString("name","Unnamed Bot");
+        BotAvatarView face=new BotAvatarView(this);applyAvatar(face,name,bot);face.state("ready",BLUE,0);face.running(visible);avatars.add(face);face.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);body.addView(face,new LinearLayout.LayoutParams(dp(48),dp(48)));gap(2);
+        TextView title=label(name,15,WHITE);title.setTypeface(Typeface.create(Typeface.DEFAULT,500,false));title.setSingleLine(true);title.setEllipsize(android.text.TextUtils.TruncateAt.END);gap(2);
+        View[] pin=pinViews(bot,true);if(pin[0]!=null)body.addView(pin[0],new LinearLayout.LayoutParams(-1,-2));
+        LinearLayout.LayoutParams pp=new LinearLayout.LayoutParams(-1,dp(48));pp.topMargin=dp(6);body.addView(pin[1],pp);
+        Button talk=action("Talk",()->{actionsBot=null;screen="bots";primaryAction(bot,true);});styleTalk(talk);talk.setTextColor(Color.BLACK);talk.setBackground(shape(WHITE,24));talk.setContentDescription("Talk to "+name);
+        action("Open chat",()->{actionsBot=null;screen="bots";primaryAction(bot,false);});
+    }
+    /** The pin control and the line above it: an error, pins full, offline, or "Pinned" on the Bot page. */
+    private View[] pinViews(JSONObject bot,boolean sheet){
+        String id=bot.optString("id",""),name=bot.optString("name","Unnamed Bot");boolean pinned=isPinned(id),saving=!pinSavingId.isEmpty()&&pinSavingId.equals(id);
+        boolean online=preview||VoiceService.online(this),full=!pinned&&!saving&&pinsFull();
+        TextView line=null;
+        if(!saving&&id.equals(pinErrorId)){line=text("Couldn’t save. Try again",12,0xffff7a72);line.setCompoundDrawablesRelativeWithIntrinsicBounds(new AlertGlyph(),null,null,null);}
+        else if(full){android.text.SpannableString words=new android.text.SpannableString("Pins are full. Unpin one first.");words.setSpan(new android.text.style.ForegroundColorSpan(0xffffb340),0,14,0);words.setSpan(new android.text.style.ForegroundColorSpan(SECONDARY),14,words.length(),0);line=text("",12,SECONDARY);line.setText(words);line.setMaxLines(2);}
+        else if(!online&&!saving)line=text("Connect to pin",12,SECONDARY);
+        else if(pinned&&!sheet){line=text("Pinned",12,SECONDARY);line.setCompoundDrawablesRelativeWithIntrinsicBounds(new PinGlyph(SECONDARY,11,true,false),null,null,null);if(id.equals(pinFadeId)){pinFadeId="";line.setAlpha(0);line.animate().alpha(1).setDuration(200).start();}}
+        if(line!=null)line.setCompoundDrawablePadding(dp(4));
+        LinearLayout control=new LinearLayout(this);control.setGravity(Gravity.CENTER);control.setPadding(dp(14),0,dp(14),0);control.setMinimumWidth(dp(90));control.setClickable(true);control.setFocusable(true);
+        control.setBackground(new android.graphics.drawable.InsetDrawable(shape(GLASS,22),0,dp(2),0,dp(2)));
+        if(saving){ProgressBar spinner=new ProgressBar(this);spinner.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(WHITE));spinner.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);control.addView(spinner,new LinearLayout.LayoutParams(dp(14),dp(14)));}
+        else{ImageView icon=new ImageView(this);icon.setImageDrawable(new PinGlyph(WHITE,16,false,pinned));icon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);control.addView(icon,new LinearLayout.LayoutParams(dp(16),dp(16)));}
+        TextView words=text(saving?(pinSavingTarget?"Pinning…":"Unpinning…"):pinned?"Unpin":"Pin",14,WHITE);words.setTypeface(Typeface.create(Typeface.DEFAULT,500,false));words.setSingleLine(true);LinearLayout.LayoutParams wp=new LinearLayout.LayoutParams(-2,-2);wp.leftMargin=dp(6);control.addView(words,wp);
+        boolean usable=!saving&&online&&!full&&!botSelectionPending;control.setEnabled(usable);if(!usable&&!saving)control.setAlpha(.4f);
+        control.setContentDescription(saving?(pinSavingTarget?"Pinning ":"Unpinning ")+name:(pinned?"Unpin ":"Pin ")+name);
+        control.setOnClickListener(v->{navigation++;setPinned(bot,!pinned);});
+        return new View[]{line,control};
+    }
+    private void setPinned(JSONObject bot,boolean pin){
+        String id=bot.optString("id","");if(id.isEmpty()||!pinSavingId.isEmpty()||isPrimaryId(id))return;
+        pinErrorId="";pinSavingId=id;pinSavingTarget=pin;rerenderPins();
+        final int request=++pinRequest;
+        // The account may still store a late write; Home then shows whatever it stored.
+        main.postDelayed(()->{if(request==pinRequest&&id.equals(pinSavingId))pinFailed(request,id,false);},10000);
+        if(preview){int mine=previewEpoch;main.postDelayed(()->{if(mine!=previewEpoch)return;
+            try{JSONArray ids=GrokCore.withPin(new JSONObject().put("settings",new JSONObject().put("pinnedAgents",new JSONObject().put("agentIds",pinIds()))),id,pin);pinSaved(request,id,pin,new JSONObject(botPreferences.toString()).put("pinnedAgentIds",ids));}
+            catch(Exception impossible){pinFailed(request,id,false);}},700);return;}
+        final String expected=botsAccountBinding;
+        preferencesWorker.execute(()->{
+            try{JSONObject prefs=account.setPinned(id,pin);main.post(()->{if(expected.equals(botsAccountBinding))pinSaved(request,id,pin,prefs);});}
+            catch(GrokCore.Failure refused){boolean full=BotAccount.PINS_FULL.equals(refused.code);main.post(()->pinFailed(request,id,full));}
+            catch(Exception failed){main.post(()->pinFailed(request,id,false));}
+        });
+    }
+    private void pinSaved(int request,String id,boolean pin,JSONObject prefs){
+        botPreferences=prefs;if(pinsFullAt>=0&&pinIds().length()<pinsFullAt)pinsFullAt=-1;
+        if(request!=pinRequest){rerenderPins();return;}
+        pinSavingId="";pinErrorId="";if(pin){markPinHintDone();justPinnedId=id;pinFadeId=id;}
+        if(root!=null)root.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM);
+        if(visible&&screen.equals("bot_actions")&&actionsBot!=null&&id.equals(actionsBot.optString("id"))){closeBotActions();return;}
+        rerenderPins();
+    }
+    private void pinFailed(int request,String id,boolean full){
+        if(request!=pinRequest||!id.equals(pinSavingId))return;
+        pinSavingId="";if(full)pinsFullAt=pinIds().length();else pinErrorId=id;
+        if(root!=null)root.performHapticFeedback(android.view.HapticFeedbackConstants.REJECT);
+        rerenderPins();refreshPins(true);
+    }
+    private void rerenderPins(){if(visible&&java.util.Set.of("bots","ready","bot_actions").contains(screen)&&(preview||!VoiceService.snapshot().active))render();}
+    /** Pins can change on the phone or desktop: re-read them at most every 30 seconds, or now after a failed write. */
+    private void refreshPins(boolean now){
+        if(preview||botsAccountBinding.isEmpty())return;long elapsed=android.os.SystemClock.elapsedRealtime();
+        if(!now&&lastPinsReadElapsed>0&&elapsed-lastPinsReadElapsed<30000)return;lastPinsReadElapsed=elapsed;
+        final int request=botRequest;final String expected=botsAccountBinding;
+        preferencesWorker.execute(()->{try{
+            if(!expected.equals(accountIdentity(account.authState())))return;
+            JSONObject prefs=account.botPreferences();main.post(()->applyBotPreferences(request,expected,prefs));
+        }catch(Exception optionalUnavailable){}});
+    }
+    /** The Bot page's own Bot for the pin control; null for the Primary Bot or an unknown Bot. */
+    private JSONObject currentPinBot(){
+        if(preview){for(int i=0;i<bots.length();i++){JSONObject b=bots.optJSONObject(i);if(b!=null&&botName.equals(b.optString("name")))return isPrimaryId(b.optString("id"))?null:b;}return null;}
+        String id=selectedMetadata.optString("id","");return id.isEmpty()||isPrimaryId(id)?null:selectedMetadata;
+    }
+    private void previewPins(String value){
+        try{bots=new JSONArray().put(new JSONObject().put("id","preview-primary").put("name","Main Bot").put("lastMessagePreview","Ready when you are"));
+            String[] names={"Research Bot","Travel Bot","Inbox Bot","Release Bot","Notes Bot","Fitness Bot","Budget Bot","Reading Bot","Garden Bot","Music Bot","Recipe Bot"};
+            for(int i=0;i<names.length;i++)bots.put(previewBot(names[i],"Latest update from "+names[i],i==1).put("isRunning",i==2));
+            JSONArray pins=new JSONArray().put("preview-primary");int count=value.equals("home_overflow")?11:value.equals("home_pinned")||value.equals("bot_pinned")?4:0;
+            for(int i=0;i<count;i++)pins.put(bots.getJSONObject(i+1).getString("id"));
+            botPreferences=new JSONObject().put("mainAgentId","preview-primary").put("pinnedAgentIds",pins);
+            pinErrorId="";pinSavingId="";pinsFullAt=-1;pinGridExpanded=false;actionsBot=null;
+            if(value.equals("home_pinned")){botName="Travel Bot";screen="bots";}
+            else if(value.equals("home_overflow"))screen="bots";
+            else if(value.equals("bot_pinned")){botName="Research Bot";screen="ready";}
+            else{actionsBot=bots.getJSONObject(1);screen="bot_actions";if(value.equals("pin_error"))pinErrorId=actionsBot.getString("id");if(value.equals("pins_full"))pinsFullAt=0;}
+        }catch(Exception ignored){}
+    }
+    /** Material Symbols "keep" and "keep_off" shapes, drawn on a 24-unit grid. */
+    private final class PinGlyph extends android.graphics.drawable.Drawable {
+        private final android.graphics.Paint p=new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);private final int color,size;private final boolean filled,off;
+        PinGlyph(int color,int size,boolean filled,boolean off){this.color=color;this.size=size;this.filled=filled;this.off=off;}
+        @Override public int getIntrinsicWidth(){return dp(size);}@Override public int getIntrinsicHeight(){return dp(size);}
+        @Override public void draw(android.graphics.Canvas canvas){android.graphics.Rect b=getBounds();canvas.save();canvas.translate(b.left,b.top);canvas.scale(b.width()/24f,b.height()/24f);
+            p.setColor(color);p.setStrokeWidth(2);p.setStrokeCap(android.graphics.Paint.Cap.ROUND);p.setStrokeJoin(android.graphics.Paint.Join.ROUND);
+            android.graphics.Path head=new android.graphics.Path();head.moveTo(9,3);head.lineTo(15,3);head.lineTo(14,9);head.lineTo(17,12);head.lineTo(7,12);head.lineTo(10,9);head.close();
+            p.setStyle(filled?android.graphics.Paint.Style.FILL_AND_STROKE:android.graphics.Paint.Style.STROKE);canvas.drawPath(head,p);
+            p.setStyle(android.graphics.Paint.Style.STROKE);canvas.drawLine(12,12,12,21,p);if(off)canvas.drawLine(4,4,20,20,p);canvas.restore();}
+        @Override public void setAlpha(int alpha){p.setAlpha(alpha);}@Override public void setColorFilter(android.graphics.ColorFilter filter){p.setColorFilter(filter);}@Override public int getOpacity(){return android.graphics.PixelFormat.TRANSLUCENT;}
+    }
+    private final class AlertGlyph extends android.graphics.drawable.Drawable {
+        private final android.graphics.Paint p=new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        @Override public int getIntrinsicWidth(){return dp(12);}@Override public int getIntrinsicHeight(){return dp(12);}
+        @Override public void draw(android.graphics.Canvas canvas){android.graphics.Rect b=getBounds();canvas.save();canvas.translate(b.left,b.top);canvas.scale(b.width()/24f,b.height()/24f);
+            p.setColor(0xffff7a72);p.setStyle(android.graphics.Paint.Style.STROKE);p.setStrokeWidth(2.4f);p.setStrokeCap(android.graphics.Paint.Cap.ROUND);canvas.drawCircle(12,12,10,p);canvas.drawLine(12,7,12,13,p);canvas.drawPoint(12,17,p);canvas.restore();}
+        @Override public void setAlpha(int alpha){p.setAlpha(alpha);}@Override public void setColorFilter(android.graphics.ColorFilter filter){p.setColorFilter(filter);}@Override public int getOpacity(){return android.graphics.PixelFormat.TRANSLUCENT;}
     }
     private void applyAvatar(BotAvatarView face,String name,JSONObject metadata){
         face.setPreview(preview);face.setBotName(name);
@@ -254,12 +436,18 @@ public final class MainActivity extends Activity {
     }
     private void ready(){
         FrameLayout.LayoutParams sp=(FrameLayout.LayoutParams)currentScroll.getLayoutParams();sp.topMargin=0;sp.bottomMargin=dp(67);currentScroll.setLayoutParams(sp);body.setPadding(0,0,0,dp(28));
-        FrameLayout hero=new FrameLayout(this);body.addView(hero,new LinearLayout.LayoutParams(-1,dp(side-67)));
-        Button back=button("Bots",()->openBotPicker());back.setText("‹ Bots");back.setTextSize(12);back.setPadding(0,0,0,0);back.setBackground(shape(Color.TRANSPARENT,0));back.setElevation(0);back.setStateListAnimator(null);FrameLayout.LayoutParams navp=new FrameLayout.LayoutParams(dp(68),dp(48),Gravity.TOP|Gravity.CENTER_HORIZONTAL);navp.topMargin=dp(3);hero.addView(back,navp);
-        BotAvatarView face=new BotAvatarView(this);applyAvatar(face,botName,selectedMetadata);face.state(screen.equals("done")?"done":"ready",accent(),0);face.running(visible);avatars.add(face);int faceSize=compactHero()?48:64;FrameLayout.LayoutParams fp=new FrameLayout.LayoutParams(dp(faceSize),dp(faceSize),Gravity.TOP|Gravity.CENTER_HORIZONTAL);fp.topMargin=dp(compactHero()?30:side*.34f-32);hero.addView(face,fp);
-        TextView name=text(botName,getResources().getConfiguration().fontScale>1.2f?12:16,WHITE);name.setTypeface(Typeface.create(Typeface.DEFAULT,600,false));name.setSingleLine(true);name.setEllipsize(android.text.TextUtils.TruncateAt.END);name.setContentDescription("Current Bot: "+botName);FrameLayout.LayoutParams np=new FrameLayout.LayoutParams(dp(side*.76f),dp(22),Gravity.TOP|Gravity.CENTER_HORIZONTAL);np.topMargin=dp(compactHero()?80:side*.535f-11);hero.addView(name,np);
-        String last="";if(historyEntries.length()>0){JSONObject entry=historyEntries.optJSONObject(historyEntries.length()-1);if(entry!=null)last=entry.optString("text");}if(last.isEmpty())last=selectedMetadata.optString("lastMessagePreview","");
-        TextView excerpt=text(last.isEmpty()?(preview?"Ready when you are":"Ready to talk"):MessageText.plain(last),compactHero()?11:12,SECONDARY);excerpt.setTag("bot_excerpt");excerpt.setSingleLine(true);excerpt.setEllipsize(android.text.TextUtils.TruncateAt.END);FrameLayout.LayoutParams xp=new FrameLayout.LayoutParams(dp(side*.76f),dp(20),Gravity.TOP|Gravity.CENTER_HORIZONTAL);xp.topMargin=dp(Math.min(side-88,side*.615f-10));hero.addView(excerpt,xp);
+        // A Bot other than the Primary gets a compact hero with its pin control under the name.
+        JSONObject pinBot=currentPinBot();View[] pin=pinBot==null?null:pinViews(pinBot,false);boolean caption=pin!=null&&pin[0]!=null;
+        FrameLayout hero=new FrameLayout(this);hero.setMinimumHeight(dp(side-67));body.addView(hero,new LinearLayout.LayoutParams(-1,pin==null?dp(side-67):-2));
+        Button back=button("Bots",()->openBotPicker());back.setText("‹ Bots");back.setTextSize(12);back.setPadding(0,0,0,0);back.setBackground(shape(Color.TRANSPARENT,0));back.setElevation(0);back.setStateListAnimator(null);FrameLayout.LayoutParams navp=new FrameLayout.LayoutParams(dp(68),dp(48),Gravity.TOP|Gravity.CENTER_HORIZONTAL);navp.topMargin=dp(pin!=null?-6:3);hero.addView(back,navp);
+        BotAvatarView face=new BotAvatarView(this);applyAvatar(face,botName,selectedMetadata);face.state(screen.equals("done")?"done":"ready",accent(),0);face.running(visible);avatars.add(face);int faceSize=pin!=null?(caption?40:47):compactHero()?48:64;FrameLayout.LayoutParams fp=new FrameLayout.LayoutParams(dp(faceSize),dp(faceSize),Gravity.TOP|Gravity.CENTER_HORIZONTAL);fp.topMargin=dp(pin!=null?(caption?22:21):compactHero()?30:side*.34f-32);hero.addView(face,fp);
+        TextView name=text(botName,getResources().getConfiguration().fontScale>1.2f?12:16,WHITE);name.setTypeface(Typeface.create(Typeface.DEFAULT,600,false));name.setSingleLine(true);name.setEllipsize(android.text.TextUtils.TruncateAt.END);name.setContentDescription("Current Bot: "+botName);FrameLayout.LayoutParams np=new FrameLayout.LayoutParams(dp(side*.76f),dp(22),Gravity.TOP|Gravity.CENTER_HORIZONTAL);np.topMargin=dp(pin!=null?(caption?57:64):compactHero()?80:side*.535f-11);hero.addView(name,np);
+        if(pin!=null){LinearLayout stack=new LinearLayout(this);stack.setOrientation(LinearLayout.VERTICAL);stack.setGravity(Gravity.CENTER_HORIZONTAL);
+            if(caption){pin[0].setLayoutParams(new LinearLayout.LayoutParams(-2,-2));stack.addView(pin[0]);}
+            stack.addView(pin[1],new LinearLayout.LayoutParams(-2,dp(48)));
+            FrameLayout.LayoutParams sp2=new FrameLayout.LayoutParams(dp(side*.76f),-2,Gravity.TOP|Gravity.CENTER_HORIZONTAL);sp2.topMargin=np.topMargin+dp(22);hero.addView(stack,sp2);}
+        else{String last="";if(historyEntries.length()>0){JSONObject entry=historyEntries.optJSONObject(historyEntries.length()-1);if(entry!=null)last=entry.optString("text");}if(last.isEmpty())last=selectedMetadata.optString("lastMessagePreview","");
+            TextView excerpt=text(last.isEmpty()?(preview?"Ready when you are":"Ready to talk"):MessageText.plain(last),compactHero()?11:12,SECONDARY);excerpt.setTag("bot_excerpt");excerpt.setSingleLine(true);excerpt.setEllipsize(android.text.TextUtils.TruncateAt.END);FrameLayout.LayoutParams xp=new FrameLayout.LayoutParams(dp(side*.76f),dp(20),Gravity.TOP|Gravity.CENTER_HORIZONTAL);xp.topMargin=dp(Math.min(side-88,side*.615f-10));hero.addView(excerpt,xp);}
         LinearLayout chat=new LinearLayout(this);chat.setOrientation(LinearLayout.VERTICAL);chat.setPadding(dp(side*.12f),dp(10),dp(side*.12f),0);body.addView(chat,new LinearLayout.LayoutParams(-1,-2));body=chat;label("Chat",17,WHITE);if(historyLoading&&historyEntries.length()==0)label("Loading history…",12,SECONDARY);if(historyStale)label("Showing last loaded messages",12,SECONDARY);if(!historyError.isEmpty())label(historyError,12,SECONDARY);
         if(historyEntries.length()==0&&!historyLoading)label("No messages loaded",12,SECONDARY);
         for(int i=0;i<historyEntries.length();i++){JSONObject e=historyEntries.optJSONObject(i);if(e==null)continue;chatBubble(e);}
@@ -602,7 +790,7 @@ public final class MainActivity extends Activity {
         long now=System.currentTimeMillis(),elapsed=android.os.SystemClock.elapsedRealtime();
         boolean fresh=botsCached&&botsFetchedAtMs>0&&now>=botsFetchedAtMs&&now-botsFetchedAtMs<BOT_REFRESH_INTERVAL_MS;
         boolean recentlyAttempted=lastBotRefreshAttemptElapsed>0&&elapsed-lastBotRefreshAttemptElapsed<BOT_REFRESH_INTERVAL_MS;
-        if(!explicit&&(fresh||recentlyAttempted))return;
+        if(!explicit&&(fresh||recentlyAttempted)){refreshPins(false);return;}
         boolean hadError=!botListError.isEmpty();
         cancelRosterRetry();lastBotRefreshAttemptElapsed=elapsed;rosterFetchActive=true;botsLoading=true;botListError="";
         if(!botsCached||hadError)renderBotListPreservingScroll();

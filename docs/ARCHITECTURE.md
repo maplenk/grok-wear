@@ -23,7 +23,7 @@ Talk:    sign-in check ─┬─ Bot voice setup (instructions + tools) ─┐
 |---|---|
 | `GrokAuthCore`, `GrokAuthClient`, `GrokAuthVault` | Browser/QR sign-in with a watch-held verifier, token refresh, and connection bootstrap. A refresh is never retried after an uncertain outcome. |
 | `GrokVault`, `VaultSnapshotCache` | AES-GCM encrypted files with a non-exportable Android Keystore key, plus an in-memory snapshot cache that is invalidated on every write. |
-| `GrokCore`, `BotAccount` | Bot roster, Primary/pinned preferences and the narrow set of allowed service operations. Every request rechecks that the account and selected Bot have not changed. |
+| `GrokCore`, `BotAccount` | Bot roster, Primary/pinned preferences, pin and unpin, and the narrow set of allowed service operations. Every request rechecks that the account and selected Bot have not changed. A pin write re-reads the account's list first, changes only that Bot (pins are added at the end), sends the whole list back, and keeps the list the server stored. |
 | `HistoryCoordinator` | Shared-chat pages, call-start context (up to 20 turns / 12,000 characters), and a durable outbox for call transcripts. |
 | `VoiceStartup` | Runs history loading, Bot voice setup and credential minting in parallel under a 45-second budget. |
 | `NativeVoiceSession` | One realtime voice session: settings, history seeding, turn handling, interruption and the read-only tool allowlist. |

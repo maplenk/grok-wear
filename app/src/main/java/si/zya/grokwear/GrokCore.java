@@ -14,7 +14,10 @@ final class GrokCore {
     interface ConfigProvider { JSONObject current(JSONObject root) throws Exception; }
     static final class Failure extends Exception {
         final boolean rejected;
-        Failure(String safeMessage, boolean rejected) { super(safeMessage); this.rejected = rejected; }
+        /** Connect error code from the service (for example "resource_exhausted"), or "". */
+        final String code;
+        Failure(String safeMessage, boolean rejected) { this(safeMessage, rejected, ""); }
+        Failure(String safeMessage, boolean rejected, String code) { super(safeMessage); this.rejected = rejected; this.code = code; }
     }
     // Activities and the voice service own separate core instances over the same vault.
     // Serialize their local roster/account transactions, never renewal or transport calls.
@@ -223,6 +226,37 @@ final class GrokCore {
                 if(seen.add((String)id))safe.put(id);}
             if(valid)result.put("pinnedAgentIds",safe);
         }
+        return result;
+    }
+    /**
+     * The pin list to write back, as the official clients build it: pinning appends to the end,
+     * unpinning removes; every other id keeps its place. Null when the stored list can't be read
+     * safely, so a write never drops pins this watch doesn't understand.
+     */
+    static JSONArray withPin(JSONObject response,String id,boolean pinned){
+        JSONObject settings=response.optJSONObject("settings"),pins=settings==null?null:settings.optJSONObject("pinnedAgents");
+        // Connect JSON leaves out empty lists, so a missing list is an empty one.
+        JSONArray ids=pins==null?null:pins.optJSONArray("agentIds");
+        if(pins!=null&&pins.has("agentIds")&&ids==null)return null;
+        if(ids==null)ids=new JSONArray();
+        if(ids.length()>200||id.isEmpty()||!safeSession(id))return null;
+        JSONArray result=new JSONArray();boolean present=false;
+        for(int i=0;i<ids.length();i++){Object value=ids.opt(i);
+            if(!(value instanceof String)||((String)value).isEmpty()||!safeSession((String)value))return null;
+            if(value.equals(id)){present=true;if(!pinned)continue;}
+            result.put(value);}
+        if(pinned&&!present)result.put(id);
+        return result;
+    }
+    /** Preferences after a pin write: the list the server stored, keeping the Primary Bot from the read before it. */
+    static JSONObject storedPins(JSONObject before,JSONObject after,JSONArray sent)throws Exception {
+        JSONObject settings=after.optJSONObject("settings"),pins=settings==null?null:settings.optJSONObject("pinnedAgents");
+        boolean listed=pins!=null&&pins.optJSONArray("agentIds")!=null;
+        if(!listed&&sent.length()>0)throw new Failure("Couldn't save. Try again",true);
+        JSONObject result=botPreferences(after),previous=botPreferences(before);
+        if(!listed)result.put("pinnedAgentIds",new JSONArray());
+        else if(!result.has("pinnedAgentIds"))throw new Failure("Couldn't save. Try again",true);
+        if(!result.has("mainAgentId")&&previous.has("mainAgentId"))result.put("mainAgentId",previous.getString("mainAgentId"));
         return result;
     }
     private static boolean safeSession(String value){if(value.length()>512)return false;for(int i=0;i<value.length();i++)if(value.charAt(i)<32)return false;return true;}
