@@ -160,6 +160,9 @@ final class GrokCore {
                 if(ownership==null||ownership==JSONObject.NULL)candidate.put("viewerIsOwner",true);
                 else if(ownership instanceof Boolean)candidate.put("viewerIsOwner",ownership);
                 else candidate.put("viewerIsOwner",false).put("viewerMetadataInvalid",true);
+                // Which harness runs the Bot decides the end-of-call handoff (see CallHandoff).
+                String harness=text(b,"harness");
+                if(harness.matches("[a-z][a-z0-9_-]{0,31}"))candidate.put("harness",harness);
                 Object session=b.opt("viewerSessionId");
                 if(session instanceof String&&safeSession((String)session))candidate.put("viewerSessionId",session);
                 else if(session!=null&&session!=JSONObject.NULL)candidate.put("viewerMetadataInvalid",true);

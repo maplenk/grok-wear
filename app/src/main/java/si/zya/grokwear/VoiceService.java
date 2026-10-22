@@ -72,7 +72,7 @@ public final class VoiceService extends Service {
     private final Handler main=new Handler(Looper.getMainLooper());
     private final ExecutorService setup=Executors.newSingleThreadExecutor();
     private final ExecutorService historyWriter=Executors.newSingleThreadExecutor();
-    private BotAccount callAccount;private HistoryCoordinator.Context callContext;
+    private BotAccount callAccount;private HistoryCoordinator.Context callContext;private JSONObject callBot;
     private String syncStatus="";
     private volatile VoiceStartup startup;
     private volatile NativeVoiceSession session;private volatile NativeAudio audio;private PowerManager.WakeLock wake;
@@ -122,7 +122,7 @@ public final class VoiceService extends Service {
     }
     private void openPreparedSession(long mine,BotAccount account,JSONObject bot,JSONObject binding,JSONObject plan,JSONObject credential,VoiceStartup pipeline){
         if(!valid(mine))return;
-        botName=bot.optString("name","");callAccount=account;
+        botName=bot.optString("name","");callAccount=account;callBot=bot;
         ConnectivityManager manager=getSystemService(ConnectivityManager.class);if(manager!=null&&manager.getActiveNetwork()!=null)callNetwork=manager.getActiveNetwork();
         try{session=new NativeVoiceSession(account,bot,new NativeVoiceSession.Listener(){
                     public void onState(String value){post(mine,()->{
@@ -236,11 +236,11 @@ public final class VoiceService extends Service {
                 +(session==null?"":" "+session.protocolDiagnostics()));
         unwatchNetwork();replyText="";lastSpoken="";
         running=false;generation++;VoiceStartup preparing=startup;startup=null;if(preparing!=null)preparing.close();main.removeCallbacksAndMessages(null);NativeVoiceSession old=session;session=null;if(old!=null){if(!drained)old.discardUnheardReply();old.end();}
-        BotAccount account=callAccount;HistoryCoordinator.Context context=callContext;callAccount=null;callContext=null;
+        BotAccount account=callAccount;HistoryCoordinator.Context context=callContext;JSONObject bot=callBot;callAccount=null;callContext=null;callBot=null;
         if(old!=null&&old.didConnect()&&account!=null&&context!=null){
             try{
                 String ending="Call dropped".equals(finalState)?"disconnected":safe.isEmpty()?"hung-up":"failed";
-                JSONObject record=old.recordSnapshot(ending,System.currentTimeMillis(),finishedElapsed);syncStatus="Saving shared history";savingRecord=true;
+                JSONObject record=old.recordSnapshot(ending,System.currentTimeMillis(),finishedElapsed),line=old.handoffLine();syncStatus="Saving shared history";savingRecord=true;
                 long finishedGeneration=generation;
                 historyWriter.execute(()->{
                     try{HistoryCoordinator.stage(account,context,record);}
@@ -252,6 +252,12 @@ public final class VoiceService extends Service {
                     String status;try{status=HistoryCoordinator.record(account,context,record).optString("syncStatus","uncertain");}
                     catch(Exception ignored){status="uncertain";}String result=status;
                     MAIN.post(()->{if(generation==finishedGeneration&&!running&&callHistoryEpoch==historyEpoch){syncStatus=result;emit();}});
+                    // Tell the Bot the call ended, as the official clients do, so anything owed follows up in its chat.
+                    // At most once: no retry after any failure, so no request can reach the Bot twice.
+                    if(CallHandoff.applies(bot)){
+                        String outcome=CallHandoff.send(body->account.handoffTool(context.binding(),body),bot.optString("id"),record.optString("callId"),CallHandoff.requests(record.optJSONArray("turns")),line);
+                        android.util.Log.i("GrokWearVoice","call_handoff result="+outcome);
+                    }else android.util.Log.i("GrokWearVoice","call_handoff skipped harness="+(bot==null||bot.optString("harness").isEmpty()?"unknown":bot.optString("harness")));
                 });
             }catch(Exception ignored){savingRecord=false;syncStatus="uncertain";}
         }
