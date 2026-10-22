@@ -1,0 +1,51 @@
+plugins { id 'com.android.application' }
+
+// Release signing comes from keystore.properties (never committed) or the matching
+// GROKWEAR_* environment variables in CI. Without either, release builds fall back to
+// the local debug key, which is fine for installing on your own watch only.
+def signingProps = new Properties()
+def signingFile = rootProject.file('keystore.properties')
+if (signingFile.exists()) signingFile.withInputStream { signingProps.load(it) }
+def signingValue = { String key -> signingProps.getProperty(key) ?: System.getenv('GROKWEAR_' + key.toUpperCase()) }
+
+android {
+    namespace 'si.zya.grokwear'
+    compileSdk 36
+    buildToolsVersion '35.0.0'
+    buildFeatures { buildConfig true }
+    defaultConfig {
+        applicationId 'si.zya.grokwear'
+        minSdk 30
+        targetSdk 36
+        versionCode 14
+        versionName '0.13.1'
+    }
+    signingConfigs {
+        if (signingValue('storeFile')) {
+            release {
+                storeFile file(signingValue('storeFile'))
+                storePassword signingValue('storePassword')
+                keyAlias signingValue('keyAlias')
+                keyPassword signingValue('keyPassword')
+            }
+        }
+    }
+    buildTypes {
+        release {
+            debuggable false
+            jniDebuggable false
+            signingConfig signingValue('storeFile') ? signingConfigs.release : signingConfigs.debug
+            minifyEnabled false
+            shrinkResources false
+        }
+    }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+}
+dependencies {
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'com.google.zxing:core:3.5.3'
+    implementation 'androidx.core:core:1.16.0'
+    implementation 'androidx.wear:wear-ongoing:1.0.0'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303'
+}
