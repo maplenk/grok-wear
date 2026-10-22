@@ -131,10 +131,12 @@ public final class VoiceService extends Service {
         botName=bot.optString("name","");callAccount=account;callBot=bot;
         ConnectivityManager manager=getSystemService(ConnectivityManager.class);if(manager!=null&&manager.getActiveNetwork()!=null)callNetwork=manager.getActiveNetwork();
         try{session=new NativeVoiceSession(account,bot,new NativeVoiceSession.Listener(){
+                    public void onDiagnostic(String line){android.util.Log.i("GrokWearVoice",line);}
                     public void onState(String value){post(mine,()->{
                         if("ending".equals(value)||"finishing".equals(value)){ending=true;endReady="ending".equals(value);muted=true;if(audio!=null)audio.mute(true);state="Ending";
                             if(endReady&&drained&&session!=null)session.completeAfterPlayback();emit();notifyCall();return;}
                         if(ending)return;
+                        if("Reconnecting".equals(value)){responseIdle=true;state="Reconnecting";emit();notifyCall();return;}
                         if("speechidle".equals(value)){responseIdle=true;if(drained)state="Listening";}
                         else if(value.startsWith("Speaking")){responseIdle=false;state="Speaking";}else if(value.startsWith("Thinking")){responseIdle=false;state="Thinking";}
                         else if(value.startsWith("Listening")){if(audio!=null&&drained)state="Listening";}emit();});}
@@ -155,6 +157,7 @@ public final class VoiceService extends Service {
                     public void onFailure(String safe){post(mine,()->finish("Call stopped",safe));}
                     public void onDisconnected(String safe){post(mine,()->finish("Call dropped",safe));}
                 },pipeline.remainingMillis());
+            session.redialBackend=account::redialBackend;
             session.preparedStartup(plan,credential,()->account.verifyHistoryBinding(binding,true));
             emit();notifyCall();session.start();prepareAudio(mine);
         }catch(Exception invalid){finish("Call stopped","Voice could not start safely. Try again.");}
@@ -177,7 +180,10 @@ public final class VoiceService extends Service {
     private void watchNetwork(long mine){
         ConnectivityManager manager=getSystemService(ConnectivityManager.class);if(manager==null)return;
         callNetwork=manager.getActiveNetwork();
-        networkWatch=new ConnectivityManager.NetworkCallback(){@Override public void onLost(android.net.Network lost){post(mine,()->{
+        networkWatch=new ConnectivityManager.NetworkCallback(){
+            // A dropped call redials as soon as any network is back, instead of waiting out a stuck attempt.
+            @Override public void onAvailable(android.net.Network available){post(mine,()->{NativeVoiceSession live=session;if(live!=null&&!available.equals(callNetwork)){callNetwork=available;live.networkAvailable();}});}
+            @Override public void onLost(android.net.Network lost){post(mine,()->{
             NativeVoiceSession live=session;
             // Before the socket exists, another network can still finish setup; only no network at all ends it.
             if(live!=null&&lost.equals(callNetwork))live.networkLost();else if(manager.getActiveNetwork()==null){if(live!=null)live.networkLost();else finish("Ready",OFFLINE);}

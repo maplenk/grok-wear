@@ -68,7 +68,15 @@ final class BotAccount {
             ||!root.optString("auth_generation").equals(state.optString("auth_generation")))
             throw new GrokCore.Failure("Grok sign-in changed. Sign in again before continuing.",true);
     }
-    JSONObject backend(String method,JSONObject body) throws Exception {
+    JSONObject backend(String method,JSONObject body) throws Exception {return backend(HTTP,method,body);}
+    /**
+     * For a dropped call's redial: a fresh connection every time, so the request can't ride a pooled
+     * connection that died with the old network, and a 10 s deadline instead of 30 s.
+     */
+    JSONObject redialBackend(String method,JSONObject body) throws Exception {
+        return backend(HTTP.newBuilder().connectionPool(new okhttp3.ConnectionPool(0,1,TimeUnit.SECONDS)).callTimeout(10,TimeUnit.SECONDS).build(),method,body);
+    }
+    private JSONObject backend(OkHttpClient client,String method,JSONObject body) throws Exception {
         if(!java.util.Arrays.asList("MintSandVoiceCallSecret","VoiceCallHarnessSession","VoiceCallHarnessTool").contains(method))
             throw new GrokCore.Failure("This Grok voice operation is not enabled.",true);
         bound();String selected=selectedBot().optString("id");
@@ -81,7 +89,7 @@ final class BotAccount {
             .header("connect-protocol-version","1").header("x-cursor-client-type","sand")
             .header("x-cursor-client-version","0.71.2").header("x-sand-box-namespace","prod");
         if(context.has("selectedTeamId"))request.header("x-cursor-team-id",Long.toString(context.getLong("selectedTeamId")));
-        return execute(request,body,false);
+        return execute(client,request,body,false);
     }
     /** The finished call's own Bot, not the current selection: the user may switch Bots right after hanging up. */
     JSONObject handoffTool(JSONObject binding,JSONObject body) throws Exception {
@@ -266,7 +274,8 @@ final class BotAccount {
             finally{java.util.Arrays.fill(received,(byte)0);}
         }catch(Exception unreadable){return "";}
     }
-    private static JSONObject execute(Request.Builder request,JSONObject body,boolean arrayAllowed) throws Exception {
+    private static JSONObject execute(Request.Builder request,JSONObject body,boolean arrayAllowed) throws Exception {return execute(HTTP,request,body,arrayAllowed);}
+    private static JSONObject execute(OkHttpClient client,Request.Builder request,JSONObject body,boolean arrayAllowed) throws Exception {
         byte[] bytes=body.toString().getBytes(StandardCharsets.UTF_8);
         try {
             if(bytes.length>1024*1024)throw new GrokCore.Failure("Grok request is too large.",true);
@@ -276,7 +285,7 @@ final class BotAccount {
                 public boolean isOneShot(){return true;}
                 public void writeTo(okio.BufferedSink sink)throws java.io.IOException{sink.write(bytes);}
             };
-            try(Response response=HTTP.newCall(request.post(payload).build()).execute()) {
+            try(Response response=client.newCall(request.post(payload).build()).execute()) {
                 if(response.code()!=200)throw new GrokCore.Failure("Grok request failed (HTTP "+response.code()+").",true,errorCode(response));
                 if(response.body()==null)throw new java.io.IOException();
                 byte[] received=GrokVault.readBounded(response.body().byteStream(),1024*1024);
