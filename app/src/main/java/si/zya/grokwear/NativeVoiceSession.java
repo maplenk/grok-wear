@@ -170,10 +170,14 @@ public final class NativeVoiceSession {
     private final java.util.Map<String,Integer> eventTypes=new java.util.LinkedHashMap<>();private volatile int eventsAfterReady;
     // Microphone level only: the loudest sample, frames with speech-level sound, and frames of pure zeros.
     private volatile int micPeak;private volatile long micFrames,loudFrames,zeroFrames;
+    // Phase times in ms from start(): socket open, settings accepted, ready; and speech end to first reply audio.
+    private volatile long startedNanos,openMs=-1,updatedMs=-1,readyMs=-1,speechStoppedNanos,lastTtfaMs=-1,maxTtfaMs=-1;
+    private long sinceStart(){return startedNanos==0?-1:(System.nanoTime()-startedNanos)/1_000_000;}
     public String protocolDiagnostics(){String types;synchronized(eventTypes){types=eventTypes.toString();}
         return "received="+received+",errors="+protocolErrors+",class="+lastProtocolClass+",code="+lastProtocolCode
         +",ready="+ready+",muted="+muted+",pcm="+pcmSent+",speech="+speechStarts+",heard="+heard+",responses="+responsesSeen+",audio_out="+audioOut
         +",tool_calls="+toolCalls+",seeded="+seeded+"["+seedShape+"],tools="+toolsOffered+"["+toolNames+"],instructions="+instructionChars
+        +",open_ms="+openMs+",updated_ms="+updatedMs+",ready_ms="+readyMs+",ttfa_ms="+lastTtfaMs+",ttfa_max_ms="+maxTtfaMs
         +",after_ready="+eventsAfterReady+",mic_peak="+micPeak+",mic_frames="+micFrames+",loud="+loudFrames+",zero="+zeroFrames+",events="+types;}
     /** Roles, sizes and character classes of the seeded history, never its text. */
     static String seedShape(JSONArray frames){
@@ -224,12 +228,16 @@ public final class NativeVoiceSession {
         String code=fault.optString("code","");
         lastProtocolCode=Set.of("internal_error","async_not_enabled","invalid_request_error","missing_tool_call_results").contains(code)?code:"unrecognized";
         protocolErrors++;
-        if(!ready||"authentication_error".equals(kind))fail("Grok refused the voice session or one of its requests.");
+        if(!ready||!settingsAccepted||"authentication_error".equals(kind))fail("Grok refused the voice session or one of its requests.");
         // Live request errors do not imply a closed session. Preserve turn ownership;
         // a subsequent response event or socket close provides the definitive state.
     }
     private volatile boolean ready;
-    private boolean settingsAccepted;
+    private volatile boolean settingsAccepted,settingsSent;
+    /** A call is live once Grok confirmed its settings; a drop before that is a failed start, not a dropped call. */
+    private boolean live(){return ready&&settingsAccepted;}
+    boolean isLive(){return live();}
+    static final long SETTINGS_DEADLINE_MS=10000;
     private final Set<String> pendingHistory=new HashSet<>();
     private boolean callerSpeaking,replyInFlight,callerSpoke,alreadySpoke,newsOwed,receiptOwed,toolReplyOwed,announcedSpeaking;
     /** Lookups started in the current caller turn; older turns' lookups cannot produce its answer. */
@@ -268,7 +276,7 @@ public final class NativeVoiceSession {
         return new Wire(){public boolean send(String text){return websocket.send(text);}public long queueSize(){return websocket.queueSize();}public void cancel(){websocket.cancel();}};
     }
     public void start() {
-        if(!started.compareAndSet(false,true)||terminal.get())return;
+        if(!started.compareAndSet(false,true)||terminal.get())return;startedNanos=System.nanoTime();
         startupDeadline=startupWatchdog.schedule(()->fail("Grok voice did not become ready in time."),startupTimeoutMillis,TimeUnit.MILLISECONDS);
         worker.schedule(()->finish("Call preview reached its five-minute limit.",false),5,TimeUnit.MINUTES);
         execute(()->{
@@ -303,16 +311,16 @@ public final class NativeVoiceSession {
                 startupGuard.check();
                 if(terminal.get())return;
                 socket=wireFactory.open(url,secret,new WireEvents(){
-                    public void opened(){synchronized(historyGuard){if(terminal.get())return;didConnect=true;connectedAtMs=System.currentTimeMillis();}enqueueEvent(()->NativeVoiceSession.this.opened());}
+                    public void opened(){synchronized(historyGuard){if(terminal.get())return;didConnect=true;connectedAtMs=System.currentTimeMillis();openMs=sinceStart();}enqueueEvent(()->NativeVoiceSession.this.opened());}
                     public void message(String text){if(text.length()>MAX_EVENT){fail("Voice returned an oversized event.");return;}enqueueEvent(()->event(text));}
                     public void failed(Integer status){
                         if(ending&&status==null){execute(()->{replyInFlight=false;announceEndingIfReady();});}
-                        else if(ready&&status==null)disconnect("The voice connection was interrupted. Start a new voice chat to reconnect.");
+                        else if(live()&&status==null)disconnect("The voice connection was interrupted. Start a new voice chat to reconnect.");
                         else fail(websocketFailure(status));
                     }
                     public void closed(){
                         if(ending){execute(()->{replyInFlight=false;announceEndingIfReady();});}
-                        else if(ready)disconnect("The voice connection closed unexpectedly. Start a new voice chat to reconnect.");
+                        else if(live())disconnect("The voice connection closed unexpectedly. Start a new voice chat to reconnect.");
                         else fail("Grok voice closed before the session became ready. Start a new voice chat to try again.");
                     }
                 });
@@ -351,6 +359,9 @@ public final class NativeVoiceSession {
                 .put("tools",plan.getJSONArray("tools")).put("turn_detection",new JSONObject().put("type","server_vad"))
                 .put("audio",audio).put("resumption",new JSONObject().put("enabled",true));
         send(new JSONObject().put("type","session.update").put("session",session));
+        // Like the official clients, audio may follow the settings on the same ordered socket at
+        // once; waiting for session.updated cost about 0.8 s. History, when given, still waits.
+        if(historyAvailable&&historicalTurns.length()==0&&!terminal.get()){settingsSent=true;historySeeded=true;admitReady();}
     }
     public void sendPcm(byte[] pcm) {
         if(pcm==null||pcm.length==0||pcm.length>16384||pcm.length%2!=0||terminal.get()||muted||ending)return;
@@ -373,7 +384,7 @@ public final class NativeVoiceSession {
     public void mute(boolean value){muted=value;}
     static final String LOST="Your watch lost its connection.";
     /** The network carrying this call disappeared; its socket cannot recover. */
-    public void networkLost(){if(ready)disconnect(LOST);else fail(LOST);}
+    public void networkLost(){if(live())disconnect(LOST);else fail(LOST);}
     public void end(){finish("Call ended.",false);}
     /** Service acknowledges that the final native speech has actually left AudioTrack. */
     public void completeAfterPlayback(){execute(()->{if(ending&&!replyInFlight)finish("Grok ended the call.",false);});}
@@ -399,8 +410,11 @@ public final class NativeVoiceSession {
             case "conversation.created":
                 JSONObject conversation=e.optJSONObject("conversation");if(conversation!=null){String id=conversation.optString("id","");if(!id.isEmpty()&&id.length()<=256)synchronized(historyGuard){realtimeConversationId=id;}}break;
             case "session.created":break; // Created precedes acceptance of our actual settings.
-            case "session.updated":
-                if(!settingsAccepted){settingsAccepted=true;seedHistoryIfReady();}
+            case "session.updated":if(updatedMs<0)updatedMs=sinceStart();
+                if(!settingsAccepted){settingsAccepted=true;
+                    // Audio already flows; the account and Bot must still be the ones this call started with.
+                    if(ready)try{startupGuard.check();}catch(Exception changed){fail(setupFailure(changed));break;}
+                    seedHistoryIfReady();}
                 break;
             case "conversation.item.created":case "conversation.item.added":
                 JSONObject item=e.optJSONObject("item");if(item!=null&&pendingHistory.remove(item.optString("id","")))admitReady();break;
@@ -409,7 +423,7 @@ public final class NativeVoiceSession {
                 callerTurn++;toolReplyOwed=false;pendingLookups=0;interruptReply();
                 // server_vad has already cancelled generation. Only stop local playback.
                 emit(()->listener.onSpeechStarted());break;
-            case "input_audio_buffer.speech_stopped":callerSpeaking=false;emit(()->listener.onState("Thinking"));
+            case "input_audio_buffer.speech_stopped":callerSpeaking=false;speechStoppedNanos=System.nanoTime();emit(()->listener.onState("Thinking"));
                 // Speech detection can end on noise that never becomes a reply. Without
                 // a response or lookup, return to Listening instead of thinking forever.
                 long turn=callerTurn,seenBefore=responsesSeen;
@@ -429,6 +443,7 @@ public final class NativeVoiceSession {
                 if(!callerSpeaking&&!interruptedReply&&belongsToCurrentReply(e)){String encoded=e.optString("delta","");
                     if(!encoded.isEmpty()){byte[] pcm=codec.decode(encoded);
                         if(pcm.length%2!=0)throw new IllegalArgumentException();alreadySpoke=true;audioOut+=pcm.length;
+                        if(speechStoppedNanos!=0){lastTtfaMs=(System.nanoTime()-speechStoppedNanos)/1_000_000;maxTtfaMs=Math.max(maxTtfaMs,lastTtfaMs);speechStoppedNanos=0;}
                         if(!announcedSpeaking){announcedSpeaking=true;emit(()->listener.onState("Speaking"));}emit(()->listener.onAudio(pcm));}}
                 break;
             case "conversation.item.input_audio_transcription.updated":case "conversation.item.input_audio_transcription.completed":
@@ -454,10 +469,12 @@ public final class NativeVoiceSession {
         historicalTurns=new JSONArray();admitReady();
     }
     private void admitReady(){
-        if(!ready&&settingsAccepted&&historySeeded&&pendingHistory.isEmpty()&&!terminal.get()){
+        if(!ready&&(settingsAccepted||settingsSent)&&historySeeded&&pendingHistory.isEmpty()&&!terminal.get()){
             try{startupGuard.check();}catch(Exception changed){fail(setupFailure(changed));return;}
             if(terminal.get())return;
-            ready=true;cancelStartupDeadline();emit(()->listener.onState("Listening · read-only voice preview"));emit(()->listener.onReady());
+            ready=true;readyMs=sinceStart();cancelStartupDeadline();
+            // Settings that are never confirmed would leave a call that can't hear the caller.
+            if(!settingsAccepted)try{worker.schedule(()->execute(()->{if(!settingsAccepted&&!terminal.get())fail("Grok voice did not accept the call settings. Start a new call.");}),SETTINGS_DEADLINE_MS,TimeUnit.MILLISECONDS);}catch(java.util.concurrent.RejectedExecutionException ignored){}emit(()->listener.onState("Listening · read-only voice preview"));emit(()->listener.onReady());
             // Shared history is context, not a new prompt. The desktop harness may
             // offer a proactive greeting, but a watch call waits for fresh speech.
         }
@@ -538,7 +555,7 @@ public final class NativeVoiceSession {
         if(ws==null||bytes>MAX_QUEUE){fail("Grok voice could not keep up with the connection.");return;}
         // A full outgoing queue or a refused send means the socket is no longer draining:
         // on a watch that is a lost network far more often than a slow encoder.
-        if(ws.queueSize()+bytes>MAX_QUEUE||!ws.send(text)){if(ready)disconnect(LOST);else fail("Grok voice could not keep up with the connection.");}
+        if(ws.queueSize()+bytes>MAX_QUEUE||!ws.send(text)){if(live())disconnect(LOST);else fail("Grok voice could not keep up with the connection.");}
     }
     private interface Work {void run()throws Exception;}
     private boolean execute(Work work) {

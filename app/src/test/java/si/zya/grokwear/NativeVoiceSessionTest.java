@@ -48,7 +48,8 @@ public final class NativeVoiceSessionTest {
             session.start();if(expired){callback("failure");return;}JSONObject settings=frame("session.update");assertTrue(settings.getJSONObject("session").getJSONObject("resumption").getBoolean("enabled"));
         }
         void receive(String type)throws Exception{events.message(new JSONObject().put("type",type).toString());}
-        void ready()throws Exception{receive("session.created");receive("session.updated");callback("ready");}
+        void ready()throws Exception{receive("session.created");receive("session.updated");callback("ready");
+            long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);while(!session.isLive()&&System.nanoTime()<until)Thread.sleep(2);assertTrue("Settings never confirmed",session.isLive());}
         void tool(String id,String name)throws Exception{events.message(new JSONObject().put("type","response.function_call_arguments.done").put("call_id",id).put("name",name).put("arguments","{}").toString());}
         JSONObject frame(String type)throws Exception{long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);while(System.nanoTime()<until){JSONObject frame=sent.poll(Math.max(1,until-System.nanoTime()),TimeUnit.NANOSECONDS);if(frame==null)break;if(type.equals(frame.optString("type")))return frame;}throw new AssertionError("Missing frame "+type);}
         void callback(String expected)throws Exception{long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);while(System.nanoTime()<until){String event=callbacks.poll(Math.max(1,until-System.nanoTime()),TimeUnit.NANOSECONDS);if(expected.equals(event))return;if(event==null)break;}throw new AssertionError("Missing callback "+expected);}
@@ -143,10 +144,21 @@ public final class NativeVoiceSessionTest {
             assertNull(f.events);assertEquals(0,f.backendCalls.get());assertEquals(0,f.ready.get());
         }
     }
-    @Test public void bindingChangeDuringHandshakeCannotAdmitMicrophone()throws Exception {
+    @Test public void bindingChangeBeforeSettingsAreConfirmedEndsTheCall()throws Exception {
         AtomicBoolean changed=new AtomicBoolean();
         try(Fixture f=new Fixture(new JSONArray(),"",true,false,()->{if(changed.get())throw new IllegalStateException();})){
-            changed.set(true);f.receive("session.updated");f.callback("failure");assertEquals(0,f.ready.get());
+            f.callback("ready");changed.set(true);f.receive("session.updated");f.callback("failure");
+        }
+    }
+    @Test public void audioFollowsTheSettingsWithoutWaitingForConfirmation()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.callback("ready");f.session.sendPcm(new byte[]{1,2,3,4});
+            assertEquals("input_audio_buffer.append",f.frame("input_audio_buffer.append").getString("type"));
+        }
+    }
+    @Test public void settingsErrorBeforeConfirmationIsFatalEvenWithAudioFlowing()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.callback("ready");f.events.message(new JSONObject().put("type","error").put("error",new JSONObject().put("type","invalid_request_error")).toString());f.callback("failure");
         }
     }
     @Test public void reopeningSharedConversationWaitsForFreshSpeechDespiteHarnessGreeting()throws Exception {

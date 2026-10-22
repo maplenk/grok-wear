@@ -84,16 +84,19 @@ public final class VoiceService extends Service {
     private static final double FRAMES_PER_CHAR=1500;
     private ConnectivityManager.NetworkCallback networkWatch;private volatile android.net.Network callNetwork;
     private long liveStartedAt,finishedElapsed,callDeadlineElapsed;
+    // Startup phase times in ms from Talk, for the call_stop diagnostics line.
+    private volatile long talkElapsed,planMs=-1,mintMs=-1,dialMs=-1,listeningMs=-1;
+    private long sinceTalk(){return SystemClock.elapsedRealtime()-talkElapsed;}
     @Override public IBinder onBind(Intent intent){return null;}
     @Override public int onStartCommand(Intent intent,int flags,int startId){
         String action=intent==null?"":intent.getAction();
         if(END.equals(action)){finish("Call ended.","");return START_NOT_STICKY;}
-        if(MUTE.equals(action)){if(running&&!ending){muted=!muted;if(session!=null)session.mute(muted);if(audio!=null)audio.mute(muted);inputLevel=0;emit();notifyCall();}return START_NOT_STICKY;}
+        if(MUTE.equals(action)){if(running&&!ending){muted=!muted;if(session!=null)session.mute(muted);if(audio!=null&&liveStartedAt>0)audio.mute(muted);inputLevel=0;emit();notifyCall();}return START_NOT_STICKY;}
         if(INTERRUPT.equals(action)){if(running&&!ending&&session!=null)session.cancelReply();return START_NOT_STICKY;}
         if(!START.equals(action)||running||!consume(intent)){if(!running){publish(new Snapshot("Ready","","","Tap Voice chat again to start voice.","",false,false,0,0));stopSelf();}return START_NOT_STICKY;}
         PowerManager power=(PowerManager)getSystemService(POWER_SERVICE);KeyguardManager keyguard=(KeyguardManager)getSystemService(KEYGUARD_SERVICE);
         if(!power.isInteractive()||keyguard.isKeyguardLocked()||checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){finish("Ready","Tap Voice chat again while the watch is unlocked.");return START_NOT_STICKY;}
-        running=true;callHistoryEpoch=historyEpoch;long mine=++generation;state="Connecting";caption="";speaker="";error="";muted=false;responseIdle=true;drained=true;ending=false;endReady=false;
+        running=true;callHistoryEpoch=historyEpoch;long mine=++generation;talkElapsed=SystemClock.elapsedRealtime();planMs=-1;mintMs=-1;dialMs=-1;listeningMs=-1;state="Connecting";caption="";speaker="";error="";muted=false;responseIdle=true;drained=true;ending=false;endReady=false;
         liveStartedAt=0;finishedElapsed=0;callDeadlineElapsed=SystemClock.elapsedRealtime()+300000;syncStatus="Connecting voice";callAccount=null;callContext=null;
         try{Notification notification=notification();startForeground(NOTIFICATION,notification,ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE|ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
             wake=power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,"grokwear:voice");wake.setReferenceCounted(false);wake.acquire(310000);
@@ -109,8 +112,8 @@ public final class VoiceService extends Service {
             // instructions and its lookup tools carry context, and the microphone isn't held
             // behind history pages or per-message acknowledgements. The binding still saves the call.
             VoiceStartup.Result prepared=pipeline.prepare(()->new HistoryCoordinator.Context(binding,new org.json.JSONArray()),
-                ()->lease.request("VoiceCallHarnessSession",new JSONObject().put("agentId",bot.getString("id")).put("agentName",bot.getString("name"))),
-                ()->lease.request("MintSandVoiceCallSecret",new JSONObject()),
+                ()->{JSONObject plan=lease.request("VoiceCallHarnessSession",new JSONObject().put("agentId",bot.getString("id")).put("agentName",bot.getString("name")));planMs=sinceTalk();return plan;},
+                ()->{JSONObject credential=lease.request("MintSandVoiceCallSecret",new JSONObject());mintMs=sinceTalk();return credential;},
                 (plan,credential)->post(mine,()->openPreparedSession(mine,account,bot,binding,plan,credential,pipeline)));
             account.verifyHistoryBinding(binding,true);
             post(mine,()->{
@@ -123,7 +126,7 @@ public final class VoiceService extends Service {
         return START_NOT_STICKY;
     }
     private void openPreparedSession(long mine,BotAccount account,JSONObject bot,JSONObject binding,JSONObject plan,JSONObject credential,VoiceStartup pipeline){
-        if(!valid(mine))return;
+        if(!valid(mine))return;dialMs=sinceTalk();
         botName=bot.optString("name","");callAccount=account;callBot=bot;
         ConnectivityManager manager=getSystemService(ConnectivityManager.class);if(manager!=null&&manager.getActiveNetwork()!=null)callNetwork=manager.getActiveNetwork();
         try{session=new NativeVoiceSession(account,bot,new NativeVoiceSession.Listener(){
@@ -152,7 +155,7 @@ public final class VoiceService extends Service {
                     public void onDisconnected(String safe){post(mine,()->finish("Call dropped",safe));}
                 },pipeline.remainingMillis());
             session.preparedStartup(plan,credential,()->account.verifyHistoryBinding(binding,true));
-            emit();notifyCall();session.start();
+            emit();notifyCall();session.start();prepareAudio(mine);
         }catch(Exception invalid){finish("Call stopped","Voice could not start safely. Try again.");}
     }
     /** Fixed local messages only: a Failure carries a safe sentence; anything else may hold private detail. */
@@ -194,15 +197,20 @@ public final class VoiceService extends Service {
             // Synthesis arrives in bursts of many chunks; the UI needs the state, not every chunk.
             long now=SystemClock.uptimeMillis();announce=now-lastAudioPost>=150;if(announce)lastAudioPost=now;}
         if(announce)post(mine,()->{if(!ending)state="Speaking";emit();});}
-    private void startAudio(long mine){if(!valid(mine)||audio!=null)return;
-        syncStatus="Connected";
-        liveStartedAt=SystemClock.elapsedRealtime();
+    /** Audio focus, call mode and both audio tracks are set up while the socket dials; the microphone stays off until ready. */
+    private void prepareAudio(long mine){if(!valid(mine)||audio!=null)return;
         audio=new NativeAudio(this,new NativeAudio.Listener(){
             public void input(byte[] pcm,float level){NativeVoiceSession live=session;if(valid(mine)&&!muted&&live!=null){live.sendPcm(pcm);meter(mine,level,true);}}
             public void output(float level){meter(mine,level,false);}
             public void drained(){post(mine,()->{synchronized(VoiceService.this){if(audio==null||!audio.isDrained())return;drained=true;}outputLevel=0;if(ending){if(endReady&&session!=null)session.completeAfterPlayback();}else if(responseIdle)state="Listening";emit();});}
             public void failure(String safe){post(mine,()->finish("Call stopped",safe));}
-        });audio.start(muted||ending);if(valid(mine)){state=ending?"Ending":"Listening";emit();notifyCall();}
+        });audio.start(true);
+    }
+    private void startAudio(long mine){if(!valid(mine)||liveStartedAt>0)return;
+        syncStatus="Connected";
+        liveStartedAt=SystemClock.elapsedRealtime();
+        if(audio==null)prepareAudio(mine);NativeAudio prepared=audio;if(prepared==null||!valid(mine))return;
+        prepared.mute(muted||ending);listeningMs=sinceTalk();state=ending?"Ending":"Listening";emit();notifyCall();
     }
     private void meter(long mine,float level,boolean input){long now=SystemClock.elapsedRealtime();synchronized(this){if(now-lastMeter<70&&level!=0)return;lastMeter=now;}post(mine,()->{if(input)inputLevel=muted?0:level;else outputLevel=level;emit();});}
     private void emit(){long elapsed=liveStartedAt==0?finishedElapsed:Math.max(0,SystemClock.elapsedRealtime()-liveStartedAt);
@@ -235,6 +243,7 @@ public final class VoiceService extends Service {
         if(liveStartedAt!=0){finishedElapsed=Math.max(0,SystemClock.elapsedRealtime()-liveStartedAt);liveStartedAt=0;}
         // Fixed categories only: no captions, Bot/account identifiers, credentials or remote messages.
         android.util.Log.i("GrokWearVoice","call_stop cause="+stopCategory(finalState,safe)+" duration_ms="+finishedElapsed
+                +" plan_ms="+planMs+",mint_ms="+mintMs+",dial_ms="+dialMs+",listening_ms="+listeningMs
                 +(session==null?"":" "+session.protocolDiagnostics()));
         unwatchNetwork();replyText="";lastSpoken="";
         running=false;generation++;VoiceStartup preparing=startup;startup=null;if(preparing!=null)preparing.close();main.removeCallbacksAndMessages(null);NativeVoiceSession old=session;session=null;if(old!=null){if(!drained)old.discardUnheardReply();old.end();}
