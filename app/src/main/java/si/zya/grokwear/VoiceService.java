@@ -85,7 +85,7 @@ public final class VoiceService extends Service {
     private ConnectivityManager.NetworkCallback networkWatch;private volatile android.net.Network callNetwork;
     private long liveStartedAt,finishedElapsed,callDeadlineElapsed;
     // Startup phase times in ms from Talk, for the call_stop diagnostics line.
-    private volatile long talkElapsed,planMs=-1,mintMs=-1,dialMs=-1,listeningMs=-1;
+    private volatile long talkElapsed,leaseMs=-1,planMs=-1,mintMs=-1,dialMs=-1,listeningMs=-1;
     private long sinceTalk(){return SystemClock.elapsedRealtime()-talkElapsed;}
     @Override public IBinder onBind(Intent intent){return null;}
     @Override public int onStartCommand(Intent intent,int flags,int startId){
@@ -96,7 +96,7 @@ public final class VoiceService extends Service {
         if(!START.equals(action)||running||!consume(intent)){if(!running){publish(new Snapshot("Ready","","","Tap Voice chat again to start voice.","",false,false,0,0));stopSelf();}return START_NOT_STICKY;}
         PowerManager power=(PowerManager)getSystemService(POWER_SERVICE);KeyguardManager keyguard=(KeyguardManager)getSystemService(KEYGUARD_SERVICE);
         if(!power.isInteractive()||keyguard.isKeyguardLocked()||checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){finish("Ready","Tap Voice chat again while the watch is unlocked.");return START_NOT_STICKY;}
-        running=true;callHistoryEpoch=historyEpoch;long mine=++generation;talkElapsed=SystemClock.elapsedRealtime();planMs=-1;mintMs=-1;dialMs=-1;listeningMs=-1;state="Connecting";caption="";speaker="";error="";muted=false;responseIdle=true;drained=true;ending=false;endReady=false;
+        running=true;callHistoryEpoch=historyEpoch;long mine=++generation;talkElapsed=SystemClock.elapsedRealtime();leaseMs=-1;planMs=-1;mintMs=-1;dialMs=-1;listeningMs=-1;state="Connecting";caption="";speaker="";error="";muted=false;responseIdle=true;drained=true;ending=false;endReady=false;
         liveStartedAt=0;finishedElapsed=0;callDeadlineElapsed=SystemClock.elapsedRealtime()+300000;syncStatus="Connecting voice";callAccount=null;callContext=null;
         try{Notification notification=notification();startForeground(NOTIFICATION,notification,ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE|ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
             wake=power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,"grokwear:voice");wake.setReferenceCounted(false);wake.acquire(310000);
@@ -108,7 +108,7 @@ public final class VoiceService extends Service {
         setup.execute(()->{try{BotAccount account=new BotAccount(this);JSONObject bot=account.selectedBot();
             JSONObject binding=account.historyBinding();
             if(!binding.getString("agentId").equals(bot.optString("id")))throw new IllegalStateException();
-            NativeVoiceSession.Backend lease=account.startupBackend(binding);pipeline.check();
+            NativeVoiceSession.Backend lease=account.startupBackend(binding);leaseMs=sinceTalk();pipeline.check();
             // Like the official apps, a call starts without preloading chat history: the Bot's
             // instructions and its lookup tools carry context, and the microphone isn't held
             // behind history pages or per-message acknowledgements. The binding still saves the call.
@@ -250,7 +250,7 @@ public final class VoiceService extends Service {
         if(liveStartedAt!=0){finishedElapsed=Math.max(0,SystemClock.elapsedRealtime()-liveStartedAt);liveStartedAt=0;}
         // Fixed categories only: no captions, Bot/account identifiers, credentials or remote messages.
         android.util.Log.i("GrokWearVoice","call_stop cause="+stopCategory(finalState,safe)+" duration_ms="+finishedElapsed
-                +" plan_ms="+planMs+",mint_ms="+mintMs+",dial_ms="+dialMs+",listening_ms="+listeningMs
+                +" lease_ms="+leaseMs+",plan_ms="+planMs+",mint_ms="+mintMs+",dial_ms="+dialMs+",listening_ms="+listeningMs
                 +(session==null?"":" "+session.protocolDiagnostics()));
         unwatchNetwork();replyText="";lastSpoken="";
         running=false;generation++;VoiceStartup preparing=startup;startup=null;if(preparing!=null)preparing.close();main.removeCallbacksAndMessages(null);NativeVoiceSession old=session;session=null;if(old!=null){if(!drained)old.discardUnheardReply();old.end();}
