@@ -61,9 +61,23 @@ public final class NativeVoiceSession {
     private final Set<String> offered=new HashSet<>(), calls=new HashSet<>();
     // Pings detect a silently dead socket (for example a Wi-Fi handover) without a read timeout
     // that would also end quiet listening periods. VoiceService reports outright network loss sooner.
-    private final OkHttpClient http=new OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS)
+    // One client for every call, so its connection pool can hand a warmed connection to the socket.
+    private static final OkHttpClient HTTP=new OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS)
             .readTimeout(0,TimeUnit.SECONDS).writeTimeout(15,TimeUnit.SECONDS).pingInterval(15,TimeUnit.SECONDS)
             .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).build();
+    private final OkHttpClient http=HTTP;
+    /**
+     * Opens a connection to the voice host while the Bot's plan and credential load, so the socket
+     * can skip DNS, TCP and TLS. OkHttp dials WebSockets over HTTP/1.1 from the same pool, so this
+     * HEAD uses HTTP/1.1 too. Only a bare HEAD is sent; any failure just means a cold dial.
+     */
+    static void prewarm(){
+        try{HTTP.newBuilder().protocols(java.util.Collections.singletonList(okhttp3.Protocol.HTTP_1_1)).build()
+            .newCall(new Request.Builder().url("https://api.x.ai/").head().build()).enqueue(new okhttp3.Callback(){
+                public void onFailure(okhttp3.Call call,java.io.IOException failed){}
+                public void onResponse(okhttp3.Call call,Response response){response.close();}
+            });}catch(RuntimeException ignored){}
+    }
     private volatile Wire socket;
     private volatile boolean muted,ending;
     private boolean endingAnnounced;
@@ -171,6 +185,7 @@ public final class NativeVoiceSession {
     // Microphone level only: the loudest sample, frames with speech-level sound, and frames of pure zeros.
     private volatile int micPeak;private volatile long micFrames,loudFrames,zeroFrames;
     // Phase times in ms from start(): socket open, settings accepted, ready; and speech end to first reply audio.
+    private volatile int poolAtDial=-1;
     private volatile long startedNanos,openMs=-1,updatedMs=-1,readyMs=-1,speechStoppedNanos,lastTtfaMs=-1,maxTtfaMs=-1;
     private long sinceStart(){return startedNanos==0?-1:(System.nanoTime()-startedNanos)/1_000_000;}
     public String protocolDiagnostics(){String types;synchronized(eventTypes){types=eventTypes.toString();}
@@ -178,7 +193,7 @@ public final class NativeVoiceSession {
         +",ready="+ready+",muted="+muted+",pcm="+pcmSent+",speech="+speechStarts+",heard="+heard+",responses="+responsesSeen+",audio_out="+audioOut
         +",voice="+(voiceId.isEmpty()?"default":"bot")+",speed="+voiceSpeed+",language="+(voiceLanguage.isEmpty()?"auto":"hint")
         +",tool_calls="+toolCalls+",tools_served="+toolsServed+",tools_refused="+toolsRefused+",seeded="+seeded+"["+seedShape+"],tools="+toolsOffered+"["+toolNames+"],instructions="+instructionChars
-        +",open_ms="+openMs+",updated_ms="+updatedMs+",ready_ms="+readyMs+",ttfa_ms="+lastTtfaMs+",ttfa_max_ms="+maxTtfaMs
+        +",pool="+poolAtDial+",open_ms="+openMs+",updated_ms="+updatedMs+",ready_ms="+readyMs+",ttfa_ms="+lastTtfaMs+",ttfa_max_ms="+maxTtfaMs
         +",after_ready="+eventsAfterReady+",mic_peak="+micPeak+",mic_frames="+micFrames+",loud="+loudFrames+",zero="+zeroFrames+",events="+types;}
     /** Roles, sizes and character classes of the seeded history, never its text. */
     static String seedShape(JSONArray frames){
@@ -315,6 +330,7 @@ public final class NativeVoiceSession {
                 if(terminal.get())return;
                 startupGuard.check();
                 if(terminal.get())return;
+                poolAtDial=HTTP.connectionPool().idleConnectionCount();
                 socket=wireFactory.open(url,secret,new WireEvents(){
                     public void opened(){synchronized(historyGuard){if(terminal.get())return;didConnect=true;connectedAtMs=System.currentTimeMillis();openMs=sinceStart();}enqueueEvent(()->NativeVoiceSession.this.opened());}
                     public void message(String text){if(text.length()>MAX_EVENT){fail("Voice returned an oversized event.");return;}enqueueEvent(()->event(text));}

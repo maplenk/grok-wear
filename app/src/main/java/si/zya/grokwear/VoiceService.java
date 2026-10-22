@@ -103,6 +103,7 @@ public final class VoiceService extends Service {
         }catch(RuntimeException refused){finish("Ready","Watch could not keep this voice call in the foreground.");return START_NOT_STICKY;}
         emit();main.postDelayed(()->{if(valid(mine))finish("Call ended","Voice call reached its five-minute limit.");},Math.max(0,callDeadlineElapsed-SystemClock.elapsedRealtime()));
         watchNetwork(mine);replyText="";replyStartFrame=0;
+        NativeVoiceSession.prewarm();
         VoiceStartup pipeline=new VoiceStartup();startup=pipeline;
         setup.execute(()->{try{BotAccount account=new BotAccount(this);JSONObject bot=account.selectedBot();
             JSONObject binding=account.historyBinding();
