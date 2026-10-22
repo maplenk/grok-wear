@@ -140,6 +140,16 @@ public class GrokCoreTest {
         try{GrokCore.storedPins(pinned(null),new JSONObject().put("settings",new JSONObject()),sent);fail("A reply without the list was not stored");}
         catch(GrokCore.Failure expected){}
     }
+    @Test public void botVoiceSettingsSurviveDiscoveryNormalizedLikeTheOfficialApps()throws Exception {
+        GrokCore core=new GrokCore(new Memory(),(cfg,method,body)->new JSONObject().put("agents",new JSONArray()
+            .put(new JSONObject().put("id","custom").put("voiceId","ara").put("voiceSpeed",1.3).put("voiceLanguage","hi"))
+            .put(new JSONObject().put("id","text-speed").put("voiceSpeed","0.6").put("voiceLanguage","auto"))
+            .put(new JSONObject().put("id","bad").put("voiceId","bad voice\n").put("voiceSpeed",-2).put("voiceLanguage","not a language"))));
+        core.link(config());JSONArray bots=core.bots();
+        JSONObject custom=bots.getJSONObject(0);assertEquals("ara",custom.getString("voiceId"));assertEquals(1.25,custom.getDouble("voiceSpeed"),0);assertEquals("hi",custom.getString("voiceLanguage"));
+        JSONObject text=bots.getJSONObject(1);assertEquals(.5,text.getDouble("voiceSpeed"),0);assertFalse(text.has("voiceLanguage"));
+        JSONObject bad=bots.getJSONObject(2);assertFalse(bad.has("voiceId"));assertFalse(bad.has("voiceSpeed"));assertFalse(bad.has("voiceLanguage"));
+    }
     @Test public void harnessSurvivesDiscoveryOnlyWhenWellFormed()throws Exception {
         GrokCore core=new GrokCore(new Memory(),(cfg,method,body)->new JSONObject().put("agents",new JSONArray()
             .put(new JSONObject().put("id","temporal").put("harness","temporal"))

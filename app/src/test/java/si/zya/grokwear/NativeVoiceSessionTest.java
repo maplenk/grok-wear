@@ -18,7 +18,7 @@ public final class NativeVoiceSessionTest {
         volatile byte[] heard;volatile boolean failLookup,cancelled,unheard;volatile long queued;
         volatile NativeVoiceSession.WireEvents events;
         volatile CountDownLatch lookupEntered,lookupRelease;
-        final NativeVoiceSession session;
+        final NativeVoiceSession session;JSONObject settings;
         Fixture()throws Exception {this(new JSONArray());}
         Fixture(JSONArray history)throws Exception {this(history,"");}
         Fixture(JSONArray history,String greeting)throws Exception {this(history,greeting,false,false,()->{});}
@@ -41,11 +41,11 @@ public final class NativeVoiceSessionTest {
                 public long queueSize(){return queued;}public void cancel(){cancelled=true;}
             };};
             NativeVoiceSession.PcmCodec codec=new NativeVoiceSession.PcmCodec(){public String encode(byte[] bytes){return Base64.getEncoder().encodeToString(bytes);}public byte[] decode(String text){return Base64.getDecoder().decode(text);}};
-            session=new NativeVoiceSession(backend,new JSONObject().put("id","bot-test").put("name","Test Bot"),factory,codec,this);
+            session=new NativeVoiceSession(backend,nextBot!=null?nextBot:new JSONObject().put("id","bot-test").put("name","Test Bot"),factory,codec,this);nextBot=null;
             session.setHistory(history);if(deferred)session.deferHistory();
             if(prepared)session.preparedStartup(new JSONObject().put("instructions","Prepared harness").put("tools",new JSONArray()).put("greeting",new JSONObject().put("direction","Say hello")),
                 new JSONObject().put("clientSecret","prepared-public-test").put("model","fake-model").put("expiresAtUnixSeconds",expired?1:System.currentTimeMillis()/1000+600).put("websocketUrl","wss://api.x.ai/test-only"),guard);
-            session.start();if(expired){callback("failure");return;}JSONObject settings=frame("session.update");assertTrue(settings.getJSONObject("session").getJSONObject("resumption").getBoolean("enabled"));
+            session.start();if(expired){callback("failure");return;}settings=frame("session.update");assertTrue(settings.getJSONObject("session").getJSONObject("resumption").getBoolean("enabled"));
         }
         void receive(String type)throws Exception{events.message(new JSONObject().put("type",type).toString());}
         void ready()throws Exception{receive("session.created");receive("session.updated");callback("ready");
@@ -61,6 +61,20 @@ public final class NativeVoiceSessionTest {
         public void onReady(){ready.incrementAndGet();callbacks.add("ready");}
         public boolean hasUnheardReplyAudio(){return unheard;}
         public void close(){session.end();}
+    }
+    static JSONObject nextBot;
+    @Test public void sessionUsesTheBotsOwnVoiceSpeedAndLanguage()throws Exception {
+        nextBot=new JSONObject().put("id","bot-voice").put("name","Voice Bot").put("voiceId","ara").put("voiceSpeed",1.5).put("voiceLanguage","hi");
+        try(Fixture f=new Fixture()){
+            JSONObject session=f.settings.getJSONObject("session");assertEquals("ara",session.getString("voice"));
+            assertEquals(1.5,session.getJSONObject("audio").getJSONObject("output").getDouble("speed"),0);
+            assertEquals("hi",session.getJSONObject("audio").getJSONObject("input").getJSONObject("transcription").getString("language_hint"));
+        }
+        try(Fixture f=new Fixture()){
+            JSONObject session=f.settings.getJSONObject("session");assertFalse(session.has("voice"));
+            assertEquals(1.0,session.getJSONObject("audio").getJSONObject("output").getDouble("speed"),0);
+            assertFalse(session.getJSONObject("audio").getJSONObject("input").getJSONObject("transcription").has("language_hint"));
+        }
     }
     @Test public void preparedStartupSkipsBackendAndStillRequiresEveryHistoryAcknowledgement()throws Exception {
         JSONArray history=new JSONArray().put(new JSONObject().put("speaker","user").put("text","Earlier question"))

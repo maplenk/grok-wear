@@ -166,6 +166,10 @@ final class GrokCore {
                 // Which harness runs the Bot decides the end-of-call handoff (see CallHandoff).
                 String harness=text(b,"harness");
                 if(harness.matches("[a-z][a-z0-9_-]{0,31}"))candidate.put("harness",harness);
+                // The Bot's own voice, speed and language, which the official apps send in session.update.
+                String voiceId=text(b,"voiceId");if(voiceId.matches("[A-Za-z0-9_.-]{1,64}"))candidate.put("voiceId",voiceId);
+                double speed=voiceSpeed(b.opt("voiceSpeed"));if(speed>0)candidate.put("voiceSpeed",speed);
+                String language=text(b,"voiceLanguage");if(language.matches("[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?")&&!language.equalsIgnoreCase("auto"))candidate.put("voiceLanguage",language);
                 Object session=b.opt("viewerSessionId");
                 if(session instanceof String&&safeSession((String)session))candidate.put("viewerSessionId",session);
                 else if(session!=null&&session!=JSONObject.NULL)candidate.put("viewerMetadataInvalid",true);
@@ -258,6 +262,14 @@ final class GrokCore {
         else if(!result.has("pinnedAgentIds"))throw new Failure("Couldn't save. Try again",true);
         if(!result.has("mainAgentId")&&previous.has("mainAgentId"))result.put("mainAgentId",previous.getString("mainAgentId"));
         return result;
+    }
+    static final double[] VOICE_SPEEDS={.5,.75,1,1.25,1.5,2};
+    /** Snaps to the official speed steps, as the apps do; 0 when there is no usable speed. */
+    static double voiceSpeed(Object raw){
+        double value=Double.NaN;
+        if(raw instanceof Number)value=((Number)raw).doubleValue();else if(raw instanceof String)try{value=Double.parseDouble(((String)raw).trim());}catch(NumberFormatException ignored){}
+        if(!Double.isFinite(value)||value<=0)return 0;
+        double best=VOICE_SPEEDS[0];for(double step:VOICE_SPEEDS)if(Math.abs(step-value)<Math.abs(best-value))best=step;return best;
     }
     private static boolean safeSession(String value){if(value.length()>512)return false;for(int i=0;i<value.length();i++)if(value.charAt(i)<32)return false;return true;}
     synchronized void select(String id) throws Exception {

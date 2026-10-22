@@ -176,6 +176,7 @@ public final class NativeVoiceSession {
     public String protocolDiagnostics(){String types;synchronized(eventTypes){types=eventTypes.toString();}
         return "received="+received+",errors="+protocolErrors+",class="+lastProtocolClass+",code="+lastProtocolCode
         +",ready="+ready+",muted="+muted+",pcm="+pcmSent+",speech="+speechStarts+",heard="+heard+",responses="+responsesSeen+",audio_out="+audioOut
+        +",voice="+(voiceId.isEmpty()?"default":"bot")+",speed="+voiceSpeed+",language="+(voiceLanguage.isEmpty()?"auto":"hint")
         +",tool_calls="+toolCalls+",seeded="+seeded+"["+seedShape+"],tools="+toolsOffered+"["+toolNames+"],instructions="+instructionChars
         +",open_ms="+openMs+",updated_ms="+updatedMs+",ready_ms="+readyMs+",ttfa_ms="+lastTtfaMs+",ttfa_max_ms="+maxTtfaMs
         +",after_ready="+eventsAfterReady+",mic_peak="+micPeak+",mic_frames="+micFrames+",loud="+loudFrames+",zero="+zeroFrames+",events="+types;}
@@ -234,6 +235,7 @@ public final class NativeVoiceSession {
     }
     private volatile boolean ready;
     private volatile boolean settingsAccepted,settingsSent;
+    private final String voiceId,voiceLanguage;private final double voiceSpeed;
     /** A call is live once Grok confirmed its settings; a drop before that is a failed start, not a dropped call. */
     private boolean live(){return ready&&settingsAccepted;}
     boolean isLive(){return live();}
@@ -263,6 +265,8 @@ public final class NativeVoiceSession {
         this.backend=backend;this.listener=listener;this.codec=codec;
         this.wireFactory=factory==null?this::openRealWire:factory;
         botId=selectedBot.optString("id","").trim();botName=selectedBot.optString("name","").trim();
+        voiceId=selectedBot.optString("voiceId","");voiceLanguage=selectedBot.optString("voiceLanguage","");
+        double speed=selectedBot.optDouble("voiceSpeed",1);voiceSpeed=Double.isFinite(speed)&&speed>0?speed:1;
     }
     private Wire openRealWire(HttpUrl url,String secret,WireEvents events){
         Request request=new Request.Builder().url(url).header("Sec-WebSocket-Protocol","xai-client-secret."+secret).build();
@@ -350,14 +354,16 @@ public final class NativeVoiceSession {
     private void opened()throws Exception {
         if(terminal.get())return;
         JSONObject format=new JSONObject().put("type","audio/pcm").put("rate",24000);
-        JSONObject audio=new JSONObject().put("input",new JSONObject().put("format",format)
-                .put("transcription",new JSONObject().put("model","grok-transcribe")))
-                .put("output",new JSONObject().put("format",format).put("speed",1.0));
+        JSONObject transcription=new JSONObject().put("model","grok-transcribe");if(!voiceLanguage.isEmpty())transcription.put("language_hint",voiceLanguage);
+        JSONObject audio=new JSONObject().put("input",new JSONObject().put("format",format).put("transcription",transcription))
+                .put("output",new JSONObject().put("format",format).put("speed",voiceSpeed));
         instructionChars=plan.getString("instructions").length();JSONArray offered=plan.getJSONArray("tools");toolsOffered=offered.length();
         StringBuilder names=new StringBuilder();for(int i=0;i<offered.length();i++){String name=offered.optJSONObject(i)==null?"":offered.optJSONObject(i).optString("name");if(name.matches("[a-z_]{1,40}")){if(names.length()>0)names.append(' ');names.append(name);}}toolNames=names.toString();
         JSONObject session=new JSONObject().put("instructions",plan.getString("instructions"))
                 .put("tools",plan.getJSONArray("tools")).put("turn_detection",new JSONObject().put("type","server_vad"))
                 .put("audio",audio).put("resumption",new JSONObject().put("enabled",true));
+        // The Bot's chosen voice, as the official clients send it; otherwise Grok's default.
+        if(!voiceId.isEmpty())session.put("voice",voiceId);
         send(new JSONObject().put("type","session.update").put("session",session));
         // Like the official clients, audio may follow the settings on the same ordered socket at
         // once; waiting for session.updated cost about 0.8 s. History, when given, still waits.
