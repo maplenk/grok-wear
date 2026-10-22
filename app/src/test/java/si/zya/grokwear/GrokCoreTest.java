@@ -112,6 +112,34 @@ public class GrokCoreTest {
         assertTrue(bots.getJSONObject(3).getBoolean("viewerMetadataInvalid"));assertFalse(bots.getJSONObject(3).has("viewerSessionId"));
         core.select("teammate");assertEquals("dm:known",core.view().getJSONObject("bot").getString("viewerSessionId"));
     }
+    static JSONObject pinned(Object ids)throws Exception {
+        JSONObject pins=new JSONObject();if(ids!=null)pins.put("agentIds",ids);
+        return new JSONObject().put("settings",new JSONObject().put("mainAgentId","main").put("pinnedAgents",pins));
+    }
+    @Test public void pinningAppendsAndUnpinningRemovesWithoutTouchingOtherPins()throws Exception {
+        JSONArray stored=new JSONArray().put("b").put("main").put("c");
+        assertEquals("[\"b\",\"main\",\"c\",\"d\"]",GrokCore.withPin(pinned(stored),"d",true).toString());
+        assertEquals("Pinning an already pinned Bot keeps the order","[\"b\",\"main\",\"c\"]",GrokCore.withPin(pinned(stored),"main",true).toString());
+        assertEquals("[\"b\",\"c\"]",GrokCore.withPin(pinned(stored),"main",false).toString());
+        assertEquals("[\"b\",\"main\",\"c\"]",GrokCore.withPin(pinned(stored),"x",false).toString());
+        assertEquals("Connect JSON leaves out an empty list","[\"d\"]",GrokCore.withPin(pinned(null),"d",true).toString());
+        assertEquals("[\"d\"]",GrokCore.withPin(new JSONObject(),"d",true).toString());
+    }
+    @Test public void unreadablePinListsAreNeverWrittenBack()throws Exception {
+        assertNull(GrokCore.withPin(pinned(new JSONArray().put("b").put(3)),"d",true));
+        assertNull(GrokCore.withPin(pinned(new JSONArray().put("b\nc")),"d",true));
+        assertNull(GrokCore.withPin(pinned("b"),"d",true));
+        assertNull(GrokCore.withPin(pinned(new JSONArray()),"",true));
+    }
+    @Test public void storedPinsComeFromTheServerReply()throws Exception {
+        JSONArray sent=new JSONArray().put("b").put("d");
+        JSONObject prefs=GrokCore.storedPins(pinned(new JSONArray().put("b")),new JSONObject().put("settings",new JSONObject().put("pinnedAgents",new JSONObject().put("agentIds",sent))),sent);
+        assertEquals("[\"b\",\"d\"]",prefs.getJSONArray("pinnedAgentIds").toString());assertEquals("main",prefs.getString("mainAgentId"));
+        JSONObject cleared=GrokCore.storedPins(pinned(new JSONArray().put("b")),new JSONObject().put("settings",new JSONObject().put("pinnedAgents",new JSONObject())),new JSONArray());
+        assertEquals(0,cleared.getJSONArray("pinnedAgentIds").length());
+        try{GrokCore.storedPins(pinned(null),new JSONObject().put("settings",new JSONObject()),sent);fail("A reply without the list was not stored");}
+        catch(GrokCore.Failure expected){}
+    }
     @Test public void harnessSurvivesDiscoveryOnlyWhenWellFormed()throws Exception {
         GrokCore core=new GrokCore(new Memory(),(cfg,method,body)->new JSONObject().put("agents",new JSONArray()
             .put(new JSONObject().put("id","temporal").put("harness","temporal"))

@@ -21,7 +21,8 @@ Talk to any of your Grok Bots from your Wear OS watch. Hands-free, real-time voi
 </p>
 
 - **Sign in on your phone.** The watch shows a QR code; you approve the sign-in in your phone's browser. Nothing is typed on the watch.
-- **Pick any Bot.** Your Primary Bot sits at the top of Home, with the rest of your roster below.
+- **Pick any Bot.** Your Primary Bot sits at the top of Home, then your pinned Bots as big tiles, then the rest of your roster.
+- **Pinned Bots.** Hold a Bot to pin or unpin it, or use Pin on its page. Pins are your account's own list, shared with the official apps on your phone and desktop.
 - **Talk.** One tap starts a hands-free voice conversation. The Bot hears you through the watch microphone and answers through the watch speaker, with captions that follow along. Speak over it to interrupt.
 - **Shared conversation.** Each Bot's page shows its recent chat. A voice call starts from that context, and its transcript is saved back to the Bot's history.
 - **Follow-up in chat.** When you hang up, the Bot gets the same end-of-call note the official apps send, plus anything you asked for on the call. It can then finish the job in its chat on your phone or desktop.

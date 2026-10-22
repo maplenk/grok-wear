@@ -118,21 +118,45 @@ final class BotAccount {
     }
     /** Read-only account settings. Optional UI enhancement; failure must not block Bots. */
     JSONObject botPreferences() throws Exception {
-        bound();JSONObject identity=auth.state(),context=auth.core.backendContext();bound();
-        JSONObject prepared=auth.state();
-        if(!identity.optString("account_key").equals(prepared.optString("account_key"))||!identity.optString("auth_generation").equals(prepared.optString("auth_generation")))
-            throw new GrokCore.Failure("Grok sign-in changed. Refresh Bots.",true);
-        Request.Builder request=new Request.Builder().url(GrokAuthCore.BACKEND+"/aiserver.v1.GrokBotService/GetGrokBotUserRuntimeSettings")
+        bound();JSONObject identity=auth.state(),context=auth.core.backendContext();bound();sameIdentity(identity);
+        JSONObject response=execute(settings(context,"GetGrokBotUserRuntimeSettings"),new JSONObject(),false);
+        return savePreferences(identity,GrokCore.botPreferences(response));
+    }
+    /**
+     * Pins or unpins one Bot the way the official clients do: re-read the account's list, change
+     * only this Bot, write the whole list back and keep the list the server stored.
+     */
+    JSONObject setPinned(String botId,boolean pinned) throws Exception {
+        bound();JSONObject identity=auth.state(),context=auth.core.backendContext();bound();sameIdentity(identity);
+        JSONObject before=execute(settings(context,"GetGrokBotUserRuntimeSettings"),new JSONObject(),false);
+        JSONArray ids=GrokCore.withPin(before,botId,pinned);
+        if(ids==null)throw new GrokCore.Failure("Couldn't save. Try again",true);
+        sameIdentity(identity);
+        JSONObject after;
+        try{after=execute(settings(context,"UpdateGrokBotUserRuntimeSettings"),new JSONObject().put("pinnedAgents",new JSONObject().put("agentIds",ids)),false);}
+        catch(GrokCore.Failure refused){
+            if("resource_exhausted".equals(refused.code))throw new GrokCore.Failure("Pins are full. Unpin one first.",true,PINS_FULL);
+            throw refused;
+        }
+        return savePreferences(identity,GrokCore.storedPins(before,after,ids));
+    }
+    static final String PINS_FULL="pins_full";
+    private Request.Builder settings(JSONObject context,String method)throws Exception {
+        Request.Builder request=new Request.Builder().url(GrokAuthCore.BACKEND+"/aiserver.v1.GrokBotService/"+method)
             .header("Authorization","Bearer "+context.getString("accessToken"))
             .header("connect-protocol-version","1").header("x-cursor-client-type","sand")
             .header("x-cursor-client-version","0.72.0").header("x-sand-box-namespace","prod");
         if(context.has("selectedTeamId"))request.header("x-cursor-team-id",Long.toString(context.getLong("selectedTeamId")));
-        JSONObject response=execute(request,new JSONObject(),false);
+        return request;
+    }
+    private void sameIdentity(JSONObject identity)throws Exception {
+        JSONObject current=auth.state();
+        if(!identity.optString("account_key").equals(current.optString("account_key"))||!identity.optString("auth_generation").equals(current.optString("auth_generation")))
+            throw new GrokCore.Failure("Grok sign-in changed. Refresh Bots.",true);
+    }
+    private JSONObject savePreferences(JSONObject identity,JSONObject preferences)throws Exception {
         synchronized(core){synchronized(GrokAuthCore.LOCK){
-            bound();JSONObject current=auth.state();
-            if(!identity.optString("account_key").equals(current.optString("account_key"))||!identity.optString("auth_generation").equals(current.optString("auth_generation")))
-                throw new GrokCore.Failure("Grok sign-in changed. Refresh Bots.",true);
-            JSONObject preferences=GrokCore.botPreferences(response);
+            bound();sameIdentity(identity);JSONObject current=auth.state();
             core.saveBotPreferences(preferences,current.getString("account_key"),current.getString("auth_generation"));
             return preferences;
         }}
@@ -235,6 +259,13 @@ final class BotAccount {
         while(keys.hasNext()){String key=keys.next();request.header(key,headers.getString(key));}
         return execute(request,body,true);
     }
+    /** The Connect error code token of a refused call, or "". Nothing else from the body is kept. */
+    private static String errorCode(Response response){
+        try{if(response.body()==null)return "";byte[] received=GrokVault.readBounded(response.body().byteStream(),16384);
+            try{String code=new JSONObject(new String(received,StandardCharsets.UTF_8)).optString("code");return code.matches("[a-z_]{1,40}")?code:"";}
+            finally{java.util.Arrays.fill(received,(byte)0);}
+        }catch(Exception unreadable){return "";}
+    }
     private static JSONObject execute(Request.Builder request,JSONObject body,boolean arrayAllowed) throws Exception {
         byte[] bytes=body.toString().getBytes(StandardCharsets.UTF_8);
         try {
@@ -246,7 +277,7 @@ final class BotAccount {
                 public void writeTo(okio.BufferedSink sink)throws java.io.IOException{sink.write(bytes);}
             };
             try(Response response=HTTP.newCall(request.post(payload).build()).execute()) {
-                if(response.code()!=200)throw new GrokCore.Failure("Grok request failed (HTTP "+response.code()+").",true);
+                if(response.code()!=200)throw new GrokCore.Failure("Grok request failed (HTTP "+response.code()+").",true,errorCode(response));
                 if(response.body()==null)throw new java.io.IOException();
                 byte[] received=GrokVault.readBounded(response.body().byteStream(),1024*1024);
                 try {String text=new String(received,StandardCharsets.UTF_8);
