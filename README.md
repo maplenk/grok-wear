@@ -1,14 +1,28 @@
 # Grok Wear
 
-An unofficial Wear OS app for hands-free voice conversations with your Grok Bot assistants, right from your watch.
+Talk to any of your Grok Bots from your Wear OS watch. Hands-free, real-time voice, synced to your Bot's chat.
+
+<p align="center"><img src="docs/media/hero-voice.gif" width="360" alt="A live voice call with a Bot on a Wear OS watch"></p>
 
 > **Unofficial project.** Grok Wear is independent and is not affiliated with, endorsed by or sponsored by xAI or Cursor. Grok and Grok Bot are trademarks of xAI. See [NOTICE.md](NOTICE.md).
 
+## [⬇ Download the APK](https://github.com/maplenk/grok-wear/releases/latest)
+
+**[Install guide](docs/INSTALL.md)** · about ten minutes, once, from a computer on the same Wi-Fi.
+
+**Works on:** Wear OS 3+ (API 30+). Tested on Galaxy Watch and the Wear OS emulator.
+
 ## What it does
+
+<p align="center">
+  <img src="docs/media/screenshot-bots.png" width="240" alt="Bot list">
+  <img src="docs/media/screenshot-call.png" width="240" alt="Live call with captions">
+  <img src="docs/media/screenshot-bot-page.png" width="240" alt="Bot page with recent chat">
+</p>
 
 - **Sign in on your phone.** The watch shows a QR code; you approve the sign-in in your phone's browser. Nothing is typed on the watch.
 - **Pick any Bot.** Your Primary Bot sits at the top of Home, with the rest of your roster below.
-- **Talk.** One tap starts a hands-free voice conversation. The Bot hears you through the watch microphone and answers through the watch speaker. Speak over it to interrupt.
+- **Talk.** One tap starts a hands-free voice conversation. The Bot hears you through the watch microphone and answers through the watch speaker, with captions that follow along. Speak over it to interrupt.
 - **Shared conversation.** Each Bot's page shows its recent chat. A voice call starts from that context, and its transcript is saved back to the Bot's history, so the conversation continues on your phone or desktop.
 - **Read-only by design.** The Bot can look things up during a call, but actions that change things (sending tasks, approvals) are refused on the watch.
 
@@ -18,11 +32,6 @@ This is an experimental client. It talks to Grok Bot's **private, undocumented c
 
 - Calls end after five minutes. A dropped connection ends the call; there is no automatic reconnect.
 - The watch needs its own internet connection (Wi-Fi or LTE).
-- Requires Wear OS 3 or later (API 30+). Tested on a recent Samsung Galaxy Watch and the Wear OS emulator.
-
-## Install
-
-Grok Wear is not on Google Play. You install it on your watch over Wi-Fi from a computer, once, in about ten minutes. See **[docs/INSTALL.md](docs/INSTALL.md)** for step-by-step instructions.
 
 ## Build from source
 
@@ -59,6 +68,24 @@ Details: [PRIVACY.md](PRIVACY.md). To report a vulnerability, see [SECURITY.md](
 ## How it works
 
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the sign-in, history, voice and audio pipeline, and the limits the app enforces.
+
+## FAQ
+
+**Does it work on iPhone or Apple Watch?**
+Not this app; Grok Wear is for Wear OS only. A separate community app exists for Apple Watch.
+
+**Is it official?**
+No. Grok Wear is independent and is not affiliated with, endorsed by or sponsored by xAI or Cursor.
+
+**Will it break?**
+It uses a private, undocumented API, so it can. If Grok Bot changes that API, Grok Wear may stop working until it is updated.
+
+**Is it on the Play Store?**
+Planned, not yet. For now, install it from the [latest release](https://github.com/maplenk/grok-wear/releases/latest) using the [install guide](docs/INSTALL.md).
+
+## Contributing
+
+Bug reports, device reports and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

@@ -1,0 +1,47 @@
+name: Bug report
+description: Something doesn't work as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please don't include sign-in tokens, account or Bot identifiers, private chat text or audio. Describe them instead.
+  - type: input
+    id: watch
+    attributes:
+      label: Watch model
+      placeholder: e.g. Galaxy Watch 7, Pixel Watch 3
+    validations:
+      required: true
+  - type: input
+    id: wearos
+    attributes:
+      label: Wear OS version
+      description: Settings → About watch → Software.
+      placeholder: e.g. Wear OS 5
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: The release you installed.
+      placeholder: e.g. v0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead. Include any message the watch showed.
+    validations:
+      required: true
+  - type: dropdown
+    id: network
+    attributes:
+      label: Watch connection at the time
+      options:
+        - Wi-Fi
+        - LTE
+        - Through the phone (Bluetooth)
+        - Not sure

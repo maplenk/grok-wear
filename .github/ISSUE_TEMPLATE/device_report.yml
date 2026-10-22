@@ -1,0 +1,55 @@
+name: Device report
+description: Tell us whether Grok Wear works on your watch.
+title: "Device report: "
+labels: ["device-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One report per watch helps everyone know what works. Thanks!
+  - type: input
+    id: watch
+    attributes:
+      label: Watch model
+      placeholder: e.g. Pixel Watch 3 (45 mm, LTE)
+    validations:
+      required: true
+  - type: input
+    id: wearos
+    attributes:
+      label: Wear OS version
+      placeholder: e.g. Wear OS 5
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      placeholder: e.g. v0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Does it work?
+      options:
+        - Works
+        - Partly works
+        - Doesn't work
+    validations:
+      required: true
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: What did you try?
+      options:
+        - label: Sign in with the QR code
+        - label: Open a Bot and see its chat
+        - label: Voice call with replies through the watch speaker
+        - label: Interrupting the Bot by speaking
+        - label: Leaving the app during a call and coming back
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything that didn't work, sounded wrong, or looked cut off on your screen.

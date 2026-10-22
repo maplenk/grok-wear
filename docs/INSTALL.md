@@ -1,12 +1,18 @@
 # Install Grok Wear on your watch
 
-Grok Wear is not on Google Play, so you install it from a computer over Wi-Fi. You do this once; later updates install the same way, keeping your sign-in.
+## TL;DR
+
+1. On the watch, turn on **ADB debugging** and **Wireless debugging** (in Developer options).
+2. From a computer on the same Wi-Fi: `adb pair <ip>:<pairing-port>`, then `adb connect <ip>:<port>`.
+3. `adb install app-release.apk` (from the [latest release](../../../releases/latest)).
+
+The detailed steps follow. Grok Wear is not on Google Play, so you install it over Wi-Fi. You do this once; later updates install the same way, keeping your sign-in.
 
 **You need:** a Wear OS 3+ watch with its own Wi-Fi, a Mac, Windows or Linux computer on the **same Wi-Fi network**, and about ten minutes.
 
 ## 1. Get the app and the install tool
 
-1. Download `GrokWear-<version>.apk` from the [latest release](../../releases/latest).
+1. Download `app-release.apk` from the [latest release](../../../releases/latest). The release notes list its SHA-256 checksum if you want to verify the download.
 2. Install Android's `adb` tool:
    - **Mac:** `brew install android-platform-tools`, or download [SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools).
    - **Windows / Linux:** download [SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools) and unzip it. Run the commands below from that folder.
@@ -32,7 +38,7 @@ Menu names vary slightly between watch brands. See Google's guide: [Debug a Wear
 Keep the watch screen on (tap it now and then), and run:
 
 ```sh
-adb install -r --no-streaming GrokWear-<version>.apk
+adb install -r --no-streaming app-release.apk
 ```
 
 `Success` means it's installed. `--no-streaming` copies the whole file first, which copes better with watch Wi-Fi.
@@ -44,6 +50,10 @@ adb install -r --no-streaming GrokWear-<version>.apk
 3. Choose a Bot and tap **Talk**. Allow microphone access the first time.
 
 When you're done, turn **Wireless debugging** off again. It drains the battery.
+
+## No computer? Phone apps that can install for you
+
+Some third-party Android phone apps can install an APK onto a Wear OS watch over Wi-Fi, using the same wireless debugging connection. Examples include **Bugjaeger** and **Wear Installer 2**. They are not made by or affiliated with this project, and we don't endorse or support them; follow each app's own instructions. You still need steps 2 and 5 above. An iPhone can't do this; use a computer instead.
 
 ## Updating
 

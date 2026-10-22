@@ -2,6 +2,10 @@
 
 Issues and pull requests are welcome.
 
+**New here?** Start with an issue labelled [good first issue](https://github.com/maplenk/grok-wear/labels/good%20first%20issue). They are small, self-contained and don't need a Grok Bot account to work on.
+
+**No code needed:** a [device report](https://github.com/maplenk/grok-wear/issues/new?template=device_report.yml) telling us whether Grok Wear works on your watch is one of the most useful contributions.
+
 ## Before you open a pull request
 
 1. Run the unit tests: `./gradlew :app:testDebugUnitTest`.
