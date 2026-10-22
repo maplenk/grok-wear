@@ -13,6 +13,8 @@ Talk:    sign-in check ─┬─ Bot voice setup (instructions + tools) ─┐
                                              microphone opens ── 24 kHz PCM both ways ── Hang up
                                                                             │
                                                   final transcript saved to the Bot's history
+                                                                            │
+                                                  end-of-call handoff to the Bot (send_task)
 ```
 
 ## Components
@@ -27,6 +29,7 @@ Talk:    sign-in check ─┬─ Bot voice setup (instructions + tools) ─┐
 | `NativeVoiceSession` | One realtime voice session: settings, history seeding, turn handling, interruption and the read-only tool allowlist. |
 | `NativeAudio`, `PcmPlaybackBuffer` | Microphone capture and speaker playback (24 kHz mono PCM16) with echo cancellation where available and a bounded playback buffer. |
 | `VoiceService` | Foreground service that owns a call: admission, ongoing notification, network loss detection, captions and saving the transcript. |
+| `CallHandoff` | The end-of-call note and leftover request sent to the Bot after the transcript is saved. |
 | `MainActivity` and views | Round-screen UI: Home roster, Bot page with chat, call screen, sign-in and settings. |
 
 ## Call rules
@@ -35,6 +38,7 @@ Talk:    sign-in check ─┬─ Bot voice setup (instructions + tools) ─┐
 - The microphone opens only after the session accepted its settings and acknowledged every seeded history message.
 - Only read-only tools are offered to the voice model (`recall_text_messages`, `search_conversations`, `stay_silent`, `end_the_call`). Anything else is refused locally.
 - Each call is capped at five minutes. It is never reconnected or replayed automatically.
+- After the transcript is saved, Bots on the `temporal` harness get the official end-of-call handoff through `VoiceCallHarnessTool` (`send_task`). First comes the fixed "The call ended…" notice, then the caller's last request with up to five earlier lines quoted (2,000 characters at most). Sending stops at the first reply that is not accepted, and nothing is retried, so a request never reaches the Bot twice. It goes to the Bot that took the call, even if another Bot is selected by then.
 
 ## Reliability on watch networks
 

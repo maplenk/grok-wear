@@ -113,6 +113,10 @@ public final class NativeVoiceSession {
         });
     }
     public boolean didConnect(){return didConnect;}
+    /** Conversation state the harness expects alongside the end-of-call handoff; read after the call ended. */
+    public JSONObject handoffLine()throws Exception{
+        return new JSONObject().put("theyJustTalked",callerSpoke).put("newsOwed",newsOwed).put("receiptOwed",receiptOwed).put("alreadySpokeThisTurn",alreadySpoke);
+    }
     public JSONObject recordSnapshot(String ending,long endedAtMs,long durationMs)throws Exception {
         synchronized(historyGuard){
             JSONArray turns=new JSONArray();for(java.util.Map.Entry<String,JSONObject> entry:spokenTurns.entrySet())if(finalizedTurns.contains(entry.getKey()))turns.put(new JSONObject(entry.getValue().toString()));

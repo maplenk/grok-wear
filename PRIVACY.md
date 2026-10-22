@@ -13,6 +13,7 @@ Signing out removes all of this from the watch. It does not delete anything from
 ## What is sent, and where
 
 - **To Grok Bot's servers:** sign-in, your Bot list, recent chat for the Bot you open, and the final text of each voice call, which is saved to that Bot's history as the official apps do.
+- **To the Bot, after a call:** for Bots that support it, the same end-of-call note the official apps send ("The call ended…"), then up to the last six things you said on the call, so the Bot can follow up in chat. It is sent once and never retried.
 - **To xAI's realtime voice service:** your microphone audio while a call is active, and short-lived call credentials. The Bot's spoken replies come back the same way.
 
 Microphone audio is captured only during a call you started by tapping Talk, and only while it is not muted. Audio is streamed, never written to storage, and not sent anywhere else.

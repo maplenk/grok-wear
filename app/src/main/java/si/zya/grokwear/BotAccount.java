@@ -83,6 +83,19 @@ final class BotAccount {
         if(context.has("selectedTeamId"))request.header("x-cursor-team-id",Long.toString(context.getLong("selectedTeamId")));
         return execute(request,body,false);
     }
+    /** The finished call's own Bot, not the current selection: the user may switch Bots right after hanging up. */
+    JSONObject handoffTool(JSONObject binding,JSONObject body) throws Exception {
+        if(!CallHandoff.TOOL.equals(body.optString("name")))throw new GrokCore.Failure("Only the end-of-call handoff is enabled.",true);
+        verifyHistoryBinding(binding,false);
+        if(!binding.optString("agentId").equals(body.optString("agentId")))throw new GrokCore.Failure("Grok Bot changed. Nothing was sent.",true);
+        JSONObject context=auth.core.backendContext();verifyHistoryBinding(binding,false);
+        Request.Builder request=new Request.Builder().url(GrokAuthCore.BACKEND+"/aiserver.v1.GrokBotService/VoiceCallHarnessTool")
+            .header("Authorization","Bearer "+context.getString("accessToken"))
+            .header("connect-protocol-version","1").header("x-cursor-client-type","sand")
+            .header("x-cursor-client-version","0.71.2").header("x-sand-box-namespace","prod");
+        if(context.has("selectedTeamId"))request.header("x-cursor-team-id",Long.toString(context.getLong("selectedTeamId")));
+        return execute(request,body,false);
+    }
     /** A call-scoped lease, created after normal renewal, never used for later tool calls. */
     NativeVoiceSession.Backend startupBackend(JSONObject requestedBinding) throws Exception {
         final JSONObject binding=new JSONObject(requestedBinding.toString());

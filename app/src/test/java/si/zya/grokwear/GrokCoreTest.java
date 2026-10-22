@@ -112,6 +112,16 @@ public class GrokCoreTest {
         assertTrue(bots.getJSONObject(3).getBoolean("viewerMetadataInvalid"));assertFalse(bots.getJSONObject(3).has("viewerSessionId"));
         core.select("teammate");assertEquals("dm:known",core.view().getJSONObject("bot").getString("viewerSessionId"));
     }
+    @Test public void harnessSurvivesDiscoveryOnlyWhenWellFormed()throws Exception {
+        GrokCore core=new GrokCore(new Memory(),(cfg,method,body)->new JSONObject().put("agents",new JSONArray()
+            .put(new JSONObject().put("id","temporal").put("harness","temporal"))
+            .put(new JSONObject().put("id","bad").put("harness","Temporal\nx"))
+            .put(new JSONObject().put("id","none"))));
+        core.link(config());JSONArray bots=core.bots();
+        assertEquals("temporal",bots.getJSONObject(0).getString("harness"));assertTrue(CallHandoff.applies(bots.getJSONObject(0)));
+        assertFalse(bots.getJSONObject(1).has("harness"));assertFalse(bots.getJSONObject(2).has("harness"));
+        core.select("temporal");assertEquals("temporal",core.view().getJSONObject("bot").getString("harness"));
+    }
     @Test public void rosterRefreshUpdatesPreviouslySelectedMetadataAndRemovesMissingBot()throws Exception {
         Memory memory=new Memory();JSONObject[] reply={new JSONObject().put("agents",new JSONArray().put(new JSONObject().put("id","main").put("name","Initial")))};
         GrokCore core=new GrokCore(memory,(cfg,method,body)->reply[0]);core.link(config());core.bots();core.select("main");
