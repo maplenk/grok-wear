@@ -27,7 +27,21 @@ final class NativeAudio implements AutoCloseable {
         synchronized boolean accepts(long ticket){return !muted&&ticket>=0&&ticket==generation;}
         synchronized boolean muted(){return muted;}
     }
-    private int oldMode; private boolean changedMode,focusHeld;
+    private int oldMode; private boolean changedMode,focusHeld,routed; private AudioDeviceCallback routes;
+    /**
+     * Like the official Android client: a connected headset (Bluetooth, wired, USB) carries the
+     * call, otherwise the built-in speaker; never an earpiece. Re-run when devices come and go.
+     */
+    private void route(){
+        if(android.os.Build.VERSION.SDK_INT<31)return;
+        try{AudioDeviceInfo speaker=null,chosen=null;
+            for(AudioDeviceInfo device:manager.getAvailableCommunicationDevices()){int type=device.getType();
+                if(type==AudioDeviceInfo.TYPE_BUILTIN_SPEAKER){if(speaker==null)speaker=device;}
+                else if(type!=AudioDeviceInfo.TYPE_BUILTIN_EARPIECE&&type!=AudioDeviceInfo.TYPE_BUILTIN_SPEAKER_SAFE&&chosen==null)chosen=device;}
+            if(chosen==null)chosen=speaker;
+            if(chosen!=null&&manager.setCommunicationDevice(chosen))routed=true;
+        }catch(RuntimeException ignored){}
+    }
     private volatile long framesWritten,framesQueued; private boolean hadOutput;
     NativeAudio(Context context,Listener listener){this.context=context.getApplicationContext();this.manager=(AudioManager)context.getSystemService(Context.AUDIO_SERVICE);this.listener=listener;}
     void start(boolean initiallyMuted) {
@@ -49,6 +63,11 @@ final class NativeAudio implements AutoCloseable {
             if(manager.requestAudioFocus(focus)!=AudioManager.AUDIOFOCUS_REQUEST_GRANTED)throw new IllegalStateException();
             focusHeld=true;oldMode=manager.getMode();
             if(oldMode!=AudioManager.MODE_IN_COMMUNICATION){manager.setMode(AudioManager.MODE_IN_COMMUNICATION);changedMode=true;}
+            route();
+            if(android.os.Build.VERSION.SDK_INT>=31){routes=new AudioDeviceCallback(){
+                @Override public void onAudioDevicesAdded(AudioDeviceInfo[] added){if(!closed.get())route();}
+                @Override public void onAudioDevicesRemoved(AudioDeviceInfo[] removed){if(!closed.get())route();}};
+                manager.registerAudioDeviceCallback(routes,null);}
             AudioFormat format=new AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(RATE).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build();
             // ~300 ms of headroom rides out a GC pause or scheduling gap on a watch without polling.
             int out=Math.max(14400,AudioTrack.getMinBufferSize(RATE,AudioFormat.CHANNEL_OUT_MONO,AudioFormat.ENCODING_PCM_16BIT));
@@ -142,6 +161,7 @@ final class NativeAudio implements AutoCloseable {
         if(capture!=null&&capture!=Thread.currentThread())try{capture.join(250);}catch(InterruptedException ignored){Thread.currentThread().interrupt();}
         if(r!=null)try{r.release();}catch(Exception ignored){}record=null;
         if(echo!=null){try{echo.release();}catch(Exception ignored){}echo=null;}
+        if(android.os.Build.VERSION.SDK_INT>=31){if(routes!=null)try{manager.unregisterAudioDeviceCallback(routes);}catch(Exception ignored){}if(routed)try{manager.clearCommunicationDevice();}catch(Exception ignored){}}
         if(changedMode)try{if(manager.getMode()==AudioManager.MODE_IN_COMMUNICATION)manager.setMode(oldMode);}catch(Exception ignored){}
         if(focusHeld)try{manager.abandonAudioFocusRequest(focus);}catch(Exception ignored){}
     }

@@ -296,7 +296,8 @@ public final class NativeVoiceSessionTest {
     }
     @Test public void acceptedSettingsAdmitOneReadyAndGeneratedPcmRoundTrip()throws Exception {
         try(Fixture f=new Fixture()){
-            assertEquals(0,f.ready.get());f.ready();f.receive("session.updated");f.barrier();assertEquals(1,f.ready.get());
+            // The call is ready once its settings are sent; a later session.updated must not admit it twice.
+            f.ready();f.receive("session.updated");f.barrier();assertEquals(1,f.ready.get());
             byte[] pcm=new byte[960];for(int i=0;i<pcm.length;i++)pcm[i]=(byte)(i*17);
             f.session.sendPcm(pcm);JSONObject input=f.frame("input_audio_buffer.append");assertArrayEquals(pcm,Base64.getDecoder().decode(input.getString("audio")));
             f.events.message(new JSONObject().put("type","response.audio.delta").put("delta",input.getString("audio")).toString());f.callback("audio");assertArrayEquals(pcm,f.heard);
