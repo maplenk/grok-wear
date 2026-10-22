@@ -244,7 +244,8 @@ public final class NativeVoiceSession {
     private boolean callerSpeaking,replyInFlight,callerSpoke,alreadySpoke,newsOwed,receiptOwed,toolReplyOwed,announcedSpeaking;
     /** Lookups started in the current caller turn; older turns' lookups cannot produce its answer. */
     private long responsesSeen;private int pendingLookups;
-    static final long THINKING_FALLBACK_MS=8000;
+    static final long THINKING_FALLBACK_MS=8000,GREETING_GRACE_MS=15000;
+    volatile long greetingGraceMs=GREETING_GRACE_MS;
     volatile long thinkingFallbackMs=THINKING_FALLBACK_MS;
 
     public NativeVoiceSession(BotAccount account,JSONObject selectedBot,Listener listener) {
@@ -387,7 +388,13 @@ public final class NativeVoiceSession {
         if(replyInFlight&&!cancelRequested){cancelRequested=true;send(new JSONObject().put("type","response.cancel"));}
         else if(!replyInFlight)emit(()->listener.onState("speechidle"));
     }
-    public void mute(boolean value){muted=value;}
+    static final int MUTE_SILENCE_BYTES=28800;
+    public void mute(boolean value){
+        boolean closing=value&&!muted;muted=value;
+        // Like the official Android client: muting mid-sentence sends 600 ms of silence so Grok ends the turn.
+        if(closing)execute(()->{if(ready&&callerSpeaking&&!ending&&!terminal.get()){byte[] silence=new byte[MUTE_SILENCE_BYTES/2];
+            for(int i=0;i<2;i++){send(new JSONObject().put("type","input_audio_buffer.append").put("audio",codec.encode(silence)));pcmSent+=silence.length;}}});
+    }
     static final String LOST="Your watch lost its connection.";
     /** The network carrying this call disappeared; its socket cannot recover. */
     public void networkLost(){if(live())disconnect(LOST);else fail(LOST);}
@@ -479,11 +486,16 @@ public final class NativeVoiceSession {
             try{startupGuard.check();}catch(Exception changed){fail(setupFailure(changed));return;}
             if(terminal.get())return;
             ready=true;readyMs=sinceStart();cancelStartupDeadline();
+            // The caller goes first, as in the official clients: the Bot's greeting plays only after 15 s with no speech.
+            try{worker.schedule(()->execute(this::greetIfQuiet),greetingGraceMs,TimeUnit.MILLISECONDS);}catch(java.util.concurrent.RejectedExecutionException ignored){}
             // Settings that are never confirmed would leave a call that can't hear the caller.
             if(!settingsAccepted)try{worker.schedule(()->execute(()->{if(!settingsAccepted&&!terminal.get())fail("Grok voice did not accept the call settings. Start a new call.");}),SETTINGS_DEADLINE_MS,TimeUnit.MILLISECONDS);}catch(java.util.concurrent.RejectedExecutionException ignored){}emit(()->listener.onState("Listening · read-only voice preview"));emit(()->listener.onReady());
-            // Shared history is context, not a new prompt. The desktop harness may
-            // offer a proactive greeting, but a watch call waits for fresh speech.
         }
+    }
+    private void greetIfQuiet()throws Exception {
+        if(terminal.get()||ending||callerSpoke||replyInFlight||responsesSeen>0||plan==null)return;
+        JSONObject greeting=plan.optJSONObject("greeting");String direction=greeting==null?"":greeting.optString("direction","");
+        if(!direction.isBlank())requestReply(direction);
     }
     private void caption(String who,String text){if(!text.isBlank())emit(()->listener.onCaption(who,text.substring(0,Math.min(text.length(),8000))));}
     private void requestReply(String instructions)throws Exception {

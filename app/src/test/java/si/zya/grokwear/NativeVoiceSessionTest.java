@@ -42,6 +42,7 @@ public final class NativeVoiceSessionTest {
             };};
             NativeVoiceSession.PcmCodec codec=new NativeVoiceSession.PcmCodec(){public String encode(byte[] bytes){return Base64.getEncoder().encodeToString(bytes);}public byte[] decode(String text){return Base64.getDecoder().decode(text);}};
             session=new NativeVoiceSession(backend,nextBot!=null?nextBot:new JSONObject().put("id","bot-test").put("name","Test Bot"),factory,codec,this);nextBot=null;
+            if(nextGraceMs>0){session.greetingGraceMs=nextGraceMs;nextGraceMs=0;}
             session.setHistory(history);if(deferred)session.deferHistory();
             if(prepared)session.preparedStartup(new JSONObject().put("instructions","Prepared harness").put("tools",new JSONArray()).put("greeting",new JSONObject().put("direction","Say hello")),
                 new JSONObject().put("clientSecret","prepared-public-test").put("model","fake-model").put("expiresAtUnixSeconds",expired?1:System.currentTimeMillis()/1000+600).put("websocketUrl","wss://api.x.ai/test-only"),guard);
@@ -61,6 +62,25 @@ public final class NativeVoiceSessionTest {
         public void onReady(){ready.incrementAndGet();callbacks.add("ready");}
         public boolean hasUnheardReplyAudio(){return unheard;}
         public void close(){session.end();}
+    }
+    static long nextGraceMs;
+    @Test public void mutingMidSentenceSendsSilenceSoTheTurnEnds()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.ready();f.receive("input_audio_buffer.speech_started");f.callback("speech");f.session.mute(true);
+            for(int i=0;i<2;i++){JSONObject append=f.frame("input_audio_buffer.append");byte[] pcm=Base64.getDecoder().decode(append.getString("audio"));
+                assertEquals(NativeVoiceSession.MUTE_SILENCE_BYTES/2,pcm.length);for(byte b:pcm)assertEquals(0,b);}
+        }
+    }
+    @Test public void botGreetsOnlyAfterTheCallerStaysQuiet()throws Exception {
+        nextGraceMs=50;
+        try(Fixture f=new Fixture(new JSONArray(),"Say hello now")){
+            JSONObject create=f.frame("response.create");assertEquals("Say hello now",create.getJSONObject("response").getString("instructions"));
+        }
+        nextGraceMs=400;
+        try(Fixture f=new Fixture(new JSONArray(),"Say hello now")){
+            f.receive("input_audio_buffer.speech_started");f.callback("speech");Thread.sleep(700);
+            for(JSONObject frame:f.sent)assertFalse("Greeting sent after the caller spoke","response.create".equals(frame.optString("type")));
+        }
     }
     static JSONObject nextBot;
     @Test public void sessionUsesTheBotsOwnVoiceSpeedAndLanguage()throws Exception {
