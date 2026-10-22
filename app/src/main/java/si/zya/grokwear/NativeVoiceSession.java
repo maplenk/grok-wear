@@ -618,7 +618,8 @@ public final class NativeVoiceSession {
         Wire ws=socket;if(ws!=null)ws.cancel();
         // BotAccount's active HTTP request has its own 30s bound; it is not cancellable here.
         // Guards after every backend return prevent a timed-out startup from minting/opening later.
-        worker.shutdownNow();lookups.shutdownNow();http.dispatcher().cancelAll();http.connectionPool().evictAll();
+        // The HTTP client is shared with the next call, so only this call's socket is cancelled (above).
+        worker.shutdownNow();lookups.shutdownNow();
         if(disconnected)listener.onDisconnected(reason);else if(failure)listener.onFailure(reason);else listener.onComplete(reason);
     }
 }
