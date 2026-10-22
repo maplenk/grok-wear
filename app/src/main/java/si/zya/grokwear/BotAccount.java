@@ -21,6 +21,11 @@ final class BotAccount {
     // History reads are small. A transfer that stalls this long on a weak watch link is
     // usually a dead connection, so the single read retry below starts a fresh one.
     private static final OkHttpClient HISTORY=HTTP.newBuilder().readTimeout(8,TimeUnit.SECONDS).build();
+    /**
+     * The network changed: close idle pooled connections so the next request dials fresh instead of
+     * waiting out a read timeout on a connection that died with the old network.
+     */
+    static void networkChanged(){try{HTTP.connectionPool().evictAll();}catch(RuntimeException ignored){}GrokAuthClient.networkChanged();NativeVoiceSession.networkChanged();}
     BotAccount(Context context) {
         auth=new GrokAuthClient(context);
         core=new GrokCore(new GrokVault(context),BotAccount::gateway,root->{

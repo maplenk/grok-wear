@@ -73,6 +73,7 @@ public final class NativeVoiceSession {
      * can skip DNS, TCP and TLS. OkHttp dials WebSockets over HTTP/1.1 from the same pool, so this
      * HEAD uses HTTP/1.1 too. Only a bare HEAD is sent; any failure just means a cold dial.
      */
+    static void networkChanged(){try{HTTP.connectionPool().evictAll();}catch(RuntimeException ignored){}}
     static void prewarm(){
         try{HTTP.newBuilder().protocols(java.util.Collections.singletonList(okhttp3.Protocol.HTTP_1_1)).build()
             .newCall(new Request.Builder().url("https://api.x.ai/").head().build()).enqueue(new okhttp3.Callback(){
@@ -246,6 +247,7 @@ public final class NativeVoiceSession {
         String code=fault.optString("code","");
         lastProtocolCode=Set.of("internal_error","async_not_enabled","invalid_request_error","missing_tool_call_results").contains(code)?code:"unrecognized";
         protocolErrors++;
+        if(reconnecting&&!settingsAccepted){listener.onDiagnostic("call_reconnect refused class="+lastProtocolClass);droppedConversationId=null;redialLater();return;}
         if(!ready||!settingsAccepted||"authentication_error".equals(kind))fail("Grok refused the voice session or one of its requests.");
         // Live request errors do not imply a closed session. Preserve turn ownership;
         // a subsequent response event or socket close provides the definitive state.
@@ -288,12 +290,16 @@ public final class NativeVoiceSession {
     }
     private Wire openRealWire(HttpUrl url,String secret,WireEvents events){
         Request request=new Request.Builder().url(url).header("Sec-WebSocket-Protocol","xai-client-secret."+secret).build();
+        AtomicBoolean reported=new AtomicBoolean();
         WebSocket websocket=http.newWebSocket(request,new WebSocketListener(){
             @Override public void onOpen(WebSocket ws,Response response){events.opened();}
             @Override public void onMessage(WebSocket ws,String text){events.message(text);}
             @Override public void onMessage(WebSocket ws,ByteString bytes){fail("Grok voice returned an unexpected audio format.");}
             @Override public void onFailure(WebSocket ws,Throwable error,Response response){events.failed(response==null?null:response.code());}
-            @Override public void onClosed(WebSocket ws,int code,String reason){events.closedWith(code);}
+            // OkHttp reports the server's close frame through onClosing and only calls onClosed after our
+            // own close; answer the close and report it once, with its code (1000, 1008, 4001 are final).
+            @Override public void onClosing(WebSocket ws,int code,String reason){if(reported.compareAndSet(false,true))events.closedWith(code);ws.close(1000,null);}
+            @Override public void onClosed(WebSocket ws,int code,String reason){if(reported.compareAndSet(false,true))events.closedWith(code);}
         });
         return new Wire(){public boolean send(String text){return websocket.send(text);}public long queueSize(){return websocket.queueSize();}public void cancel(){websocket.cancel();}};
     }
@@ -361,7 +367,9 @@ public final class NativeVoiceSession {
         long generation=++socketGeneration;poolAtDial=HTTP.connectionPool().idleConnectionCount();
         socket=wireFactory.open(url,secret,new WireEvents(){
             boolean current(){return generation==socketGeneration;}
-            public void opened(){if(!current())return;synchronized(historyGuard){if(terminal.get())return;didConnect=true;connectedAtMs=System.currentTimeMillis();if(openMs<0)openMs=sinceStart();}enqueueEvent(()->{if(current())NativeVoiceSession.this.opened();});}
+            public void opened(){if(!current())return;synchronized(historyGuard){if(terminal.get())return;
+                // The call started at its first connection; a redial must not move it, or the saved record's timing no longer adds up.
+                if(!didConnect){didConnect=true;connectedAtMs=System.currentTimeMillis();}if(openMs<0)openMs=sinceStart();}enqueueEvent(()->{if(current())NativeVoiceSession.this.opened();});}
             public void message(String text){if(!current())return;if(text.length()>MAX_EVENT){fail("Voice returned an oversized event.");return;}enqueueEvent(()->{if(current())event(text);});}
             public void failed(Integer status){if(!current())return;
                 if(ending&&status==null){execute(()->{replyInFlight=false;announceEndingIfReady();});}
@@ -407,6 +415,7 @@ public final class NativeVoiceSession {
     // Reconnect requests get their own threads: one stuck on a dead network must not hold up the next try.
     private final java.util.concurrent.ExecutorService redials=Executors.newCachedThreadPool(r->{Thread t=new Thread(r,"grok-voice-redial");t.setDaemon(true);return t;});
     /** The watch has a network again: drop any attempt stuck on the old one and redial now. */
+    boolean isReconnecting(){return reconnecting;}
     public void networkAvailable(){execute(()->{if(!reconnecting||terminal.get())return;HTTP.connectionPool().evictAll();listener.onDiagnostic("call_reconnect network_back");redialNow=true;redialLater();});}
     private boolean redialNow;
     /** Optional backend for redials (fresh connections); the call's own backend otherwise. */
@@ -414,6 +423,8 @@ public final class NativeVoiceSession {
     private void redialLater(){
         if(terminal.get()||!reconnecting)return;
         if(reconnectAttempt>=reconnectAttempts){listener.onDiagnostic("call_reconnect gave_up attempts="+reconnectAttempt);disconnect(lostReason);return;}
+        // An attempt that opened but died before confirmation must not leave audio admitted for the next socket.
+        if(ready){ready=false;emit(()->listener.onState("Reconnecting"));}settingsSent=false;settingsAccepted=false;
         long delay=reconnectAttempt==0||redialNow?0:Math.min(10000,(long)(reconnectBaseMs*Math.pow(1.2,reconnectAttempt-1)));redialNow=false;
         reconnectAttempt++;long generation=++socketGeneration;listener.onDiagnostic("call_reconnect attempt="+reconnectAttempt+" delay_ms="+delay);
         Wire old=socket;if(old!=null)old.cancel();
@@ -421,7 +432,9 @@ public final class NativeVoiceSession {
             try{redials.execute(()->{
                 if(terminal.get()||!reconnecting||generation!=socketGeneration)return;
                 try{JSONObject credential=(redialBackend!=null?redialBackend:backend).request("MintSandVoiceCallSecret",new JSONObject());
-                    execute(()->{if(!reconnecting||generation!=socketGeneration)return;dial(credential,droppedConversationId);watchDial(socketGeneration);});
+                    execute(()->{if(!reconnecting||generation!=socketGeneration)return;
+                        try{startupGuard.check();}catch(Exception changed){fail(setupFailure(changed));return;}
+                        dial(credential,droppedConversationId);watchDial(socketGeneration);});
                 }catch(Exception failed){listener.onDiagnostic("call_reconnect mint_failed");execute(()->{if(generation==socketGeneration)redialLater();});}
             });}catch(java.util.concurrent.RejectedExecutionException busy){listener.onDiagnostic("call_reconnect busy");execute(this::redialLater);}
         },delay,TimeUnit.MILLISECONDS);}catch(java.util.concurrent.RejectedExecutionException ignored){}
@@ -435,7 +448,7 @@ public final class NativeVoiceSession {
     private void resumeAfterReconnect()throws Exception {
         String dropped=droppedConversationId,now;droppedConversationId=null;synchronized(historyGuard){now=realtimeConversationId;}
         if(dropped==null||!dropped.equals(now)){JSONArray frames=replayFrames();for(int i=0;i<frames.length();i++)send(frames.getJSONObject(i));}
-        if(owesResume){owesResume=false;requestReply(RESUME);}
+        if(owesResume){owesResume=false;requestReply(RESUME);}else payToolReply();
     }
     /** This call's settled turns, newest first up to 20 turns or 12,000 characters, as conversation items. */
     private JSONArray replayFrames()throws Exception {
@@ -461,7 +474,9 @@ public final class NativeVoiceSession {
         send(new JSONObject().put("type","session.update").put("session",session));
         // Like the official clients, audio may follow the settings on the same ordered socket at
         // once; waiting for session.updated cost about 0.8 s. History, when given, still waits.
-        if(historyAvailable&&historicalTurns.length()==0&&!terminal.get()){settingsSent=true;historySeeded=true;admitReady();}
+        if(historyAvailable&&historicalTurns.length()==0&&!terminal.get()){settingsSent=true;historySeeded=true;
+            // A redial waits for Grok to confirm the settings and for the replay before audio flows again.
+            if(!reconnecting)admitReady();}
     }
     public void sendPcm(byte[] pcm) {
         if(pcm==null||pcm.length==0||pcm.length>16384||pcm.length%2!=0||terminal.get()||muted||ending)return;
@@ -520,7 +535,7 @@ public final class NativeVoiceSession {
                 if(!settingsAccepted){settingsAccepted=true;
                     // Audio already flows; the account and Bot must still be the ones this call started with.
                     if(ready)try{startupGuard.check();}catch(Exception changed){fail(setupFailure(changed));break;}
-                    if(reconnecting){listener.onDiagnostic("call_reconnect confirmed attempts="+reconnectAttempt);reconnecting=false;reconnectAttempt=0;resumeAfterReconnect();}
+                    if(reconnecting){listener.onDiagnostic("call_reconnect confirmed attempts="+reconnectAttempt);reconnecting=false;reconnectAttempt=0;resumeAfterReconnect();admitReady();}
                     seedHistoryIfReady();}
                 break;
             case "conversation.item.created":case "conversation.item.added":
@@ -534,7 +549,7 @@ public final class NativeVoiceSession {
                 // Speech detection can end on noise that never becomes a reply. Without
                 // a response or lookup, return to Listening instead of thinking forever.
                 long turn=callerTurn,seenBefore=responsesSeen;
-                try{worker.schedule(()->{if(terminal.get()||ending||callerSpeaking||replyInFlight||pendingLookups>0||callerTurn!=turn||responsesSeen!=seenBefore)return;
+                try{worker.schedule(()->{if(terminal.get()||ending||reconnecting||callerSpeaking||replyInFlight||pendingLookups>0||callerTurn!=turn||responsesSeen!=seenBefore)return;
                     emit(()->listener.onState("speechidle"));},thinkingFallbackMs,TimeUnit.MILLISECONDS);}catch(java.util.concurrent.RejectedExecutionException ignored){}
                 break;
             case "response.created":
@@ -638,7 +653,7 @@ public final class NativeVoiceSession {
     }
 
     private void payToolReply()throws Exception {
-        if(toolReplyOwed&&!callerSpeaking&&!replyInFlight&&!ending){toolReplyOwed=false;requestReply(null);}
+        if(toolReplyOwed&&!callerSpeaking&&!replyInFlight&&!ending&&!reconnecting){toolReplyOwed=false;requestReply(null);}
     }
     static JSONObject toolRequest(String botId,String callId,String name,JSONObject input,JSONObject line)throws Exception {
         return new JSONObject().put("agentId",botId).put("callId",callId).put("name",name).put("input",input).put("line",line);
@@ -647,7 +662,7 @@ public final class NativeVoiceSession {
         toolOutput(id,output);if(turn==callerTurn){toolReplyOwed=true;payToolReply();}else settleIfQuiet();
     }
     /** A silent or superseded lookup leaves nothing to say: show Listening again. */
-    private void settleIfQuiet(){if(pendingLookups==0&&!replyInFlight&&!callerSpeaking&&!ending)emit(()->listener.onState("speechidle"));}
+    private void settleIfQuiet(){if(pendingLookups==0&&!replyInFlight&&!callerSpeaking&&!ending&&!reconnecting)emit(()->listener.onState("speechidle"));}
     private void toolResultWithReply(String id,Object output)throws Exception {
         toolOutput(id,output);toolReplyOwed=true;payToolReply();
     }
@@ -664,6 +679,8 @@ public final class NativeVoiceSession {
                 .put("type","function_call_output").put("call_id",id).put("output",encoded)));
     }
     private void send(JSONObject frame)throws Exception {
+        // While a redial waits for its settings to be confirmed, only the settings may go out.
+        if(reconnecting&&!"session.update".equals(frame.optString("type")))return;
         Wire ws=socket;
         if(terminal.get())return;
         String text=frame.toString();

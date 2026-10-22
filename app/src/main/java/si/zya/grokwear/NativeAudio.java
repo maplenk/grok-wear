@@ -148,8 +148,10 @@ final class NativeAudio implements AutoCloseable {
     long queuedFrames(){return framesQueued;}
     /** Frames actually played since the last interrupt. Lock-free for UI captions. */
     long playedFrames(){AudioTrack t=track;if(t==null)return 0;try{return Math.min(framesWritten,Integer.toUnsignedLong(t.getPlaybackHeadPosition()));}catch(RuntimeException released){return 0;}}
-    void interrupt(){synchronized(lock){queue.clear();framesWritten=0;framesQueued=0;hadOutput=false;
-        if(track!=null)try{track.pause();track.flush();track.play();}catch(Exception ignored){}lock.notifyAll();}listener.output(0);}
+    void interrupt(){boolean paused;synchronized(this){paused=focusPaused;}
+        synchronized(lock){queue.clear();framesWritten=0;framesQueued=0;hadOutput=false;
+        // Flushing restarts the track, except while another app holds audio focus: focus coming back plays it.
+        if(track!=null)try{track.pause();track.flush();if(!paused)track.play();}catch(Exception ignored){}lock.notifyAll();}listener.output(0);}
     static float level(byte[] pcm){return level(pcm,0,pcm.length);}
     private static float level(byte[] pcm,int offset,int length){double sum=0;for(int i=offset;i+1<offset+length;i+=2){short sample=(short)((pcm[i]&255)|(pcm[i+1]<<8));sum+=(double)sample*sample;}return length<2?0:(float)Math.min(1,Math.sqrt(sum/(length/2))/10000.0);}
     @Override public void close(){if(!closed.compareAndSet(false,true))return;captureGate.mute(true);

@@ -401,6 +401,33 @@ public final class NativeVoiceSessionTest {
             assertEquals(0,f.failures.get());f.receive("session.updated");assertEquals(0,f.failures.get());assertEquals(0,f.disconnections.get());
         }
     }
+    @Test public void reconnectKeepsTheCallsStartTimeForItsRecord()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.ready();long started=f.session.recordSnapshot("hung-up",System.currentTimeMillis(),1000).getLong("startedAtMs");
+            Thread.sleep(20);f.events.closed();f.callback("Reconnecting");f.frame("session.update");f.receive("session.updated");
+            long t=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);while(!f.session.isLive()&&System.nanoTime()<t)Thread.sleep(2);
+            assertEquals(started,f.session.recordSnapshot("hung-up",System.currentTimeMillis(),1000).getLong("startedAtMs"));
+        }
+    }
+    @Test public void noAudioBeforeARedialsSettingsAreConfirmedEvenAfterAFailedAttempt()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.ready();f.events.closed();f.callback("Reconnecting");f.frame("session.update");
+            f.events.closed();f.frame("session.update");  // the first redial opened, then died before confirmation
+            f.session.sendPcm(new byte[]{1,2,3,4});Thread.sleep(200);
+            for(JSONObject frame:f.sent)assertFalse("Audio sent before the redial was confirmed","input_audio_buffer.append".equals(frame.optString("type")));
+            f.receive("session.updated");long t=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);while(!f.session.isLive()&&System.nanoTime()<t)Thread.sleep(2);
+            f.session.sendPcm(new byte[]{1,2,3,4});assertEquals("input_audio_buffer.append",f.frame("input_audio_buffer.append").getString("type"));
+        }
+    }
+    @Test public void refusedRedialRetriesOnAFreshConversationInsteadOfEndingTheCall()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.ready();f.events.message(new JSONObject().put("type","conversation.created").put("conversation",new JSONObject().put("id","conv-1")).toString());
+            f.events.closed();f.callback("Reconnecting");f.frame("session.update");assertEquals("conv-1",f.lastUrl.queryParameter("conversation_id"));
+            f.events.message(new JSONObject().put("type","error").put("error",new JSONObject().put("type","invalid_request_error")).toString());
+            f.frame("session.update");assertNull(f.lastUrl.queryParameter("conversation_id"));
+            f.receive("session.updated");assertEquals(0,f.failures.get());assertEquals(0,f.disconnections.get());assertEquals(3,f.dials.get());
+        }
+    }
     @Test public void newConversationAfterRedialReplaysTheCallAndOwesTheCallerAnAnswer()throws Exception {
         try(Fixture f=new Fixture()){
             f.ready();f.events.message(new JSONObject().put("type","conversation.created").put("conversation",new JSONObject().put("id","conv-1")).toString());
