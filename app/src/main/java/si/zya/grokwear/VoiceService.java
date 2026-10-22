@@ -242,22 +242,34 @@ public final class VoiceService extends Service {
                 String ending="Call dropped".equals(finalState)?"disconnected":safe.isEmpty()?"hung-up":"failed";
                 JSONObject record=old.recordSnapshot(ending,System.currentTimeMillis(),finishedElapsed),line=old.handoffLine();syncStatus="Saving shared history";savingRecord=true;
                 long finishedGeneration=generation;
+                // The upload and the handoff run after hang-up, often with the wrist down. Stay in the
+                // foreground with the CPU awake until both finish, or a paused app could drop the
+                // handoff, which is never retried. Bounded by the HTTP timeouts and this cap.
+                PowerManager.WakeLock sending=((PowerManager)getSystemService(POWER_SERVICE)).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,"GrokWear:after-call");
+                sending.setReferenceCounted(false);sending.acquire(120000);
                 historyWriter.execute(()->{
-                    try{HistoryCoordinator.stage(account,context,record);}
-                    catch(Exception ignored){MAIN.post(()->{if(generation==finishedGeneration&&!running&&callHistoryEpoch==historyEpoch){
-                        savingRecord=false;syncStatus="rejected";emit();stopForeground(STOP_FOREGROUND_REMOVE);stopSelf();}});return;}
-                    // Encrypted pending record is durable and prepare() merges it into the next call.
-                    MAIN.post(()->{if(generation==finishedGeneration&&!running&&callHistoryEpoch==historyEpoch){
-                        savingRecord=false;syncStatus="pending";emit();stopForeground(STOP_FOREGROUND_REMOVE);stopSelf();}});
-                    String status;try{status=HistoryCoordinator.record(account,context,record).optString("syncStatus","uncertain");}
-                    catch(Exception ignored){status="uncertain";}String result=status;
-                    MAIN.post(()->{if(generation==finishedGeneration&&!running&&callHistoryEpoch==historyEpoch){syncStatus=result;emit();}});
-                    // Tell the Bot the call ended, as the official clients do, so anything owed follows up in its chat.
-                    // At most once: no retry after any failure, so no request can reach the Bot twice.
-                    if(CallHandoff.applies(bot)){
-                        String outcome=CallHandoff.send(body->account.handoffTool(context.binding(),body),bot.optString("id"),record.optString("callId"),CallHandoff.requests(record.optJSONArray("turns")),line);
-                        android.util.Log.i("GrokWearVoice","call_handoff result="+outcome);
-                    }else android.util.Log.i("GrokWearVoice","call_handoff skipped harness="+(bot==null||bot.optString("harness").isEmpty()?"unknown":bot.optString("harness")));
+                    try{
+                        try{HistoryCoordinator.stage(account,context,record);}
+                        catch(Exception ignored){MAIN.post(()->{if(generation==finishedGeneration&&!running&&callHistoryEpoch==historyEpoch){
+                            savingRecord=false;syncStatus="rejected";emit();}});return;}
+                        // Encrypted pending record is durable and prepare() merges it into the next call,
+                        // so Talk works again now, while the upload and the handoff continue.
+                        MAIN.post(()->{if(generation==finishedGeneration&&!running&&callHistoryEpoch==historyEpoch){
+                            savingRecord=false;syncStatus="pending";emit();}});
+                        String status;try{status=HistoryCoordinator.record(account,context,record).optString("syncStatus","uncertain");}
+                        catch(Exception ignored){status="uncertain";}String result=status;
+                        MAIN.post(()->{if(generation==finishedGeneration&&!running&&callHistoryEpoch==historyEpoch){syncStatus=result;emit();}});
+                        // Tell the Bot the call ended, as the official clients do, so anything owed follows up in its chat.
+                        // At most once: no retry after any failure, so no request can reach the Bot twice.
+                        if(CallHandoff.applies(bot)){
+                            String outcome=CallHandoff.send(body->account.handoffTool(context.binding(),body),bot.optString("id"),record.optString("callId"),CallHandoff.requests(record.optJSONArray("turns")),line);
+                            android.util.Log.i("GrokWearVoice","call_handoff result="+outcome);
+                        }else android.util.Log.i("GrokWearVoice","call_handoff skipped harness="+(bot==null||bot.optString("harness").isEmpty()?"unknown":bot.optString("harness")));
+                    }finally{
+                        // A new call that started meanwhile owns the service; leave it running.
+                        MAIN.post(()->{if(generation==finishedGeneration&&!running&&callHistoryEpoch==historyEpoch){stopForeground(STOP_FOREGROUND_REMOVE);stopSelf();}});
+                        if(sending.isHeld())sending.release();
+                    }
                 });
             }catch(Exception ignored){savingRecord=false;syncStatus="uncertain";}
         }
