@@ -82,7 +82,7 @@ public final class VoiceService extends Service {
     private volatile String replyText="";private volatile long replyStartFrame;private String lastSpoken="";
     /** Rough frames of speech per character, used until the whole answer's audio has arrived. */
     private static final double FRAMES_PER_CHAR=1500;
-    private ConnectivityManager.NetworkCallback networkWatch;private volatile android.net.Network callNetwork;
+    private ConnectivityManager.NetworkCallback networkWatch,defaultWatch;private volatile android.net.Network callNetwork;
     private long liveStartedAt,finishedElapsed,callDeadlineElapsed;
     /** The session is redialling: keep showing Reconnecting until it reports Listening again. */
     private boolean lineDown;
@@ -139,7 +139,9 @@ public final class VoiceService extends Service {
                             if(endReady&&drained&&session!=null)session.completeAfterPlayback();emit();notifyCall();return;}
                         if(ending)return;
                         if("Reconnecting".equals(value)){lineDown=true;responseIdle=true;state="Reconnecting";emit();notifyCall();return;}
-                        if(value.startsWith("Listening"))lineDown=false;
+                        if(value.startsWith("Listening")&&lineDown){lineDown=false;
+                            // Back on the line: whatever network carries it now is the one to watch.
+                            ConnectivityManager manager=getSystemService(ConnectivityManager.class);if(manager!=null&&manager.getActiveNetwork()!=null)callNetwork=manager.getActiveNetwork();}
                         if("speechidle".equals(value)){responseIdle=true;if(drained&&!lineDown)state="Listening";}
                         else if(value.startsWith("Speaking")){responseIdle=false;state="Speaking";}else if(value.startsWith("Thinking")){responseIdle=false;state="Thinking";}
                         else if(value.startsWith("Listening")){if(audio!=null&&drained)state="Listening";}emit();});}
@@ -154,7 +156,7 @@ public final class VoiceService extends Service {
                         // Flush on the session callback, before it can enqueue the next
                         // response's audio. A delayed main-thread flush could erase that reply.
                         synchronized(VoiceService.this){if(!valid(mine)||ending)return;if(audio!=null)audio.interrupt();drained=true;responseIdle=false;}
-                        post(mine,()->{if(!ending){state="Listening";emit();}});
+                        post(mine,()->{if(!ending&&!lineDown){state="Listening";emit();}});
                     }
                     public void onComplete(String reason){post(mine,()->finish(reason,""));}
                     public void onFailure(String safe){post(mine,()->finish("Call stopped",safe));}
@@ -184,21 +186,28 @@ public final class VoiceService extends Service {
         ConnectivityManager manager=getSystemService(ConnectivityManager.class);if(manager==null)return;
         callNetwork=manager.getActiveNetwork();
         networkWatch=new ConnectivityManager.NetworkCallback(){
-            // A dropped call redials as soon as any network is back, instead of waiting out a stuck attempt.
-            // Only a call that is redialling follows a new network; other networks coming and going are ignored.
-            @Override public void onAvailable(android.net.Network available){post(mine,()->{NativeVoiceSession live=session;if(live==null||!live.isReconnecting())return;BotAccount.networkChanged();
-                android.net.Network active=manager.getActiveNetwork();callNetwork=active!=null?active:available;live.networkAvailable();});}
-            @Override public void onLost(android.net.Network lost){BotAccount.networkChanged();post(mine,()->{
+            @Override public void onLost(android.net.Network lost){
+                // On this callback thread (closing sockets is I/O): only the call's own network, or the last one, matters.
+                if(lost.equals(callNetwork)||manager.getActiveNetwork()==null)BotAccount.networkChanged();
+                post(mine,()->{
             NativeVoiceSession live=session;
             // Before the socket exists, another network can still finish setup; only no network at all ends it.
             if(live!=null&&lost.equals(callNetwork))live.networkLost();else if(manager.getActiveNetwork()==null){if(live!=null)live.networkLost();else finish("Ready",OFFLINE);}
         });}};
         try{manager.registerNetworkCallback(new NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build(),networkWatch);}
         catch(RuntimeException unavailable){networkWatch=null;}
+        // A dropped call redials as soon as the watch has a new default network, instead of waiting out a stuck
+        // attempt. Other networks coming and going (Bluetooth proxy, LTE) are ignored.
+        defaultWatch=new ConnectivityManager.NetworkCallback(){@Override public void onAvailable(android.net.Network available){
+            NativeVoiceSession pending=session;if(pending==null||!pending.isReconnecting())return;BotAccount.networkChanged();
+            post(mine,()->{NativeVoiceSession live=session;if(live==null||!live.isReconnecting())return;callNetwork=available;live.networkAvailable();});}};
+        try{manager.registerDefaultNetworkCallback(defaultWatch);}catch(RuntimeException unavailable){defaultWatch=null;}
     }
     private void unwatchNetwork(){
-        ConnectivityManager.NetworkCallback watch=networkWatch;networkWatch=null;callNetwork=null;if(watch==null)return;
-        try{getSystemService(ConnectivityManager.class).unregisterNetworkCallback(watch);}catch(RuntimeException ignored){}
+        ConnectivityManager.NetworkCallback watch=networkWatch,defaults=defaultWatch;networkWatch=null;defaultWatch=null;callNetwork=null;
+        ConnectivityManager manager=getSystemService(ConnectivityManager.class);if(manager==null)return;
+        if(watch!=null)try{manager.unregisterNetworkCallback(watch);}catch(RuntimeException ignored){}
+        if(defaults!=null)try{manager.unregisterNetworkCallback(defaults);}catch(RuntimeException ignored){}
     }
     private boolean valid(long mine){return running&&generation==mine;}
     private void post(long mine,Runnable work){main.post(()->{if(valid(mine))work.run();});}

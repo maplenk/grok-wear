@@ -248,6 +248,8 @@ public final class NativeVoiceSession {
         lastProtocolCode=Set.of("internal_error","async_not_enabled","invalid_request_error","missing_tool_call_results").contains(code)?code:"unrecognized";
         protocolErrors++;
         if(reconnecting&&!settingsAccepted){listener.onDiagnostic("call_reconnect refused class="+lastProtocolClass);droppedConversationId=null;redialLater();return;}
+        // Our reply request was refused before any response started: free the line for the next one.
+        if(ready&&settingsAccepted&&awaitingCreated){awaitingCreated=false;replyInFlight=false;settleIfQuiet();}
         if(!ready||!settingsAccepted||"authentication_error".equals(kind))fail("Grok refused the voice session or one of its requests.");
         // Live request errors do not imply a closed session. Preserve turn ownership;
         // a subsequent response event or socket close provides the definitive state.
@@ -379,6 +381,7 @@ public final class NativeVoiceSession {
             }
             public void closed(){closedWith(-1);}
             public void closedWith(int code){if(!current())return;
+                if(!ending&&(code==1000||code==1008||code==4001)){finalClose(code,"The voice connection closed unexpectedly. Start a new voice chat to reconnect.");return;}
                 if(ending){execute(()->{replyInFlight=false;announceEndingIfReady();});}
                 else if(reconnecting)execute(()->{if(current())redialLater();});
                 else if(live())lineLost("The voice connection closed unexpectedly. Start a new voice chat to reconnect.",code);
@@ -391,15 +394,17 @@ public final class NativeVoiceSession {
     static final String RESUME="The line dropped for a moment and is back now. Say so in one short phrase, without apologising at length.";
     volatile int reconnectAttempts=RECONNECT_ATTEMPTS;volatile long reconnectBaseMs=1000;
     private volatile boolean reconnecting;private volatile long socketGeneration;private int reconnectAttempt,reconnects;
-    private String droppedConversationId,lostReason="";private boolean owesResume;
+    private String droppedConversationId,lostReason="";private boolean owesResume,awaitingCreated;
+    /** Lookup results that finished while the line was down; their function calls live in the dropped conversation. */
+    private final java.util.ArrayList<JSONObject> heldOutputs=new java.util.ArrayList<>();
     /**
      * Like the official Android client, a live call whose line drops redials instead of ending:
      * a fresh credential, the same conversation, backoff from 1 s to 10 s, up to 20 tries. Policy
      * (1008) and superseded (4001) closes are final, as in the official clients.
      */
     private void lineLost(String safe,int code){
-        // A clean (1000), policy (1008) or superseded (4001) close means the server ended the call on purpose.
-        if(code==1000||code==1008||code==4001||ending||terminal.get()){disconnect(safe);return;}
+        if(code==1000||code==1008||code==4001){finalClose(code,safe);return;}
+        if(ending||terminal.get()){disconnect(safe);return;}
         execute(()->{
             if(reconnecting||!live())return;
             reconnecting=true;ready=false;settingsAccepted=false;settingsSent=false;lostReason=safe;reconnectAttempt=0;reconnects++;
@@ -420,6 +425,11 @@ public final class NativeVoiceSession {
     private boolean redialNow;
     /** Optional backend for redials (fresh connections); the call's own backend otherwise. */
     volatile Backend redialBackend;
+    /** A clean (1000) close is Grok ending the call; policy (1008) and superseded (4001) closes drop it. Never redialled. */
+    private void finalClose(int code,String safe){
+        listener.onDiagnostic("call_closed code="+code);
+        if(code==1000)finish("Grok ended the call.",false);else disconnect(reconnecting?lostReason:safe);
+    }
     private void redialLater(){
         if(terminal.get()||!reconnecting)return;
         if(reconnectAttempt>=reconnectAttempts){listener.onDiagnostic("call_reconnect gave_up attempts="+reconnectAttempt);disconnect(lostReason);return;}
@@ -447,7 +457,12 @@ public final class NativeVoiceSession {
     /** Back on the line: replay this call's turns if the server started a new conversation, then owe the caller a word. */
     private void resumeAfterReconnect()throws Exception {
         String dropped=droppedConversationId,now;droppedConversationId=null;synchronized(historyGuard){now=realtimeConversationId;}
-        if(dropped==null||!dropped.equals(now)){JSONArray frames=replayFrames();for(int i=0;i<frames.length();i++)send(frames.getJSONObject(i));}
+        boolean resumed=dropped!=null&&dropped.equals(now);
+        if(resumed){for(JSONObject held:heldOutputs)send(held);}
+        else{JSONArray frames=replayFrames();for(int i=0;i<frames.length();i++)send(frames.getJSONObject(i));
+            // A new conversation never saw those function calls; their results would be orphans.
+            toolReplyOwed=false;}
+        heldOutputs.clear();
         if(owesResume){owesResume=false;requestReply(RESUME);}else payToolReply();
     }
     /** This call's settled turns, newest first up to 20 turns or 12,000 characters, as conversation items. */
@@ -552,7 +567,7 @@ public final class NativeVoiceSession {
                 try{worker.schedule(()->{if(terminal.get()||ending||reconnecting||callerSpeaking||replyInFlight||pendingLookups>0||callerTurn!=turn||responsesSeen!=seenBefore)return;
                     emit(()->listener.onState("speechidle"));},thinkingFallbackMs,TimeUnit.MILLISECONDS);}catch(java.util.concurrent.RejectedExecutionException ignored){}
                 break;
-            case "response.created":
+            case "response.created":awaitingCreated=false;
                 activeResponseId=responseId(e);interruptedReply=callerSpeaking;cancelRequested=false;responsesSeen++;
                 synchronized(historyGuard){assistantItem="";currentReplyItems.clear();suppressReplyTranscript=callerSpeaking;}
                 replyInFlight=true;announcedSpeaking=false;break;
@@ -613,7 +628,7 @@ public final class NativeVoiceSession {
         JSONObject response=new JSONObject();
         if(instructions!=null&&!instructions.isBlank())response.put("instructions",instructions);
         send(new JSONObject().put("type","response.create").put("response",response));
-        replyInFlight=true;
+        replyInFlight=true;awaitingCreated=true;
     }
     private void tool(JSONObject e)throws Exception {
         String id=e.optString("call_id",""),name=e.optString("name","");toolCalls++;
@@ -680,7 +695,10 @@ public final class NativeVoiceSession {
     }
     private void send(JSONObject frame)throws Exception {
         // While a redial waits for its settings to be confirmed, only the settings may go out.
-        if(reconnecting&&!"session.update".equals(frame.optString("type")))return;
+        if(reconnecting&&!"session.update".equals(frame.optString("type"))){
+            JSONObject item=frame.optJSONObject("item");
+            if(item!=null&&"function_call_output".equals(item.optString("type"))&&heldOutputs.size()<16)heldOutputs.add(frame);
+            return;}
         Wire ws=socket;
         if(terminal.get())return;
         String text=frame.toString();

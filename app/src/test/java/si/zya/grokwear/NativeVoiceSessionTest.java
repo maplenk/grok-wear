@@ -379,7 +379,9 @@ public final class NativeVoiceSessionTest {
     }
     @Test public void policyCloseEndsTheCallWithoutRedialling()throws Exception {
         try(Fixture f=new Fixture()){f.ready();f.events.closedWith(1008);f.callback("disconnected");assertEquals(1,f.dials.get());}
-        try(Fixture f=new Fixture()){f.ready();f.events.closedWith(1000);f.callback("disconnected");assertEquals(1,f.dials.get());}
+        try(Fixture f=new Fixture()){f.ready();f.events.closedWith(1000);f.callback("complete");assertEquals(1,f.dials.get());assertEquals(0,f.disconnections.get());}
+        // A phone taking over while the watch redials (4001) ends the watch's call instead of taking it back.
+        try(Fixture f=new Fixture()){f.ready();f.events.closed();f.callback("Reconnecting");f.frame("session.update");f.events.closedWith(4001);f.callback("disconnected");assertEquals(2,f.dials.get());}
     }
     @Test public void droppedLineRedialsTheSameConversationAndCarriesOn()throws Exception {
         try(Fixture f=new Fixture()){
@@ -426,6 +428,38 @@ public final class NativeVoiceSessionTest {
             f.events.message(new JSONObject().put("type","error").put("error",new JSONObject().put("type","invalid_request_error")).toString());
             f.frame("session.update");assertNull(f.lastUrl.queryParameter("conversation_id"));
             f.receive("session.updated");assertEquals(0,f.failures.get());assertEquals(0,f.disconnections.get());assertEquals(3,f.dials.get());
+        }
+    }
+    static Fixture lookupAcrossADrop(String newConversationId)throws Exception {
+        Fixture f=new Fixture();
+        f.ready();f.events.message(new JSONObject().put("type","conversation.created").put("conversation",new JSONObject().put("id","conv-1")).toString());
+        f.lookupEntered=new CountDownLatch(1);f.lookupRelease=new CountDownLatch(1);
+        f.receive("response.created");f.tool("lookup-held","search_conversations");assertTrue(f.lookupEntered.await(3,TimeUnit.SECONDS));
+        f.events.closed();f.callback("Reconnecting");f.frame("session.update");
+        f.lookupRelease.countDown();Thread.sleep(200);  // the result lands while the redial waits for confirmation
+        for(JSONObject frame:f.sent)assertFalse("Lookup result sent before the redial was confirmed","conversation.item.create".equals(frame.optString("type")));
+        f.events.message(new JSONObject().put("type","conversation.created").put("conversation",new JSONObject().put("id",newConversationId)).toString());
+        f.receive("session.updated");return f;
+    }
+    @Test public void lookupFinishingDuringARedialReachesAResumedConversation()throws Exception {
+        try(Fixture f=lookupAcrossADrop("conv-1")){
+            JSONObject item=f.frame("conversation.item.create").getJSONObject("item");
+            assertEquals("function_call_output",item.getString("type"));assertEquals("lookup-held",item.getString("call_id"));
+            f.frame("response.create");
+        }
+    }
+    @Test public void lookupFinishingDuringARedialIsDroppedOnANewConversation()throws Exception {
+        try(Fixture f=lookupAcrossADrop("conv-2")){
+            assertEquals(NativeVoiceSession.RESUME,f.frame("response.create").getJSONObject("response").getString("instructions"));
+            for(JSONObject frame:f.sent){JSONObject item=frame.optJSONObject("item");assertFalse("Orphaned lookup result sent",item!=null&&"function_call_output".equals(item.optString("type")));}
+        }
+    }
+    @Test public void refusedReplyRequestFreesTheLineForTheNextOne()throws Exception {
+        nextGraceMs=50;
+        try(Fixture f=new Fixture(new JSONArray(),"Say hello now")){
+            f.frame("response.create");f.ready();
+            f.events.message(new JSONObject().put("type","error").put("error",new JSONObject().put("type","invalid_request_error")).toString());
+            f.tool("after-refusal","search_conversations");f.frame("conversation.item.create");f.frame("response.create");
         }
     }
     @Test public void newConversationAfterRedialReplaysTheCallAndOwesTheCallerAnAnswer()throws Exception {
