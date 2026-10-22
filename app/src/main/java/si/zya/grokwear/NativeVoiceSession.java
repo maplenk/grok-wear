@@ -165,7 +165,25 @@ public final class NativeVoiceSession {
     private long callerTurn;
     private final Set<String> interruptedItems=new HashSet<>();
     /** Fixed diagnostic tokens and counters only; never server messages, IDs or transcripts. */
-    public String protocolDiagnostics(){return "received="+received+",errors="+protocolErrors+",class="+lastProtocolClass+",code="+lastProtocolCode;}
+    // Content-free call counters for the call_stop log line: sizes, counts and protocol event names only.
+    private volatile long pcmSent,speechStarts,audioOut,heard,toolCalls;private volatile int seeded,toolsOffered,instructionChars;private volatile String toolNames="",seedShape="";
+    private final java.util.Map<String,Integer> eventTypes=new java.util.LinkedHashMap<>();private volatile int eventsAfterReady;
+    public String protocolDiagnostics(){String types;synchronized(eventTypes){types=eventTypes.toString();}
+        return "received="+received+",errors="+protocolErrors+",class="+lastProtocolClass+",code="+lastProtocolCode
+        +",ready="+ready+",muted="+muted+",pcm="+pcmSent+",speech="+speechStarts+",heard="+heard+",responses="+responsesSeen+",audio_out="+audioOut
+        +",tool_calls="+toolCalls+",seeded="+seeded+"["+seedShape+"],tools="+toolsOffered+"["+toolNames+"],instructions="+instructionChars
+        +",after_ready="+eventsAfterReady+",events="+types;}
+    /** Roles, sizes and character classes of the seeded history, never its text. */
+    static String seedShape(JSONArray frames){
+        StringBuilder roles=new StringBuilder();int total=0,max=0,nonBmp=0,control=0,lone=0;
+        for(int i=0;i<frames.length();i++){JSONObject item=frames.optJSONObject(i)==null?null:frames.optJSONObject(i).optJSONObject("item");if(item==null)continue;
+            roles.append("user".equals(item.optString("role"))?'U':'A');JSONArray content=item.optJSONArray("content");String text=content==null||content.optJSONObject(0)==null?"":content.optJSONObject(0).optString("text");
+            total+=text.length();max=Math.max(max,text.length());
+            for(int c=0;c<text.length();c++){char ch=text.charAt(c);
+                if(Character.isHighSurrogate(ch)){if(c+1<text.length()&&Character.isLowSurrogate(text.charAt(c+1))){nonBmp++;c++;}else lone++;}
+                else if(Character.isLowSurrogate(ch))lone++;else if(ch<32&&ch!='\n'&&ch!='\t')control++;}}
+        return roles+" chars="+total+" max="+max+" nonbmp="+nonBmp+" lone="+lone+" ctrl="+control;
+    }
     private static String responseId(JSONObject event){
         JSONObject response=event.optJSONObject("response");
         String id=event.optString("response_id",response==null?"":response.optString("id",""));
@@ -325,6 +343,8 @@ public final class NativeVoiceSession {
         JSONObject audio=new JSONObject().put("input",new JSONObject().put("format",format)
                 .put("transcription",new JSONObject().put("model","grok-transcribe")))
                 .put("output",new JSONObject().put("format",format).put("speed",1.0));
+        instructionChars=plan.getString("instructions").length();JSONArray offered=plan.getJSONArray("tools");toolsOffered=offered.length();
+        StringBuilder names=new StringBuilder();for(int i=0;i<offered.length();i++){String name=offered.optJSONObject(i)==null?"":offered.optJSONObject(i).optString("name");if(name.matches("[a-z_]{1,40}")){if(names.length()>0)names.append(' ');names.append(name);}}toolNames=names.toString();
         JSONObject session=new JSONObject().put("instructions",plan.getString("instructions"))
                 .put("tools",plan.getJSONArray("tools")).put("turn_detection",new JSONObject().put("type","server_vad"))
                 .put("audio",audio).put("resumption",new JSONObject().put("enabled",true));
@@ -335,7 +355,7 @@ public final class NativeVoiceSession {
         if(!pcmSlots.tryAcquire()){fail("Microphone could not keep up with this voice connection.");return;}
         byte[] copy=Arrays.copyOf(pcm,pcm.length);
         if(!execute(()->{
-            try {if(ready&&!muted&&!ending)send(new JSONObject().put("type","input_audio_buffer.append").put("audio",codec.encode(copy)));}
+            try {if(ready&&!muted&&!ending){send(new JSONObject().put("type","input_audio_buffer.append").put("audio",codec.encode(copy)));pcmSent+=copy.length;}}
             finally{Arrays.fill(copy,(byte)0);pcmSlots.release();}
         })){Arrays.fill(copy,(byte)0);pcmSlots.release();}
     }
@@ -369,6 +389,7 @@ public final class NativeVoiceSession {
         if(eventBytes>MAX_EVENT){fail("Voice returned an oversized event.");return;}
         received+=eventBytes;
         JSONObject e=new JSONObject(raw);validateIdentifiers(e);String type=e.optString("type","");
+        String counted=type.matches("[a-z_.]{1,64}")?type:"other";synchronized(eventTypes){eventTypes.merge(counted,1,Integer::sum);}if(ready)eventsAfterReady++;
         if(!ready&&!Set.of("session.created","session.updated","conversation.created","conversation.item.created","conversation.item.added","error").contains(type))return;
         switch(type) {
             case "conversation.created":
@@ -380,7 +401,7 @@ public final class NativeVoiceSession {
             case "conversation.item.created":case "conversation.item.added":
                 JSONObject item=e.optJSONObject("item");if(item!=null&&pendingHistory.remove(item.optString("id","")))admitReady();break;
             case "input_audio_buffer.speech_started":
-                userItem="";callerSpoke=true;callerSpeaking=true;alreadySpoke=false;
+                userItem="";callerSpoke=true;callerSpeaking=true;alreadySpoke=false;speechStarts++;
                 callerTurn++;toolReplyOwed=false;pendingLookups=0;interruptReply();
                 // server_vad has already cancelled generation. Only stop local playback.
                 emit(()->listener.onSpeechStarted());break;
@@ -403,11 +424,11 @@ public final class NativeVoiceSession {
             case "response.audio.delta":case "response.output_audio.delta":
                 if(!callerSpeaking&&!interruptedReply&&belongsToCurrentReply(e)){String encoded=e.optString("delta","");
                     if(!encoded.isEmpty()){byte[] pcm=codec.decode(encoded);
-                        if(pcm.length%2!=0)throw new IllegalArgumentException();alreadySpoke=true;
+                        if(pcm.length%2!=0)throw new IllegalArgumentException();alreadySpoke=true;audioOut+=pcm.length;
                         if(!announcedSpeaking){announcedSpeaking=true;emit(()->listener.onState("Speaking"));}emit(()->listener.onAudio(pcm));}}
                 break;
             case "conversation.item.input_audio_transcription.updated":case "conversation.item.input_audio_transcription.completed":
-                captureTurn(e,"user",false);caption("You",e.optString("transcript",""));break;
+                if(type.endsWith(".completed"))heard++;captureTurn(e,"user",false);caption("You",e.optString("transcript",""));break;
             case "response.audio_transcript.delta":case "response.output_audio_transcript.delta":
                 if(!interruptedReply&&belongsToCurrentReply(e)&&!interruptedItems.contains(e.optString("item_id","")))captureTurn(e,"assistant",true);break;
             case "response.audio_transcript.done":case "response.output_audio_transcript.done":
@@ -420,7 +441,7 @@ public final class NativeVoiceSession {
     private void seedHistoryIfReady()throws Exception {
         if(!settingsAccepted||!historyAvailable||historySeeded||terminal.get())return;
         startupGuard.check();
-        JSONArray seeds=historyFrames(historicalTurns);historySeeded=true;
+        JSONArray seeds=historyFrames(historicalTurns);historySeeded=true;seeded=seeds.length();seedShape=seedShape(seeds);
         for(int i=0;i<seeds.length();i++){
             JSONObject seed=seeds.getJSONObject(i);String id="history-"+java.util.UUID.randomUUID();
             seed.getJSONObject("item").put("id",id);pendingHistory.add(id);
@@ -445,7 +466,7 @@ public final class NativeVoiceSession {
         replyInFlight=true;
     }
     private void tool(JSONObject e)throws Exception {
-        String id=e.optString("call_id",""),name=e.optString("name","");
+        String id=e.optString("call_id",""),name=e.optString("name","");toolCalls++;
         if(id.isEmpty()){fail("Grok returned a tool call without an identifier.");return;}
         if(calls.contains(id))return; // One execution per function-call ID, including refusals.
         if(calls.size()>=128){finish("Call preview reached its tool limit.",false);return;}
