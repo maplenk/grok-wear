@@ -31,14 +31,21 @@ final class NativeAudio implements AutoCloseable {
     private volatile long framesWritten,framesQueued; private boolean hadOutput;
     NativeAudio(Context context,Listener listener){this.context=context.getApplicationContext();this.manager=(AudioManager)context.getSystemService(Context.AUDIO_SERVICE);this.listener=listener;}
     void start(boolean initiallyMuted) {
-        captureGate.mute(initiallyMuted);
+        synchronized(this){userMuted=initiallyMuted;}captureGate.mute(initiallyMuted);
         try {
             if(context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){
                 close();listener.failure("Microphone access is required to start voice.");return;
             }
             AudioAttributes attributes=new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build();
             focus=new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT).setAudioAttributes(attributes)
-                .setOnAudioFocusChangeListener(change->{if(change!=AudioManager.AUDIOFOCUS_GAIN&&!closed.get())listener.failure("Audio focus was lost. Start a new call to continue.");}).build();
+                .setOnAudioFocusChangeListener(change->{if(closed.get())return;
+                    // Like the official Android client, a short interruption (alarm, timer, assistant)
+                    // pauses the call and focus coming back resumes it. A ducking request leaves the
+                    // call running; only a permanent loss ends it.
+                    if(change==AudioManager.AUDIOFOCUS_GAIN)focusPause(false);
+                    else if(change==AudioManager.AUDIOFOCUS_LOSS_TRANSIENT)focusPause(true);
+                    else if(change==AudioManager.AUDIOFOCUS_LOSS)listener.failure("Audio focus was lost. Start a new call to continue.");
+                }).build();
             if(manager.requestAudioFocus(focus)!=AudioManager.AUDIOFOCUS_REQUEST_GRANTED)throw new IllegalStateException();
             focusHeld=true;oldMode=manager.getMode();
             if(oldMode!=AudioManager.MODE_IN_COMMUNICATION){manager.setMode(AudioManager.MODE_IN_COMMUNICATION);changedMode=true;}
@@ -62,15 +69,24 @@ final class NativeAudio implements AutoCloseable {
         }catch(SecurityException revoked){close();listener.failure("Microphone access was revoked. Allow microphone access before starting voice again.");}
         catch(Exception ignored){close();listener.failure("Watch audio could not start. Check microphone access and the audio route.");}
     }
-    private void capture(){byte[] buffer=new byte[FRAME];try{while(!closed.get()){
+    private void capture(){byte[] buffer=new byte[FRAME];int failedReads=0;try{while(!closed.get()){
         long ticket=captureGate.begin();if(ticket<0){Thread.sleep(20);continue;}
         AudioRecord r=record;if(r==null)return;
         int n=r.read(buffer,0,buffer.length,AudioRecord.READ_BLOCKING);
         if(closed.get())return;if(!captureGate.accepts(ticket))continue;
-        if(n<=0){listener.failure("Microphone capture stopped. Start a new call.");return;}
+        // Like the official Android client, a failed read is retried; only about 2 s of failures end the call.
+        if(n<=0){if(++failedReads>=40){listener.failure("Microphone capture stopped. Start a new call.");return;}Thread.sleep(50);continue;}
+        failedReads=0;
         byte[] pcm=Arrays.copyOf(buffer,n);try{listener.input(pcm,level(pcm));}finally{Arrays.fill(pcm,(byte)0);}
     }}catch(InterruptedException ignored){Thread.currentThread().interrupt();}catch(Exception ignored){if(!closed.get())listener.failure("Microphone capture failed.");}finally{Arrays.fill(buffer,(byte)0);}}
-    void mute(boolean value){if(captureGate.muted()==value)return;captureGate.mute(value);try{AudioRecord r=record;if(r!=null){if(value)r.stop();else r.startRecording();}}catch(Exception ignored){if(!closed.get())listener.failure("Microphone could not change mute state.");}}
+    // The microphone records only when the caller hasn't muted and no other app holds audio focus.
+    private boolean userMuted=true,focusPaused;
+    synchronized void mute(boolean value){userMuted=value;applyCapture();}
+    private synchronized void focusPause(boolean paused){
+        if(focusPaused==paused)return;focusPaused=paused;applyCapture();
+        AudioTrack t=track;try{if(t!=null){if(paused)t.pause();else t.play();}}catch(Exception ignored){if(!closed.get())listener.failure("Watch audio could not resume.");}
+    }
+    private void applyCapture(){boolean off=userMuted||focusPaused;if(captureGate.muted()==off)return;captureGate.mute(off);try{AudioRecord r=record;if(r!=null){if(off)r.stop();else r.startRecording();}}catch(Exception ignored){if(!closed.get())listener.failure("Microphone could not change mute state.");}}
     void output(byte[] pcm){if(closed.get()||pcm==null||pcm.length==0)return;
         PcmPlaybackBuffer.Admission admission;int queued;
         synchronized(lock){if(closed.get())return;admission=queue.offer(pcm);queued=queue.size();
