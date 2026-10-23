@@ -16,7 +16,7 @@ Signing out removes all of this from the watch. It does not delete anything from
 - **When you pin or unpin a Bot:** your account's pinned-Bot list, as the official apps save it.
 - **When you send a text message:** the text you reviewed, to that Bot's chat, and a "read" mark when you open the chat, as the official apps do. The watch keeps your last few messages and their delivery state until you sign out.
 - **To the Bot, after a call:** for Bots that support it, the same end-of-call note the official apps send ("The call ended…"), then up to the last six things you said on the call, so the Bot can follow up in chat. It is sent once and never retried.
-- **To xAI's realtime voice service:** your microphone audio while a call is active, and short-lived call credentials. The Bot's spoken replies come back the same way.
+- **To xAI's realtime voice service:** your microphone audio while a call is active, short-lived call credentials, and the call's instructions for the Bot. Like the official apps, those instructions include the date and time the call started and the watch's time zone (for example "Asia/Shanghai"), so the Bot can answer "what day is it". The Bot's spoken replies come back the same way.
 
 Microphone audio is captured only during a call you started by tapping Talk, and only while it is not muted. Audio is streamed, never written to storage, and not sent anywhere else.
 

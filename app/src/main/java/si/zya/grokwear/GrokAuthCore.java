@@ -158,6 +158,15 @@ final class GrokAuthCore {
         }
     }
 
+    /** Drops the saved gateway config the gateway refused, unless a newer one already replaced it. */
+    void forgetConfig(String gatewayToken) throws Exception {
+        synchronized(LOCK) {
+            JSONObject root=store.read(),config=root.optJSONObject("config");
+            if(config==null||gatewayToken==null||!gatewayToken.equals(config.optString("gatewayToken")))return;
+            root.remove("config");root.remove("config_saved_ms");store.write(root);
+        }
+    }
+
     /** Memory-only backend credential context; never expose this to UI or persist elsewhere. */
     JSONObject backendContext() throws Exception {
         renewIfDue();

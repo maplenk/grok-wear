@@ -28,8 +28,9 @@ final class BotAccount {
     static void networkChanged(){try{HTTP.connectionPool().evictAll();}catch(RuntimeException ignored){}GrokAuthClient.networkChanged();NativeVoiceSession.networkChanged();}
     BotAccount(Context context) {
         auth=new GrokAuthClient(context);
-        core=new GrokCore(new GrokVault(context),BotAccount::gateway,root->{
-            verify(root,auth.state());JSONObject config=auth.currentConfig();verify(root,auth.state());return config;
+        core=new GrokCore(new GrokVault(context),BotAccount::gateway,new GrokCore.ConfigProvider(){
+            public JSONObject current(JSONObject root)throws Exception{verify(root,auth.state());JSONObject config=auth.currentConfig();verify(root,auth.state());return config;}
+            public void stale(JSONObject config)throws Exception{auth.forgetConfig(config.optString("gatewayToken"));}
         });
         GrokVault privateHistory=new GrokVault(context,".continuity-v1");
         continuity=new HistoryCoordinator(new HistoryCoordinator.Store(){
@@ -230,20 +231,26 @@ final class BotAccount {
         String agent=write?body.getJSONObject("record").optString("agentId"):body.optString("id");
         if(!binding.optString("agentId").equals(agent))throw new GrokCore.Failure("Grok Bot changed. Nothing was synced.",true);
         JSONObject config=GrokCore.validateConfig(auth.currentConfig());verifyHistoryBinding(binding,selectionRequired);
-        Request.Builder request=new Request.Builder().url(config.getString("gatewayUrl")+"/api/"+method)
-            .header("Authorization","Bearer "+config.getString("gatewayToken"));
-        JSONObject headers=config.getJSONObject("headers");Iterator<String> keys=headers.keys();
-        while(keys.hasNext()){String key=keys.next();request.header(key,headers.getString(key));}
+        Request.Builder request=historyRequest(config,method);
         long remaining=binding.optLong("deadlineMs",System.currentTimeMillis()+30000)-System.currentTimeMillis();if(remaining<=0)throw new GrokCore.Failure("Shared history took too long to load.",true);
         Object result;
         try{result=historyWire(request,body,method,Math.min(30000,remaining));}
         catch(GrokCore.Failure interrupted){
-            // Reads are idempotent; one fresh attempt within the same deadline. Writes are never replayed.
+            // A gateway that moved on from this config refused before acting: one retry with a fresh one.
             long left=binding.optLong("deadlineMs",System.currentTimeMillis()+30000)-System.currentTimeMillis();
+            if(GrokCore.staleGateway(interrupted)&&left>=3000){auth.forgetConfig(config.getString("gatewayToken"));config=GrokCore.validateConfig(auth.currentConfig());verifyHistoryBinding(binding,selectionRequired);
+                result=historyWire(historyRequest(config,method),body,method,Math.min(30000,left));verifyHistoryBinding(binding,selectionRequired);return result;}
+            // Reads are idempotent; one fresh attempt within the same deadline. Writes are never replayed.
             if(write||!INTERRUPTED.equals(interrupted.getMessage())||left<3000)throw interrupted;
             verifyHistoryBinding(binding,selectionRequired);result=historyWire(request,body,method,Math.min(30000,left));
         }
         verifyHistoryBinding(binding,selectionRequired);return result;
+    }
+    private static Request.Builder historyRequest(JSONObject config,String method)throws Exception{
+        Request.Builder request=new Request.Builder().url(config.getString("gatewayUrl")+"/api/"+method).header("Authorization","Bearer "+config.getString("gatewayToken"));
+        JSONObject headers=config.getJSONObject("headers");Iterator<String> keys=headers.keys();
+        while(keys.hasNext()){String key=keys.next();request.header(key,headers.getString(key));}
+        return request;
     }
     private static Object historyWire(Request.Builder request,JSONObject body,String method,long timeoutMs)throws Exception {
         byte[] bytes=body.toString().getBytes(StandardCharsets.UTF_8);
@@ -254,7 +261,7 @@ final class BotAccount {
                 public void writeTo(okio.BufferedSink sink)throws java.io.IOException{sink.write(bytes);}};
             okhttp3.Call call=(method.equals("recordVoiceCall")?HTTP:HISTORY).newCall(request.post(payload).build());call.timeout().timeout(timeoutMs,TimeUnit.MILLISECONDS);
             try(Response response=call.execute()){
-                if(response.code()!=200&&!(method.equals("recordVoiceCall")&&response.code()==204))throw new GrokCore.Failure("History sync failed (HTTP "+response.code()+").",true);
+                if(response.code()!=200&&!(method.equals("recordVoiceCall")&&response.code()==204))throw new GrokCore.Failure("History sync failed (HTTP "+response.code()+").",true,"",response.code());
                 byte[] received=response.body()==null?new byte[0]:GrokVault.readBounded(response.body().byteStream(),1024*1024);
                 try{
                     String raw=new String(received,StandardCharsets.UTF_8).trim();
@@ -311,7 +318,7 @@ final class BotAccount {
             };
             try(Response response=client.newCall(request.post(payload).build()).execute()) {
                 // A 4xx is the service refusing; a 5xx may or may not have taken effect.
-                if(response.code()!=200)throw new GrokCore.Failure("Grok request failed (HTTP "+response.code()+").",response.code()<500,errorCode(response));
+                if(response.code()!=200)throw new GrokCore.Failure("Grok request failed (HTTP "+response.code()+").",response.code()<500,errorCode(response),response.code());
                 if(response.body()==null)throw new java.io.IOException();
                 byte[] received=GrokVault.readBounded(response.body().byteStream(),1024*1024);
                 try {String text=new String(received,StandardCharsets.UTF_8);

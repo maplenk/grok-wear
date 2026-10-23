@@ -11,14 +11,27 @@ import java.util.function.BooleanSupplier;
 final class GrokCore {
     interface Store { JSONObject read() throws Exception; void write(JSONObject value) throws Exception; }
     interface Transport { JSONObject post(JSONObject config, String method, JSONObject body) throws Exception; }
-    interface ConfigProvider { JSONObject current(JSONObject root) throws Exception; }
+    interface ConfigProvider {
+        JSONObject current(JSONObject root) throws Exception;
+        /** The gateway no longer accepts this config; the next current() fetches a fresh one. */
+        default void stale(JSONObject config) throws Exception {}
+    }
     static final class Failure extends Exception {
         final boolean rejected;
         /** Connect error code from the service (for example "resource_exhausted"), or "". */
         final String code;
+        /** HTTP status of a refused gateway request, or 0. */
+        final int status;
         Failure(String safeMessage, boolean rejected) { this(safeMessage, rejected, ""); }
-        Failure(String safeMessage, boolean rejected, String code) { super(safeMessage); this.rejected = rejected; this.code = code; }
+        Failure(String safeMessage, boolean rejected, String code) { this(safeMessage, rejected, code, 0); }
+        Failure(String safeMessage, boolean rejected, String code, int status) { super(safeMessage); this.rejected = rejected; this.code = code; this.status = status; }
     }
+    /**
+     * Like the official Android client: a gateway answering 401, 404 or 417 has moved on from this
+     * config (for example after the host restarted). It refused before acting, so one retry with a
+     * fresh config is safe, even for a send.
+     */
+    static boolean staleGateway(Exception e) { return e instanceof Failure && (((Failure)e).status == 401 || ((Failure)e).status == 404 || ((Failure)e).status == 417); }
     // Activities and the voice service own separate core instances over the same vault.
     // Serialize their local roster/account transactions, never renewal or transport calls.
     private static final Object ACCOUNT_STATE_LOCK=new Object();
@@ -103,7 +116,9 @@ final class GrokCore {
         store.write(root);
     }
     private JSONObject post(JSONObject root, String method, JSONObject body) throws Exception {
-        return transport.post(currentConfig(root), method, body);
+        JSONObject config = currentConfig(root);
+        try { return transport.post(config, method, body); }
+        catch(Failure refused) { if(!staleGateway(refused)) throw refused; configs.stale(config); return transport.post(currentConfig(root), method, body); }
     }
     private JSONObject currentConfig(JSONObject root) throws Exception {
         try { return validateConfig(configs.current(copy(root))); }
@@ -363,7 +378,9 @@ final class GrokCore {
             JSONObject body=new JSONObject().put("agentId",job.getString("botId")).put("prompt",job.getString("text"))
                     .put("clientNonce",job.getString("nonce")).put("source","mobile").put("sendSource","chat").put("firstSentAtMs",job.getLong("created"));
             if(job.has("sessionId"))body.put("sessionId",job.getString("sessionId"));
-            JSONObject result=transport.post(config,"sendPrompt",body);
+            JSONObject result;
+            try{result=transport.post(config,"sendPrompt",body);}
+            catch(Failure refused){if(!staleGateway(refused))throw refused;configs.stale(config);result=transport.post(currentConfig(root),"sendPrompt",body);}
             // The service answers with nothing or {accepted:true}; a repeated nonce is accepted, not doubled.
             if(result!=null&&result.has("accepted")&&!result.optBoolean("accepted"))job.put("state","unknown").put("notice","Not confirmed yet. It won't be sent again on its own.");
             else job.put("state","sent").put("notice","Sent");

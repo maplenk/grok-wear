@@ -30,6 +30,27 @@ public class GrokCoreTest {
     static JSONObject entry(String id,String kind,String text)throws Exception{return new JSONObject().put("id",id).put("kind",kind).put("text",text);}
     static JSONObject transcript(JSONObject...entries)throws Exception{return new JSONObject().put("entries",new JSONArray(Arrays.asList(entries)));}
 
+    @Test public void movedGatewayGetsAFreshConfigAndOneRetryLikeTheOfficialClient()throws Exception {
+        List<String> calls=new ArrayList<>();int[] stale={0};int[] refusals={1};int[] status={417};List<String> nonces=new ArrayList<>();
+        GrokCore.ConfigProvider configs=new GrokCore.ConfigProvider(){
+            public JSONObject current(JSONObject root)throws Exception{return root.getJSONObject("config");}
+            public void stale(JSONObject config){stale[0]++;}
+        };
+        GrokCore c=new GrokCore(new Memory(),(cfg,method,body)->{calls.add(method);
+            if(method.equals("sendPrompt"))nonces.add(body.getString("clientNonce"));
+            if(refusals[0]-->0)throw new GrokCore.Failure("Grok request failed (HTTP "+status[0]+").",true,"",status[0]);
+            if(method.equals("sendPrompt"))return new JSONObject();
+            return new JSONObject().put("agents",new JSONArray().put(new JSONObject().put("id","main").put("name","Main")));},configs);
+        c.link(config());assertEquals(1,c.bots().length());assertEquals(Arrays.asList("listAgents","listAgents"),calls);assertEquals(1,stale[0]);
+        c.select("main");
+        refusals[0]=1;String id=c.prepare("Hello");assertEquals("sent",c.submit(id).getString("state"));
+        assertEquals(2,nonces.size());assertEquals("The retry reuses the nonce, so the service keeps one copy",nonces.get(0),nonces.get(1));
+        assertEquals(2,stale[0]);
+        // A refusal that isn't about the config is not retried.
+        calls.clear();refusals[0]=1;status[0]=403;
+        try{c.bots();fail();}catch(GrokCore.Failure expected){assertEquals(403,expected.status);}
+        assertEquals(1,calls.size());assertEquals(2,stale[0]);
+    }
     @Test public void restrictCredentialDestinations()throws Exception {
         for(String url:Arrays.asList("http://box.cursorvm.com","https://cursorvm.com.evil.test","https://evil.test/cursor.com","https://user@box.cursorvm.com","https://box.cursorvm.com:444","https://box.cursorvm.com/?token=x","https://box.cursorvm.com/#frag","https://box.cursorvm.com/a/../b")){
             try{GrokCore.validateConfig(config().put("gatewayUrl",url));fail(url);}catch(Exception expected){}

@@ -24,6 +24,7 @@ final class GrokAuthClient {
     JSONObject pendingLogin()throws Exception{return core.pendingLogin();}
     JSONObject state()throws Exception{return core.state();}
     JSONObject currentConfig()throws Exception{return core.currentConfig();}
+    void forgetConfig(String gatewayToken)throws Exception{core.forgetConfig(gatewayToken);}
     void cancel()throws Exception{core.cancel();}
     void unlink()throws Exception{core.unlink();}
 

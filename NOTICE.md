@@ -8,7 +8,7 @@ Grok Wear is an independent, unofficial project. It is not affiliated with, endo
 
 ## Bot avatar design data (not covered by the MIT License)
 
-`app/src/main/assets/bot-avatar.json` contains Bot avatar outlines, eye expressions, colors and animation timing taken from the official Grok Bot desktop application. **This design data belongs to xAI.** It is not covered by this repository's MIT License, and no license to it is granted here.
+`app/src/main/assets/bot-avatar.json` contains Bot avatar outlines, eye expressions, colors and animation timing taken from the official Grok Bot desktop application, plus the pumpkin outline and stem from the official Grok Bot Android app. **This design data belongs to xAI.** It is not covered by this repository's MIT License, and no license to it is granted here.
 
 It is included only so the watch can show each Bot with the avatar shape and color that its owner chose in Grok Bot. It will be removed promptly if xAI asks. To report a concern, open an issue or contact the maintainers privately as described in [SECURITY.md](SECURITY.md).
 
