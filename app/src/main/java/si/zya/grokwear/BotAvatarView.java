@@ -77,7 +77,13 @@ public final class BotAvatarView extends View {
     }
     private void releasePhoto(){photoShader=null;if(photo!=null){photo.recycle();photo=null;}}
     public void setPreview(boolean value){preview=value;setBotName(name);}
-    public void setBotName(String value){String next=value==null?"":value;if(!next.equals(name)){releasePhoto();photoDataUrl=null;}name=next;if(preview){shape=name.equals("Research Bot")?"cloud":"blob";color=name.equals("Research Bot")?"orange":"blue";}else{shape="blob";color="";}refresh();}
+    public void setBotName(String value){String next=value==null?"":value;if(!next.equals(name)){releasePhoto();photoDataUrl=null;}name=next;if(preview){String[] look=previewLook(name);shape=look[0];color=look[1];}else{shape="blob";color="";}refresh();}
+    /** Debug preview looks for the synthetic demo Bots. */
+    static String[] previewLook(String name){switch(name==null?"":name){
+        case "Research Bot":return new String[]{"cloud","orange"};case "Travel Bot":return new String[]{"teardrop","blue"};case "Inbox Bot":return new String[]{"squircle","violet"};
+        case "Release Bot":return new String[]{"wedge","cyan"};case "Notes Bot":return new String[]{"pebble","green"};case "Fitness Bot":return new String[]{"heart","red"};
+        case "Budget Bot":return new String[]{"hex","yellow"};case "Reading Bot":return new String[]{"pumpkin","orange"};case "Garden Bot":return new String[]{"leaf","green"};
+        case "Music Bot":return new String[]{"star","violet"};case "Recipe Bot":return new String[]{"egg","brown"};default:return new String[]{"blob","blue"};}}
     /** Only call for avatarShape/avatarColor metadata already supplied by the account schema. */
     public void setAvatar(String shape,String color){if(designs==null)return;this.shape=designs.source.optJSONObject("shapes").has(shape)?shape:"blob";this.color=designs.colors.containsKey(color)?color:"";refresh();}
     /** Audio meters belong to WaveformView; unchanged state never schedules a redraw. */

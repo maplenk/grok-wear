@@ -30,7 +30,7 @@ public final class MainActivity extends Activity {
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
     private final ExecutorService preferencesWorker=Executors.newSingleThreadExecutor();
     private final ExecutorService rosterWorker=Executors.newSingleThreadExecutor();
-    private boolean preview,visible,polling,simulated;
+    private boolean preview,previewMedia,visible,polling,simulated,scrollToEnd;
     private int epoch,previewEpoch,botRequest,navigation,activeRosterRequest;
     private boolean botsLoading,botSelectionPending,botsCached,rosterFetchActive;
     private long botsFetchedAtMs,lastBotRefreshAttemptElapsed;
@@ -55,7 +55,9 @@ public final class MainActivity extends Activity {
     private JSONArray historyEntries=new JSONArray();
     private android.window.OnBackInvokedCallback modernBack;
     private String screen="welcome",botName="Main Bot",caption="",speaker="",safeError="";
-    private boolean previewMuted,previewSaving;private long previewElapsedMs=42000;
+    private boolean previewMuted,previewSaving;private long previewElapsedMs=42000,previewCallStartMs;
+    /** Media captures count up from Listening like a real call; other previews show a fixed time. */
+    private long previewElapsed(){return !previewMedia?previewElapsedMs:previewCallStartMs>0?android.os.SystemClock.elapsedRealtime()-previewCallStartMs:0;}
     private BotAccount account;
     // Pinned Bots: one write at a time, and Home always shows the list the account stored.
     private String pinSavingId="",pinErrorId="",justPinnedId="",pinFadeId="";private boolean pinSavingTarget,pinGridExpanded;private int pinRequest,pinsFullAt=-1,homeScrollY;private long lastPinsReadElapsed;private JSONObject actionsBot,readerEntry;private int readerReturnY;
@@ -88,6 +90,8 @@ public final class MainActivity extends Activity {
     private final Runnable pollTick=()->pollLogin();
     @Override public void onCreate(Bundle state){super.onCreate(state);
         preview=BuildConfig.DEBUG&&getIntent().getBooleanExtra("ui_preview",false);
+        // Launch-media captures: no preview label, a short demo chat per Bot. Synthetic data only.
+        previewMedia=preview&&getIntent().getBooleanExtra("preview_media",false);
         // Real launches show a blank frame until the saved sign-in is read, never a flash of "Sign in".
         if(!preview){botName="Your Bot";screen="launch";getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);account=new BotAccount(this);}
         side=(int)(getResources().getDisplayMetrics().widthPixels/getResources().getDisplayMetrics().density);
@@ -96,7 +100,7 @@ public final class MainActivity extends Activity {
     }
     @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);
         // An existing real-account activity cannot be switched into screenshot mode.
-        if(preview)setPreviewScreen(intent.getStringExtra("preview_screen"));
+        if(preview){previewMedia=intent.getBooleanExtra("preview_media",false);setPreviewScreen(intent.getStringExtra("preview_screen"));}
     }
     @Override protected void onResume(){super.onResume();visible=true;for(BotAvatarView face:avatars)face.running(true);if(waveform!=null)waveform.running(true);if(isCall()){main.removeCallbacks(callClock);main.post(callClock);}
         if(!preview){VoiceService.addListener(voiceListener);if(SIGN_OUT_ACTIVE.get()){screen="signout_confirm";render();main.removeCallbacks(signOutObserver);main.post(signOutObserver);return;}if(awaitingMicrophonePermission&&!pendingTalkCurrent())clearPendingTalk();rosterRetryUsed=false;if(VoiceService.snapshot().active||isCall())renderVoice();else if(screen.equals("done")||screen.equals("dropped")||screen.equals("error"))render();else if(!awaitingMicrophonePermission&&!pendingTalkGranted)loadAccount();}
@@ -131,7 +135,7 @@ public final class MainActivity extends Activity {
         if(screen.equals("thinking")){speaker="You";caption="What is next on my calendar?";}
         if(screen.equals("home_primary")){try{bots=new JSONArray().put(new JSONObject().put("id","preview-primary").put("name","Main Bot").put("lastMessagePreview","Ready when you are"));botPreferences=new JSONObject().put("mainAgentId","preview-primary");}catch(Exception ignored){}screen="bots";}else if(screen.equals("bots")){botPreferences=new JSONObject();}
         if(java.util.Set.of("home_pinned","home_overflow","bot_actions","pin_error","pins_full","bot_pinned").contains(screen))previewPins(screen);
-        if(screen.equals("compose_review")){draftMessage="Use three sentences to introduce yourself";botName="Wear test";}
+        if(screen.equals("compose_review")){draftMessage=previewMedia?previewDraft("Travel Bot"):"Use three sentences to introduce yourself";botName=previewMedia?"Travel Bot":"Wear test";}
         if(screen.equals("reader")){try{readerEntry=new JSONObject().put("role","assistant").put("atMs",System.currentTimeMillis()).put("text","**Alert:** Taipei to Tokyo one-way. The cheapest this month is **Oct 10 (Sat) NT$3,430**, NT$210 below last time (about **5.8%**), and your lowest on record.\n\nThe cheapest day moved to **Oct 10**; only 2 seats left at this fare. Your Oct 27 pick is now NT$3,980.");botName="Travel Bot";}catch(Exception ignored){}}
         if(screen.equals("ready_long")){clearHistory();try{historyEntries.put(new JSONObject().put("id","long-preview").put("role","assistant").put("text","**Research Bot** has an update.\nThe first task is ready for review.\nThe second task is waiting for input.\nThe third task has a draft.\nThe fourth task is ready tomorrow.\nThe fifth task has a short note.\nThe sixth task is still working.\nThe seventh task is waiting.\nThe eighth task is complete.\nThe ninth task needs review.\nThe tenth task has a summary.\nThe final task is done."));}catch(Exception ignored){}screen="ready";}
         if(screen.startsWith("history"))previewHistory(screen);
@@ -144,13 +148,16 @@ public final class MainActivity extends Activity {
         final int keepY=currentScroll!=null&&screen.equals(renderedScreen)&&!isCall()?currentScroll.getScrollY():0;renderedScreen=screen;bottomAction=false;
         for(BotAvatarView face:avatars)face.running(false);avatars.clear();orb=null;if(waveform!=null)waveform.running(false);waveform=null;transcriptBody=null;callStatus=null;main.removeCallbacks(callClock);
         root=new FrameLayout(this);root.setBackgroundColor(Color.BLACK);setContentView(root);
-        TextView top=text(preview?"UI preview":"",10,SECONDARY);top.setLetterSpacing(.08f);
+        TextView top=text(preview&&!previewMedia?"UI preview":"",10,SECONDARY);top.setLetterSpacing(.08f);
         FrameLayout.LayoutParams tp=new FrameLayout.LayoutParams(-1,dp(18),Gravity.TOP|Gravity.CENTER_HORIZONTAL);tp.topMargin=dp(9);root.addView(top,tp);if(!preview||screen.equals("ready")||screen.equals("done")||isCall())top.setVisibility(View.GONE);
         ScrollView scroll=new ScrollView(this);currentScroll=scroll;scroll.setFocusable(true);scroll.setFocusableInTouchMode(true);scroll.requestFocus();scroll.setFillViewport(true);scroll.setClipToPadding(false);scroll.setVerticalScrollBarEnabled(false);
         FrameLayout.LayoutParams sp=new FrameLayout.LayoutParams(-1,-1);sp.topMargin=dp(isCall()?(preview?27:19):23);sp.bottomMargin=dp(isCall()?side*.12f+50:screen.equals("bots")?9:screen.equals("done")?12:30);root.addView(scroll,sp);
         body=new LinearLayout(this);body.setOrientation(LinearLayout.VERTICAL);body.setGravity(Gravity.CENTER_HORIZONTAL);body.setPadding(dp(side*.12f),dp(isCall()||screen.equals("ready")?0:3),dp(side*.12f),dp(isCall()?0:screen.equals("bots")||screen.equals("done")?12:58));scroll.addView(body,new ScrollView.LayoutParams(-1,-2));
         if(isCall()){call();return;}
-        if(keepY>0){final ScrollView restored=scroll;restored.getViewTreeObserver().addOnPreDrawListener(new android.view.ViewTreeObserver.OnPreDrawListener(){
+        // After sending, and when the Bot's reply lands, show the newest message rather than the top of the page.
+        if(scrollToEnd&&screen.equals("ready")){scrollToEnd=false;final ScrollView end=scroll;end.getViewTreeObserver().addOnPreDrawListener(new android.view.ViewTreeObserver.OnPreDrawListener(){
+            public boolean onPreDraw(){end.getViewTreeObserver().removeOnPreDrawListener(this);end.scrollTo(0,Math.max(0,end.getChildAt(0).getHeight()-end.getHeight()));return true;}});}
+        else if(keepY>0){final ScrollView restored=scroll;restored.getViewTreeObserver().addOnPreDrawListener(new android.view.ViewTreeObserver.OnPreDrawListener(){
             public boolean onPreDraw(){restored.getViewTreeObserver().removeOnPreDrawListener(this);restored.scrollTo(0,keepY);return true;}});}
         TextView more=text("↓ More",12,SECONDARY);more.setContentDescription("Scroll for more options");more.setBackground(shape(Color.BLACK,12));more.setVisibility(View.GONE);
         FrameLayout.LayoutParams moreLayout=new FrameLayout.LayoutParams(dp(80),dp(18),Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);moreLayout.bottomMargin=dp(9);root.addView(more,moreLayout);
@@ -424,8 +431,9 @@ public final class MainActivity extends Activity {
     private void previewPins(String value){
         try{bots=new JSONArray().put(new JSONObject().put("id","preview-primary").put("name","Main Bot").put("lastMessagePreview","Ready when you are"));
             String[] names={"Research Bot","Travel Bot","Inbox Bot","Release Bot","Notes Bot","Fitness Bot","Budget Bot","Reading Bot","Garden Bot","Music Bot","Recipe Bot"};
-            for(int i=0;i<names.length;i++){JSONObject b=previewBot(names[i],"Latest update from "+names[i],i==1||i==6).put("isRunning",i==2||i==7);
-                if(i==1)b.put("unreadCount",3);if(i==6)b.put("unreadCount",12);if(i==8){b.remove("lastMessagePreview");b.put("title","Platform ops");}bots.put(b);}
+            String[] lines={"3 new papers summarised","Tokyo fare dropped to NT$3,430","","Build 0.4.1 passed all checks","Saved your meeting notes","10,000 steps today","October spending is under plan","","Time to water the tomatoes","New playlist for your run","Dinner idea: miso salmon"};
+            for(int i=0;i<names.length;i++){JSONObject b=previewBot(names[i],previewMedia&&!lines[i].isEmpty()?lines[i]:"Latest update from "+names[i],i==1||i==6).put("isRunning",i==2||i==7);
+                if(i==1)b.put("unreadCount",3);if(i==6)b.put("unreadCount",12);if(i==8&&!previewMedia){b.remove("lastMessagePreview");b.put("title","Platform ops");}bots.put(b);}
             JSONArray pins=new JSONArray().put("preview-primary");int count=value.equals("home_overflow")?11:value.equals("home_pinned")||value.equals("bot_pinned")?4:0;
             for(int i=0;i<count;i++)pins.put(bots.getJSONObject(i+1).getString("id"));
             botPreferences=new JSONObject().put("mainAgentId","preview-primary").put("pinnedAgentIds",pins);
@@ -478,8 +486,14 @@ public final class MainActivity extends Activity {
         if(!preview&&metadata!=null&&(metadata.has("avatarShape")||metadata.has("avatarColor")))face.setAvatar(metadata.optString("avatarShape",""),metadata.optString("avatarColor",""));
         if(!preview&&metadata!=null&&metadata.has("avatarDataUrl"))face.setPhotoDataUrl(metadata.optString("avatarDataUrl",""));
     }
-    private void choosePreview(String name){clearHistory();botName=name;screen="ready";render();}
-    private int accent(){try{if(preview)return botName.equals("Research Bot")?0xffff6700:0xff1084fe;if(avatarTheme==null){try(java.io.InputStream input=getAssets().open("bot-avatar.json")){java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream();byte[] block=new byte[4096];int count;while((count=input.read(block))!=-1){bytes.write(block,0,count);}avatarTheme=new JSONObject(bytes.toString("UTF-8")).getJSONObject("themeColors");}}String token=selectedMetadata.optString("avatarColor","");JSONObject theme=avatarTheme.optJSONObject(token);return theme==null?WHITE:Color.parseColor(theme.getString("dark"));}catch(Exception ignored){return WHITE;}}
+    private void choosePreview(String name){clearHistory();botName=name;
+        if(previewMedia)try{String[] chat=name.equals("Travel Bot")?new String[]{"Watch fares to Tokyo for me","On it. I'll message you here when a fare drops."}:new String[]{"What is next on my calendar?","Your next meeting is at ten."};
+            long now=System.currentTimeMillis();historyEntries.put(new JSONObject().put("id","demo-user").put("role","user").put("text",chat[0]).put("atMs",now-3600_000L));
+            historyEntries.put(new JSONObject().put("id","demo-bot").put("role","assistant").put("text",chat[1]).put("atMs",now-3540_000L));}catch(Exception ignored){}
+        screen="ready";render();}
+    private static String previewDraft(String bot){return bot.equals("Travel Bot")?"Find the cheapest flight to Tokyo next week":"Use three sentences to introduce yourself";}
+    private static String previewReply(String bot){return bot.equals("Travel Bot")?"Cheapest next week: **Thu Oct 29, NT$3,430**, the lowest this month. Want me to hold a seat?":"Hi! I'm your Bot. Ask me anything from your watch and I'll take care of it.";}
+    private int accent(){try{if(avatarTheme==null){try(java.io.InputStream input=getAssets().open("bot-avatar.json")){java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream();byte[] block=new byte[4096];int count;while((count=input.read(block))!=-1){bytes.write(block,0,count);}avatarTheme=new JSONObject(bytes.toString("UTF-8")).getJSONObject("themeColors");}}String token=preview?BotAvatarView.previewLook(botName)[1]:selectedMetadata.optString("avatarColor","");JSONObject theme=avatarTheme.optJSONObject(token);return theme==null?WHITE:Color.parseColor(theme.getString("dark"));}catch(Exception ignored){return WHITE;}}
     private String currentConversationIdentity(){String id=selectedMetadata.optString("id","");if(id.isEmpty()||botsAccountBinding.isEmpty())return "";return new JSONArray().put(botsAccountBinding).put(id).put(selectedMetadata.optBoolean("viewerIsOwner",true)?"":selectedMetadata.optString("viewerSessionId","")).toString();}
     private boolean hasCurrentReceipt(){return !receiptIdentity.isEmpty()&&receiptIdentity.equals(currentConversationIdentity());}
     private boolean takeOwnHistoryRefresh(boolean active,boolean staging){if(active||staging||historyLoading||!receiptRefreshPending||!screen.equals("ready")||!hasCurrentReceipt())return false;receiptRefreshPending=false;return true;}
@@ -531,7 +545,7 @@ public final class MainActivity extends Activity {
         message.setContentDescription("Send a text message to "+botName);message.setEnabled(!messageSending&&!botSelectionPending);
     }
     private void composeMessage(){
-        if(preview){draftMessage="Use three sentences to introduce yourself";screen="compose_review";render();return;}
+        if(preview){draftMessage=previewDraft(botName);screen="compose_review";render();return;}
         try{
             android.content.Intent input=androidx.wear.input.RemoteInputIntentHelper.createActionRemoteInputIntent();
             android.app.RemoteInput field=new android.app.RemoteInput.Builder("message").setLabel("Message "+botName).build();
@@ -591,7 +605,17 @@ public final class MainActivity extends Activity {
     private void sendDraft(){
         if(messageSending||draftMessage.isEmpty())return;
         String text=draftMessage;
-        if(preview){messageSending=true;render();main.postDelayed(()->{messageSending=false;draftMessage="";screen="ready";render();},700);return;}
+        if(preview){
+            // Simulated: Sending…, then Sent, then the message and a demo reply land in the chat.
+            messageSending=true;render();final int mine=++previewEpoch;final long created=System.currentTimeMillis();final String bot=botName;
+            main.postDelayed(()->{if(mine!=previewEpoch)return;messageSending=false;draftMessage="";screen="ready";
+                try{botMessages=new JSONArray().put(new JSONObject().put("id","demo-send").put("text",text).put("state","submitting").put("created",created));}catch(Exception ignored){}
+                scrollToEnd=true;render();},600);
+            main.postDelayed(()->{if(mine!=previewEpoch)return;try{botMessages.getJSONObject(0).put("state","sent");}catch(Exception ignored){}render();},1800);
+            main.postDelayed(()->{if(mine!=previewEpoch)return;try{historyEntries.put(new JSONObject().put("id","demo-sent").put("role","user").put("text",text).put("atMs",created));
+                historyEntries.put(new JSONObject().put("id","demo-reply").put("role","assistant").put("text",previewReply(bot)).put("atMs",System.currentTimeMillis()));}catch(Exception ignored){}
+                botMessages=new JSONArray();scrollToEnd=true;render();},4200);
+            return;}
         final String botId=selectedMetadata.optString("id","");if(botId.isEmpty())return;
         messageSending=true;safeError="";render();final int mine=epoch;
         worker.execute(()->{JSONObject result=null;String error="";
@@ -603,7 +627,7 @@ public final class MainActivity extends Activity {
             main.post(()->{messageSending=false;
                 if(!problem.isEmpty()){safeError=problem;if(screen.equals("compose_review"))render();return;}
                 draftMessage="";safeError="";if(sent!=null&&"sent".equals(sent.optString("state")))root.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM);
-                screen="ready";refreshMessages(botId);watchForReply(text,sent==null?System.currentTimeMillis():sent.optLong("created",System.currentTimeMillis()));render();});
+                screen="ready";scrollToEnd=true;refreshMessages(botId);watchForReply(text,sent==null?System.currentTimeMillis():sent.optLong("created",System.currentTimeMillis()));render();});
         });
     }
     /** The watch's own messages that the chat doesn't show yet, with their delivery state. */
@@ -644,7 +668,7 @@ public final class MainActivity extends Activity {
         if(replyWatch!=null)main.removeCallbacks(replyWatch);replyChecks=0;replyWatchText=text;replyWatchSince=created;final String botId=selectedMetadata.optString("id","");
         replyWatch=new Runnable(){public void run(){
             if(!visible||!screen.equals("ready")||!botId.equals(selectedMetadata.optString("id"))||replyChecks>=12)return;
-            if(replyArrived()){markRead(botId,true);return;}
+            if(replyArrived()){markRead(botId,true);scrollToEnd=true;render();return;}
             replyChecks++;loadBotChat();refreshMessages(botId);
             long[] steps={3000,4000,5000,8000,10000,15000,15000,20000,25000,30000,30000,30000};main.postDelayed(this,steps[Math.min(replyChecks,steps.length-1)]);
         }};
@@ -726,7 +750,7 @@ public final class MainActivity extends Activity {
     private void updateCallText(){
         if(callBot!=null&&!android.text.TextUtils.equals(callBot.getText(),botName))callBot.setText(botName);
         VoiceService.Snapshot snap=preview?null:VoiceService.snapshot();String phase=preview?screen:snap.state.toLowerCase(java.util.Locale.ROOT);
-        if(callStatus!=null){String status=phase.equals("connecting")?(preview?"Calling…":snap.syncStatus.equals("Loading shared history")?"Loading chat…":"Connecting…"):phase.equals("reconnecting")?(preview?"Calling…":"Reconnecting…"):phase.equals("ending")?"Ending…":duration(preview?previewElapsedMs:snap.elapsedMs);if(phase.equals("muted"))status="Muted · "+status;if(phase.equals("paused"))status="Paused · "+status;long elapsed=preview?previewElapsedMs:snap.elapsedMs;long budgetElapsed=preview?previewElapsedMs:snap.deadlineElapsedMs>0?300000-Math.max(0,snap.deadlineElapsedMs-android.os.SystemClock.elapsedRealtime()):0;String warning=callLimitNotice(budgetElapsed);
+        if(callStatus!=null){String status=phase.equals("connecting")?(preview?"Calling…":snap.syncStatus.equals("Loading shared history")?"Loading chat…":"Connecting…"):phase.equals("reconnecting")?(preview?"Calling…":"Reconnecting…"):phase.equals("ending")?"Ending…":duration(preview?previewElapsed():snap.elapsedMs);if(phase.equals("muted"))status="Muted · "+status;if(phase.equals("paused"))status="Paused · "+status;long elapsed=preview?previewElapsed():snap.elapsedMs;long budgetElapsed=preview?previewElapsed():snap.deadlineElapsedMs>0?300000-Math.max(0,snap.deadlineElapsedMs-android.os.SystemClock.elapsedRealtime()):0;String warning=callLimitNotice(budgetElapsed);
             boolean showLimit=!warning.isEmpty()&&!phase.equals("connecting")&&!phase.equals("reconnecting")&&!phase.equals("ending");
             if(showLimit)status=(phase.equals("muted")?"Muted · ":phase.equals("paused")?"Paused · ":"")+duration(elapsed)+" · "+warning;
             // Snapshots arrive many times a second; only touch views whose content changed.
@@ -938,7 +962,7 @@ public final class MainActivity extends Activity {
     }
     private void toggleMute(){if(preview){previewEpoch++;simulated=false;if(screen.equals("paused")){screen="listening";previewMuted=false;}else{previewMuted=!previewMuted;screen=previewMuted?"muted":"listening";}render();}else VoiceService.toggleMute(this);}
     private void endCall(){root.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);if(preview){previewEpoch++;simulated=false;previewMuted=false;caption="";screen="done";render();}else{VoiceService.stop(this);screen="ready";render();}}
-    private void demo(){int mine=++previewEpoch;simulated=true;previewMuted=false;screen="connecting";caption="";render();String[] states={"listening","thinking","speaking","listening","thinking","speaking","listening","thinking","speaking","speaking","done"};for(int i=0;i<states.length;i++){final int turn=i;main.postDelayed(()->{if(!visible||!preview||mine!=previewEpoch)return;screen=states[turn];caption=turn==states.length-2?"Goodbye, talk soon.":screen.equals("thinking")?"What is next on my calendar?":screen.equals("speaking")?"Your next meeting is at ten.":"";speaker=screen.equals("thinking")?"You":botName;render();},700L+i*1400L);}}
+    private void demo(){int mine=++previewEpoch;simulated=true;previewMuted=false;previewCallStartMs=0;screen="connecting";caption="";render();String[] states={"listening","thinking","speaking","listening","thinking","speaking","listening","thinking","speaking","speaking","done"};for(int i=0;i<states.length;i++){final int turn=i;main.postDelayed(()->{if(!visible||!preview||mine!=previewEpoch)return;screen=states[turn];if(previewCallStartMs==0&&screen.equals("listening"))previewCallStartMs=android.os.SystemClock.elapsedRealtime();caption=turn==states.length-2?"Goodbye, talk soon.":screen.equals("thinking")?"What is next on my calendar?":screen.equals("speaking")?"Your next meeting is at ten.":"";speaker=screen.equals("thinking")?"You":botName;render();},1300L+i*1400L);}}  // Listening at 1.3 s: the measured warm Talk to Listening, not faster.
     private void recover(){if(preview){setPreviewScreen("ready");}else{safeError="";loadAccount();}}
     private void renderVoice(){if(preview)return;VoiceService.Snapshot s=VoiceService.snapshot();String previous=screen;
         if(s.active){if(!micTicked&&!s.state.equals("Connecting")&&!s.state.equals("Ending")){micTicked=true;root.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK);}botName=s.botName.isEmpty()?botName:s.botName;caption=s.caption;captionLine=s.captionLine;speaker=s.speaker;screen=s.muted?"muted":s.state.toLowerCase(java.util.Locale.ROOT);if(!isCall())screen="connecting";}
