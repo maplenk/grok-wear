@@ -59,6 +59,9 @@ public final class MainActivity extends Activity {
     private BotAccount account;
     // Pinned Bots: one write at a time, and Home always shows the list the account stored.
     private String pinSavingId="",pinErrorId="",justPinnedId="",pinFadeId="";private boolean pinSavingTarget,pinGridExpanded;private int pinRequest,pinsFullAt=-1,homeScrollY;private long lastPinsReadElapsed;private JSONObject actionsBot,readerEntry;private int readerReturnY;
+    // Text messages: the draft under review, this Bot's messages from the watch, and the reply watch after sending.
+    private String draftMessage="",editDraft="",markedReadId="";private JSONArray botMessages=new JSONArray();private boolean messageSending;private int replyChecks;private long replyWatchSince;private String replyWatchText="";private Runnable replyWatch;
+    private static final int MESSAGE_INPUT=31;
     private FrameLayout root;
     private LinearLayout body;
     private BotAvatarView orb;
@@ -114,6 +117,8 @@ public final class MainActivity extends Activity {
         if(screen.equals("history_detail")){screen="history";render();return;}
         if(screen.equals("bot_actions")){closeBotActions();return;}
         if(screen.equals("reader")){closeReader();return;}
+        if(screen.equals("compose_edit")){screen=draftMessage.isEmpty()?"ready":"compose_review";render();return;}
+        if(screen.equals("compose_review")){if(!messageSending){draftMessage="";screen="ready";render();}return;}
         if(preview){previewEpoch++;simulated=false;if(isCall()){screen="ready";render();}else if(screen.equals("ready")){screen="bots";render();}else if(!screen.equals("welcome")){screen="ready";render();}else finish();return;}
         if(screen.equals("qr")){cancelLogin();return;}
         if(VoiceService.snapshot().active){moveTaskToBack(true);return;}
@@ -126,6 +131,7 @@ public final class MainActivity extends Activity {
         if(screen.equals("thinking")){speaker="You";caption="What is next on my calendar?";}
         if(screen.equals("home_primary")){try{bots=new JSONArray().put(new JSONObject().put("id","preview-primary").put("name","Main Bot").put("lastMessagePreview","Ready when you are"));botPreferences=new JSONObject().put("mainAgentId","preview-primary");}catch(Exception ignored){}screen="bots";}else if(screen.equals("bots")){botPreferences=new JSONObject();}
         if(java.util.Set.of("home_pinned","home_overflow","bot_actions","pin_error","pins_full","bot_pinned").contains(screen))previewPins(screen);
+        if(screen.equals("compose_review")){draftMessage="Use three sentences to introduce yourself";botName="Wear test";}
         if(screen.equals("reader")){try{readerEntry=new JSONObject().put("role","assistant").put("atMs",System.currentTimeMillis()).put("text","**Alert:** Taipei to Tokyo one-way. The cheapest this month is **Oct 10 (Sat) NT$3,430**, NT$210 below last time (about **5.8%**), and your lowest on record.\n\nThe cheapest day moved to **Oct 10**; only 2 seats left at this fare. Your Oct 27 pick is now NT$3,980.");botName="Travel Bot";}catch(Exception ignored){}}
         if(screen.equals("ready_long")){clearHistory();try{historyEntries.put(new JSONObject().put("id","long-preview").put("role","assistant").put("text","**Research Bot** has an update.\nThe first task is ready for review.\nThe second task is waiting for input.\nThe third task has a draft.\nThe fourth task is ready tomorrow.\nThe fifth task has a short note.\nThe sixth task is still working.\nThe seventh task is waiting.\nThe eighth task is complete.\nThe ninth task needs review.\nThe tenth task has a summary.\nThe final task is done."));}catch(Exception ignored){}screen="ready";}
         if(screen.startsWith("history"))previewHistory(screen);
@@ -157,6 +163,8 @@ public final class MainActivity extends Activity {
             case "bots":botList();break;
             case "bot_actions":if(actionsBot==null){screen="bots";botList();}else botActions();break;
             case "reader":reader();break;
+            case "compose_review":composeReview();break;
+            case "compose_edit":composeEdit();break;
             case "ready":ready();break;
             case "recent":recent();break;
             case "history":history();break;
@@ -440,6 +448,24 @@ public final class MainActivity extends Activity {
             p.setStyle(android.graphics.Paint.Style.STROKE);canvas.drawLine(12,12,12,21,p);if(off)canvas.drawLine(4,4,20,20,p);canvas.restore();}
         @Override public void setAlpha(int alpha){p.setAlpha(alpha);}@Override public void setColorFilter(android.graphics.ColorFilter filter){p.setColorFilter(filter);}@Override public int getOpacity(){return android.graphics.PixelFormat.TRANSLUCENT;}
     }
+    /** Edit pencil, stroked in the text colour. */
+    private final class PencilGlyph extends android.graphics.drawable.Drawable {
+        private final android.graphics.Paint p=new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        @Override public int getIntrinsicWidth(){return dp(16);}@Override public int getIntrinsicHeight(){return dp(16);}
+        @Override public void draw(android.graphics.Canvas canvas){android.graphics.Rect b=getBounds();canvas.save();canvas.translate(b.left,b.top);canvas.scale(b.width()/24f,b.height()/24f);
+            p.setColor(WHITE);p.setStyle(android.graphics.Paint.Style.STROKE);p.setStrokeWidth(2);p.setStrokeJoin(android.graphics.Paint.Join.ROUND);p.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            android.graphics.Path pen=new android.graphics.Path();pen.moveTo(4,20);pen.lineTo(4.5f,16);pen.lineTo(16,4.5f);pen.lineTo(19.5f,8);pen.lineTo(8,19.5f);pen.close();canvas.drawPath(pen,p);canvas.drawLine(13.5f,7,17,10.5f,p);canvas.restore();}
+        @Override public void setAlpha(int alpha){p.setAlpha(alpha);}@Override public void setColorFilter(android.graphics.ColorFilter filter){p.setColorFilter(filter);}@Override public int getOpacity(){return android.graphics.PixelFormat.TRANSLUCENT;}
+    }
+    /** Paper-plane send arrow, filled black for the white Send pill. */
+    private final class SendGlyph extends android.graphics.drawable.Drawable {
+        private final android.graphics.Paint p=new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        @Override public int getIntrinsicWidth(){return dp(18);}@Override public int getIntrinsicHeight(){return dp(18);}
+        @Override public void draw(android.graphics.Canvas canvas){android.graphics.Rect b=getBounds();canvas.save();canvas.translate(b.left,b.top);canvas.scale(b.width()/24f,b.height()/24f);
+            p.setColor(Color.BLACK);p.setStyle(android.graphics.Paint.Style.FILL);
+            android.graphics.Path plane=new android.graphics.Path();plane.moveTo(3,20.5f);plane.lineTo(21.5f,12);plane.lineTo(3,3.5f);plane.lineTo(3,10);plane.lineTo(15,12);plane.lineTo(3,14);plane.close();canvas.drawPath(plane,p);canvas.restore();}
+        @Override public void setAlpha(int alpha){p.setAlpha(alpha);}@Override public void setColorFilter(android.graphics.ColorFilter filter){p.setColorFilter(filter);}@Override public int getOpacity(){return android.graphics.PixelFormat.TRANSLUCENT;}
+    }
     private final class AlertGlyph extends android.graphics.drawable.Drawable {
         private final android.graphics.Paint p=new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
         @Override public int getIntrinsicWidth(){return dp(12);}@Override public int getIntrinsicHeight(){return dp(12);}
@@ -475,9 +501,10 @@ public final class MainActivity extends Activity {
             FrameLayout.LayoutParams sp2=new FrameLayout.LayoutParams(dp(side*.76f),-2,Gravity.TOP|Gravity.CENTER_HORIZONTAL);sp2.topMargin=np.topMargin+dp(22);hero.addView(stack,sp2);}
         else{String last="";if(historyEntries.length()>0){JSONObject entry=historyEntries.optJSONObject(historyEntries.length()-1);if(entry!=null)last=entry.optString("text");}if(last.isEmpty())last=selectedMetadata.optString("lastMessagePreview","");
             TextView excerpt=text(last.isEmpty()?(preview?"Ready when you are":"Ready to talk"):MessageText.plain(last),compactHero()?11:12,SECONDARY);excerpt.setTag("bot_excerpt");excerpt.setSingleLine(true);excerpt.setEllipsize(android.text.TextUtils.TruncateAt.END);FrameLayout.LayoutParams xp=new FrameLayout.LayoutParams(dp(side*.76f),dp(20),Gravity.TOP|Gravity.CENTER_HORIZONTAL);xp.topMargin=dp(Math.min(side-88,side*.615f-10));hero.addView(excerpt,xp);}
-        LinearLayout chat=new LinearLayout(this);chat.setOrientation(LinearLayout.VERTICAL);chat.setPadding(dp(side*.12f),dp(10),dp(side*.12f),0);body.addView(chat,new LinearLayout.LayoutParams(-1,-2));body=chat;label("Chat",17,WHITE);if(historyLoading&&historyEntries.length()==0)label("Loading history…",12,SECONDARY);if(historyStale)label("Showing last loaded messages",12,SECONDARY);if(!historyError.isEmpty())label(historyError,12,SECONDARY);
+        LinearLayout chat=new LinearLayout(this);chat.setOrientation(LinearLayout.VERTICAL);chat.setPadding(dp(side*.12f),dp(10),dp(side*.12f),0);body.addView(chat,new LinearLayout.LayoutParams(-1,-2));body=chat;label("Chat",17,WHITE);messageButton();if(historyLoading&&historyEntries.length()==0)label("Loading history…",12,SECONDARY);if(historyStale)label("Showing last loaded messages",12,SECONDARY);if(!historyError.isEmpty())label(historyError,12,SECONDARY);
         if(historyEntries.length()==0&&!historyLoading)label("No messages loaded",12,SECONDARY);
         for(int i=0;i<historyEntries.length();i++){JSONObject e=historyEntries.optJSONObject(i);if(e==null)continue;chatBubble(e);}
+        outgoingBubbles();
         if(historyHasMore&&historyPages<5){Button older=action("Load older messages",()->loadHistory(true));older.setEnabled(!historyLoading);}
         if(screen.equals("done")||(!preview&&hasCurrentReceipt()&&receiptElapsed>0)){long ms=preview?102000:receiptElapsed;label("Voice chat · "+duration(ms),12,SECONDARY);}
         String sync=preview?(previewSaving?"Saving shared history":""):hasCurrentReceipt()?receiptSync:"";if(!sync.isEmpty())label(sync.equals("Saving shared history")?"Saving shared history…":sync.equals("synced")?"Shared history saved":sync.equals("pending")||sync.equals("uncertain")?"Voice sync pending":sync.equals("rejected")?"History could not be saved":sync,12,SECONDARY);
@@ -497,6 +524,146 @@ public final class MainActivity extends Activity {
         for(int i=0;i+1<styled.bold.length;i+=2)text.setSpan(new android.text.style.StyleSpan(Typeface.BOLD),styled.bold[i],styled.bold[i+1],android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         return text;
     }
+    /** "Message" pill: dictate or type a text message to this Bot, then review it before sending. */
+    private void messageButton(){
+        if(!preview&&selectedMetadata.optString("id","").isEmpty())return;
+        Button message=action("Message",()->composeMessage());message.setCompoundDrawablesRelativeWithIntrinsicBounds(new PencilGlyph(),null,null,null);message.setCompoundDrawablePadding(dp(6));
+        message.setContentDescription("Send a text message to "+botName);message.setEnabled(!messageSending&&!botSelectionPending);
+    }
+    private void composeMessage(){
+        if(preview){draftMessage="Use three sentences to introduce yourself";screen="compose_review";render();return;}
+        try{
+            android.content.Intent input=androidx.wear.input.RemoteInputIntentHelper.createActionRemoteInputIntent();
+            android.app.RemoteInput field=new android.app.RemoteInput.Builder("message").setLabel("Message "+botName).build();
+            androidx.wear.input.RemoteInputIntentHelper.putRemoteInputsExtra(input,java.util.Collections.singletonList(field));
+            startActivityForResult(input,MESSAGE_INPUT);
+        }catch(RuntimeException unavailable){draftMessage="";editDraft="";screen="compose_edit";render();}
+    }
+    @Override protected void onActivityResult(int request,int result,android.content.Intent data){
+        super.onActivityResult(request,result,data);
+        if(request!=MESSAGE_INPUT||result!=RESULT_OK||data==null)return;
+        Bundle values=android.app.RemoteInput.getResultsFromIntent(data);CharSequence text=values==null?null:values.getCharSequence("message");
+        if(text==null||text.toString().trim().isEmpty())return;
+        draftMessage=text.toString().trim();screen="compose_review";render();
+    }
+    /** Review before sending, like Grok Bot's watch views: the text, Edit, and a big Send. */
+    private void composeReview(){
+        body.setPadding(dp(side*.12f),dp(20),dp(side*.12f),dp(8));
+        // Inset further than the card so a long Bot name wraps inside the round edge.
+        TextView title=label("Send to "+botName+"?",14,WHITE);title.setTypeface(Typeface.create(Typeface.DEFAULT,500,false));title.setMaxLines(2);title.setEllipsize(android.text.TextUtils.TruncateAt.END);title.setPadding(dp(side*.06f),0,dp(side*.06f),0);gap(4);
+        TextView card=label(draftMessage,14,WHITE);card.setGravity(Gravity.START);card.setPadding(dp(12),dp(8),dp(12),dp(8));card.setBackground(shape(GLASS,20));card.setMaxLines(8);card.setEllipsize(android.text.TextUtils.TruncateAt.END);card.setContentDescription("Message: "+draftMessage);
+        gap(6);
+        LinearLayout row=new LinearLayout(this);row.setGravity(Gravity.CENTER);
+        Button change=button("Edit",()->{editDraft=draftMessage;screen="compose_edit";render();});change.setCompoundDrawablesRelativeWithIntrinsicBounds(new PencilGlyph(),null,null,null);change.setCompoundDrawablePadding(dp(6));change.setPadding(dp(16),0,dp(16),0);change.setEnabled(!messageSending);
+        row.addView(change,new LinearLayout.LayoutParams(-2,dp(40)));body.addView(row,new LinearLayout.LayoutParams(-1,-2));
+        Button send=pinnedAction(messageSending?"Sending…":"Send",new SendGlyph(),()->sendDraft());send.setEnabled(!messageSending&&!draftMessage.isEmpty());send.setContentDescription("Send to "+botName);
+        if(!safeError.isEmpty()){gap(6);label(safeError,12,0xffff7a72);}
+    }
+    /** A big white button pinned above the bottom edge, like Talk, so it can never scroll off the round screen. */
+    private Button pinnedAction(String value,android.graphics.drawable.Drawable icon,Runnable action){
+        FrameLayout.LayoutParams sp=(FrameLayout.LayoutParams)currentScroll.getLayoutParams();sp.topMargin=0;sp.bottomMargin=dp(67);currentScroll.setLayoutParams(sp);
+        Button b=button(value,action);b.setTextColor(Color.BLACK);b.setBackground(shape(WHITE,28));b.setTextSize(16);
+        if(icon!=null){b.setCompoundDrawablesRelativeWithIntrinsicBounds(icon,null,null,null);b.setCompoundDrawablePadding(dp(8));
+            // Centres the icon and label together.
+            int inset=Math.max(dp(8),(dp(side*.62f)-icon.getIntrinsicWidth()-dp(8)-(int)Math.ceil(b.getPaint().measureText(value)))/2);b.setPadding(inset,dp(6),inset,dp(6));}
+        FrameLayout.LayoutParams ep=new FrameLayout.LayoutParams(dp(side*.62f),dp(54),Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);ep.bottomMargin=dp(12);root.addView(b,ep);bottomAction=true;
+        return b;
+    }
+    /** Fix the text with the watch keyboard (dictation from the keyboard works too). */
+    private void composeEdit(){
+        body.setPadding(dp(side*.12f),dp(24),dp(side*.12f),dp(8));
+        label("Edit message",13,SECONDARY);gap(6);
+        EditText field=new EditText(this);field.setText(editDraft);field.setTextColor(WHITE);field.setTextSize(15);field.setHint("Message "+botName);field.setHintTextColor(SECONDARY);
+        field.setBackground(shape(GLASS,18));field.setPadding(dp(12),dp(10),dp(12),dp(10));
+        // The keyboard's action key finishes the edit (a watch keyboard has no other way out); long text still wraps.
+        field.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);field.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE);
+        field.setHorizontallyScrolling(false);field.setMinLines(2);field.setMaxLines(6);field.setSelection(field.getText().length());
+        field.setOnEditorActionListener((v,id,event)->{if(id!=android.view.inputmethod.EditorInfo.IME_ACTION_DONE)return false;finishEdit(v);return true;});
+        // Kept as typed so a re-render on resume shows the same text.
+        field.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence t,int a,int b,int c){}public void onTextChanged(CharSequence t,int a,int b,int c){}public void afterTextChanged(android.text.Editable t){editDraft=t.toString();}});
+        body.addView(field,new LinearLayout.LayoutParams(-1,-2));
+        pinnedAction("Done",null,()->finishEdit(field));
+    }
+    private void finishEdit(View field){
+        ((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(field.getWindowToken(),0);
+        draftMessage=editDraft.trim();safeError="";screen=draftMessage.isEmpty()?"ready":"compose_review";render();
+    }
+    private void sendDraft(){
+        if(messageSending||draftMessage.isEmpty())return;
+        String text=draftMessage;
+        if(preview){messageSending=true;render();main.postDelayed(()->{messageSending=false;draftMessage="";screen="ready";render();},700);return;}
+        final String botId=selectedMetadata.optString("id","");if(botId.isEmpty())return;
+        messageSending=true;safeError="";render();final int mine=epoch;
+        worker.execute(()->{JSONObject result=null;String error="";
+            try{String id=account.prepareMessage(text,botId);
+                // Once admitted the request can't be recalled; leaving the screen before that cancels it.
+                result=account.sendMessage(id,()->visible&&mine==epoch);
+            }catch(Exception failed){error=failed instanceof GrokCore.Failure&&failed.getMessage()!=null?failed.getMessage():"Couldn’t send. Check your connection.";}
+            JSONObject sent=result;String problem=error;
+            main.post(()->{messageSending=false;
+                if(!problem.isEmpty()){safeError=problem;if(screen.equals("compose_review"))render();return;}
+                draftMessage="";safeError="";if(sent!=null&&"sent".equals(sent.optString("state")))root.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM);
+                screen="ready";refreshMessages(botId);watchForReply(text,sent==null?System.currentTimeMillis():sent.optLong("created",System.currentTimeMillis()));render();});
+        });
+    }
+    /** The watch's own messages that the chat doesn't show yet, with their delivery state. */
+    private void outgoingBubbles(){
+        long now=System.currentTimeMillis();
+        for(int i=0;i<botMessages.length();i++){JSONObject job=botMessages.optJSONObject(i);if(job==null)continue;
+            String state=job.optString("state"),text=job.optString("text");long created=job.optLong("created");
+            if(inHistory(text,created))continue;
+            if(state.equals("sent")&&now-created>10*60_000L)continue;
+            TextView bubble=label(text,14,WHITE);bubble.setGravity(Gravity.START);bubble.setPadding(dp(10),dp(8),dp(10),dp(8));bubble.setBackground(shape(userBubble(),14));
+            LinearLayout.LayoutParams bp=(LinearLayout.LayoutParams)bubble.getLayoutParams();bp.topMargin=dp(6);bubble.setLayoutParams(bp);
+            String status=state.equals("sent")?"Sent":state.equals("failed")?job.optString("notice","Not sent"):state.equals("unknown")?"Not confirmed · Tap to try again":"Sending…";
+            TextView line=label(status,11,state.equals("failed")?0xffff7a72:SECONDARY);line.setGravity(Gravity.END);
+            if(state.equals("unknown")){final String id=job.optString("id");line.setClickable(true);line.setOnClickListener(v->retryMessage(id));bubble.setOnClickListener(v->retryMessage(id));}
+            bubble.setContentDescription("You: "+text+". "+status);
+        }
+    }
+    private boolean inHistory(String text,long created){
+        for(int i=historyEntries.length()-1;i>=0;i--){JSONObject e=historyEntries.optJSONObject(i);
+            if(e!=null&&"user".equals(e.optString("role"))&&text.equals(e.optString("text").trim())&&e.optLong("atMs")>=created-120_000L)return true;}
+        return false;
+    }
+    private void retryMessage(String id){
+        if(preview||messageSending)return;messageSending=true;render();final String botId=selectedMetadata.optString("id","");
+        JSONObject job=new JSONObject();for(int i=0;i<botMessages.length();i++){JSONObject j=botMessages.optJSONObject(i);if(j!=null&&id.equals(j.optString("id")))job=j;}final JSONObject retried=job;
+        worker.execute(()->{try{account.retryMessage(id);}catch(Exception ignored){}main.post(()->{messageSending=false;refreshMessages(botId);watchForReply(retried.optString("text"),retried.optLong("created",System.currentTimeMillis()));});});
+    }
+    private void refreshMessages(String botId){
+        if(preview||botId.isEmpty())return;
+        worker.execute(()->{try{JSONArray mine=account.messages(botId);
+            // Confirm anything uncertain from the chat; this never sends.
+            for(int i=0;i<mine.length();i++){JSONObject job=mine.optJSONObject(i);if(job!=null&&("unknown".equals(job.optString("state"))||"submitting".equals(job.optString("state"))))mine.put(i,account.confirmMessage(job.optString("id")));}
+            JSONArray latest=mine;main.post(()->{if(!botId.equals(selectedMetadata.optString("id")))return;botMessages=latest;if(screen.equals("ready"))render();});
+        }catch(Exception ignored){}});
+    }
+    /** After sending, refresh the chat with backoff until the Bot replies (about 3 minutes at most). */
+    private void watchForReply(String text,long created){
+        if(replyWatch!=null)main.removeCallbacks(replyWatch);replyChecks=0;replyWatchText=text;replyWatchSince=created;final String botId=selectedMetadata.optString("id","");
+        replyWatch=new Runnable(){public void run(){
+            if(!visible||!screen.equals("ready")||!botId.equals(selectedMetadata.optString("id"))||replyChecks>=12)return;
+            if(replyArrived()){markRead(botId,true);return;}
+            replyChecks++;loadBotChat();refreshMessages(botId);
+            long[] steps={3000,4000,5000,8000,10000,15000,15000,20000,25000,30000,30000,30000};main.postDelayed(this,steps[Math.min(replyChecks,steps.length-1)]);
+        }};
+        main.postDelayed(replyWatch,3000);
+    }
+    /** A Bot reply follows the watch's message in the chat. Order, not clocks: the reply can land before the send's own answer. */
+    private boolean replyArrived(){boolean reply=false;
+        for(int i=historyEntries.length()-1;i>=0;i--){JSONObject e=historyEntries.optJSONObject(i);if(e==null)continue;
+            if("assistant".equals(e.optString("role")))reply=true;
+            else if("user".equals(e.optString("role"))&&replyWatchText.equals(e.optString("text").trim())&&e.optLong("atMs")>=replyWatchSince-120_000L)return reply;}
+        return false;}
+    /** Marks the Bot's chat read on open (and when a reply arrives), as the official apps do. */
+    private void markRead(String botId,boolean force){
+        if(preview||botId.isEmpty())return;
+        boolean unread=selectedMetadata.optBoolean("hasUnread")||selectedMetadata.optInt("unreadCount",0)>0;
+        if(!force&&(!unread||botId.equals(markedReadId)))return;markedReadId=botId;
+        try{selectedMetadata.put("hasUnread",false).put("unreadCount",0);for(int i=0;i<bots.length();i++){JSONObject b=bots.optJSONObject(i);if(b!=null&&botId.equals(b.optString("id")))b.put("hasUnread",false).put("unreadCount",0);}}catch(Exception ignored){}
+        preferencesWorker.execute(()->{try{account.markRead(botId);}catch(Exception optional){}});
+    }
     /** Full-screen reading view for one chat message. */
     private void reader(){
         JSONObject entry=readerEntry==null?new JSONObject():readerEntry;String who=entry.optString("role").equals("user")?"You":botName;
@@ -512,7 +679,8 @@ public final class MainActivity extends Activity {
     }
     private int userBubble(){if(selectedMetadata.has("avatarDataUrl"))return GLASS;int color=accent();double[] rgb={Color.red(color)/255d,Color.green(color)/255d,Color.blue(color)/255d};for(int i=0;i<3;i++)rgb[i]=rgb[i]<=.04045?rgb[i]/12.92:Math.pow((rgb[i]+.055)/1.055,2.4);double luminance=.2126*rgb[0]+.7152*rgb[1]+.0722*rgb[2];return 1.05/(luminance+.05)>=4.5?color:GLASS;}
     private String duration(long ms){return String.format(java.util.Locale.ROOT,"%d:%02d",Math.max(0,ms)/60000,(Math.max(0,ms)/1000)%60);}
-    private void loadBotChat(){if(preview){previewHistory("history");screen="ready";render();return;}if(historyLoading||VoiceService.snapshot().active)return;historyAgent=selectedMetadata.optString("id");historyAccount=botsAccountBinding;loadHistory(false);}
+    private void loadBotChat(){if(preview){previewHistory("history");screen="ready";render();return;}if(historyLoading||VoiceService.snapshot().active)return;historyAgent=selectedMetadata.optString("id");historyAccount=botsAccountBinding;loadHistory(false);
+        String id=selectedMetadata.optString("id","");if(replyChecks==0)refreshMessages(id);markRead(id,false);}
     private String callState(){switch(screen){case "listening":return "Listening…";case "thinking":return "Thinking…";case "connecting":return "Connecting…";case "speaking":return "Speaking…";case "reconnecting":return "Reconnecting…";default:return screen.substring(0,1).toUpperCase(java.util.Locale.ROOT)+screen.substring(1);}}
     private boolean isCall(){return java.util.Set.of("connecting","listening","thinking","speaking","muted","paused","reconnecting").contains(screen);}
     private void call(){
@@ -680,7 +848,8 @@ public final class MainActivity extends Activity {
                     try{if(!sameHistoryBinding(pinned,show.getJSONObject("binding")))return;historyEntries=show.getJSONArray("entries");historyBinding=show.getJSONObject("binding");
                         historyHasMore=show.optBoolean("hasMore");historyBefore=show.isNull("nextBeforeSeq")?null:show.getLong("nextBeforeSeq");historyPages=1;render();}catch(Exception ignored){}});}}
             JSONObject page=account.historyPage(pinned,before,20);
-            main.post(()->{if(!historyCurrent(request,mine,route,id,binding))return;
+            // A dropped result still ends the load, or the chat could never refresh again until the app pauses.
+            main.post(()->{if(!historyCurrent(request,mine,route,id,binding)){if(request==historyRequest)historyLoading=false;return;}
                 try{JSONObject accepted=page.getJSONObject("binding");if(!sameHistoryBinding(pinned,accepted))throw new IllegalStateException();
                     JSONArray fetched=page.getJSONArray("entries"),merged=new JSONArray();java.util.HashSet<String> seen=new java.util.HashSet<>();
                     if(older){for(int i=0;i<fetched.length();i++){JSONObject row=fetched.optJSONObject(i);if(row!=null&&seen.add(row.optString("id")))merged.put(row);}
@@ -691,7 +860,7 @@ public final class MainActivity extends Activity {
                     historyError="offline".equals(page.optString("syncStatus"))?"Couldn’t refresh history.":"partial".equals(page.optString("syncStatus"))?"Some voice messages couldn’t load.":"";render();
                     if(historyError.isEmpty()&&takeOwnHistoryRefresh(VoiceService.snapshot().active,historyStaging()))loadBotChat();
                 }catch(Exception ignored){historyFailure();}});
-        }catch(Exception ignored){main.post(()->{if(historyCurrent(request,mine,route,id,binding))historyFailure();});}});
+        }catch(Exception ignored){main.post(()->{if(historyCurrent(request,mine,route,id,binding))historyFailure();else if(request==historyRequest)historyLoading=false;});}});
     }
     private static boolean sameHistoryBinding(JSONObject a,JSONObject b){
         for(String key:new String[]{"accountKey","authGeneration","agentId","sessionId"})if(!a.optString(key).equals(b.optString(key)))return false;return true;
@@ -818,7 +987,7 @@ public final class MainActivity extends Activity {
                 JSONObject bot=value.getJSONObject("bot");acceptAccountBot(bot);
                 account.recoverPendingInBackground(binding,bot.optString("id"));
                 if(bot.optString("id","").isEmpty()||screen.equals("bots"))openBotPicker();
-                else if(isHistory()){if(screen.equals("history_detail"))render();else loadHistory(false);}else if(screen.equals("settings")||screen.equals("signout_confirm"))render();else if(screen.equals("ready")){render();loadBotChat();}else openBotPicker();
+                else if(isHistory()){if(screen.equals("history_detail"))render();else loadHistory(false);}else if(screen.equals("settings")||screen.equals("signout_confirm")||screen.equals("reader")||screen.startsWith("compose_"))render();else if(screen.equals("ready")){render();loadBotChat();}else openBotPicker();
             });
         }else if(status.equals("connecting")){task(()->account.pollLogin(),v->{if(accountResultCurrent(route))loadAccount();});}
         else if(status.equals("waiting")){screen="qr";render();schedulePoll();}
