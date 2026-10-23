@@ -150,6 +150,16 @@ public class GrokCoreTest {
         JSONObject text=bots.getJSONObject(1);assertEquals(.5,text.getDouble("voiceSpeed"),0);assertFalse(text.has("voiceLanguage"));
         JSONObject bad=bots.getJSONObject(2);assertFalse(bad.has("voiceId"));assertFalse(bad.has("voiceSpeed"));assertFalse(bad.has("voiceLanguage"));
     }
+    @Test public void botRoleLineSurvivesDiscoverySingleLineAndBounded()throws Exception {
+        String longTitle=new String(new char[81]).replace('\0','x');
+        GrokCore core=new GrokCore(new Memory(),(cfg,method,body)->new JSONObject().put("agents",new JSONArray()
+            .put(new JSONObject().put("id","ops").put("title","Platform\n  ops"))
+            .put(new JSONObject().put("id","long").put("title",longTitle))
+            .put(new JSONObject().put("id","none"))));
+        core.link(config());JSONArray bots=core.bots();
+        assertEquals("Platform ops",bots.getJSONObject(0).getString("title"));
+        assertFalse(bots.getJSONObject(1).has("title"));assertFalse(bots.getJSONObject(2).has("title"));
+    }
     @Test public void harnessSurvivesDiscoveryOnlyWhenWellFormed()throws Exception {
         GrokCore core=new GrokCore(new Memory(),(cfg,method,body)->new JSONObject().put("agents",new JSONArray()
             .put(new JSONObject().put("id","temporal").put("harness","temporal"))

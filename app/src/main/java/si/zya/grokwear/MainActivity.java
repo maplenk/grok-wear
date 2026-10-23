@@ -25,7 +25,7 @@ import java.util.concurrent.Executors;
 
 /** Native round-watch UI. Debug preview is isolated from account, network and voice code. */
 public final class MainActivity extends Activity {
-    private static final int WHITE=0xffffffff,SECONDARY=0xff8d8d93,SURFACE=0xff1e1e1e,BLUE=0xff006ceb,GLASS=0xff2c2c2e,CARD=0xff202020,RED=0xffe5484d;
+    private static final int WHITE=0xffffffff,SECONDARY=0xff8d8d93,SURFACE=0xff1e1e1e,BLUE=0xff006ceb,GLASS=0xff2c2c2e,CARD=0xff202020,RED=0xffe5484d,GREEN=0xff30d158,CARD_ROW=0xff1c1c1e;
     private final Handler main=new Handler(Looper.getMainLooper());
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
     private final ExecutorService preferencesWorker=Executors.newSingleThreadExecutor();
@@ -58,7 +58,7 @@ public final class MainActivity extends Activity {
     private boolean previewMuted,previewSaving;private long previewElapsedMs=42000;
     private BotAccount account;
     // Pinned Bots: one write at a time, and Home always shows the list the account stored.
-    private String pinSavingId="",pinErrorId="",justPinnedId="",pinFadeId="";private boolean pinSavingTarget,pinGridExpanded;private int pinRequest,pinsFullAt=-1,homeScrollY;private long lastPinsReadElapsed;private JSONObject actionsBot;
+    private String pinSavingId="",pinErrorId="",justPinnedId="",pinFadeId="";private boolean pinSavingTarget,pinGridExpanded;private int pinRequest,pinsFullAt=-1,homeScrollY;private long lastPinsReadElapsed;private JSONObject actionsBot,readerEntry;private int readerReturnY;
     private FrameLayout root;
     private LinearLayout body;
     private BotAvatarView orb;
@@ -113,6 +113,7 @@ public final class MainActivity extends Activity {
         if(screen.equals("settings")){leaveSettings();return;}
         if(screen.equals("history_detail")){screen="history";render();return;}
         if(screen.equals("bot_actions")){closeBotActions();return;}
+        if(screen.equals("reader")){closeReader();return;}
         if(preview){previewEpoch++;simulated=false;if(isCall()){screen="ready";render();}else if(screen.equals("ready")){screen="bots";render();}else if(!screen.equals("welcome")){screen="ready";render();}else finish();return;}
         if(screen.equals("qr")){cancelLogin();return;}
         if(VoiceService.snapshot().active){moveTaskToBack(true);return;}
@@ -125,6 +126,7 @@ public final class MainActivity extends Activity {
         if(screen.equals("thinking")){speaker="You";caption="What is next on my calendar?";}
         if(screen.equals("home_primary")){try{bots=new JSONArray().put(new JSONObject().put("id","preview-primary").put("name","Main Bot").put("lastMessagePreview","Ready when you are"));botPreferences=new JSONObject().put("mainAgentId","preview-primary");}catch(Exception ignored){}screen="bots";}else if(screen.equals("bots")){botPreferences=new JSONObject();}
         if(java.util.Set.of("home_pinned","home_overflow","bot_actions","pin_error","pins_full","bot_pinned").contains(screen))previewPins(screen);
+        if(screen.equals("reader")){try{readerEntry=new JSONObject().put("role","assistant").put("atMs",System.currentTimeMillis()).put("text","**Alert:** Taipei to Tokyo one-way. The cheapest this month is **Oct 10 (Sat) NT$3,430**, NT$210 below last time (about **5.8%**), and your lowest on record.\n\nThe cheapest day moved to **Oct 10**; only 2 seats left at this fare. Your Oct 27 pick is now NT$3,980.");botName="Travel Bot";}catch(Exception ignored){}}
         if(screen.equals("ready_long")){clearHistory();try{historyEntries.put(new JSONObject().put("id","long-preview").put("role","assistant").put("text","**Research Bot** has an update.\nThe first task is ready for review.\nThe second task is waiting for input.\nThe third task has a draft.\nThe fourth task is ready tomorrow.\nThe fifth task has a short note.\nThe sixth task is still working.\nThe seventh task is waiting.\nThe eighth task is complete.\nThe ninth task needs review.\nThe tenth task has a summary.\nThe final task is done."));}catch(Exception ignored){}screen="ready";}
         if(screen.startsWith("history"))previewHistory(screen);
         render();
@@ -154,6 +156,7 @@ public final class MainActivity extends Activity {
             case "qr":qr();break;
             case "bots":botList();break;
             case "bot_actions":if(actionsBot==null){screen="bots";botList();}else botActions();break;
+            case "reader":reader();break;
             case "ready":ready();break;
             case "recent":recent();break;
             case "history":history();break;
@@ -173,7 +176,9 @@ public final class MainActivity extends Activity {
             default:screen="ready";ready();break;
         }
     }
-    private TextView text(String value,float size,int color){TextView v=new TextView(this);v.setText(value);v.setTextSize(size);v.setTextColor(color);v.setGravity(Gravity.CENTER);v.setIncludeFontPadding(false);v.setPadding(0,0,0,0);return v;}
+    private TextView text(String value,float size,int color){TextView v=new TextView(this);v.setText(value);v.setTextSize(size);v.setTextColor(color);v.setGravity(Gravity.CENTER);v.setIncludeFontPadding(false);v.setPadding(0,0,0,0);
+        // Whole words wrap; hyphenated fragments are hard to read on a small round screen.
+        v.setHyphenationFrequency(android.text.Layout.HYPHENATION_FREQUENCY_NONE);return v;}
     private TextView label(String value,float size,int color){TextView v=text(value,size,color);body.addView(v,new LinearLayout.LayoutParams(-1,-2));return v;}
     private void gap(int amount){View v=new View(this);body.addView(v,new LinearLayout.LayoutParams(1,dp(amount)));}
     private void title(String value){TextView v=label(value,20,WHITE);v.setTypeface(Typeface.create(Typeface.DEFAULT,600,false),Typeface.NORMAL);gap(7);}
@@ -246,14 +251,33 @@ public final class MainActivity extends Activity {
     }
     private void botChip(String name,int accent,Runnable action){botChip(name,accent,action,null);}
     private void botChip(String name,int accent,Runnable action,JSONObject metadata){
-        LinearLayout row=new LinearLayout(this);row.setGravity(Gravity.CENTER_VERTICAL);row.setPadding(dp(8),0,dp(8),0);row.setBackground(shape(Color.BLACK,0));row.setClickable(true);row.setFocusable(true);row.setContentDescription(name);row.setOnClickListener(v->{navigation++;action.run();});row.setEnabled(!botSelectionPending);
+        LinearLayout row=new LinearLayout(this);row.setGravity(Gravity.CENTER_VERTICAL);row.setPadding(dp(10),0,dp(10),0);row.setBackground(shape(CARD_ROW,25));row.setClickable(true);row.setFocusable(true);row.setContentDescription(name);row.setOnClickListener(v->{navigation++;action.run();});row.setEnabled(!botSelectionPending);
         boolean selected=preview?name.equals(botName):metadata!=null&&!selectedMetadata.optString("id","").isEmpty()&&metadata.optString("id","").equals(selectedMetadata.optString("id"));
         row.setSelected(selected);if(selected)row.setStateDescription("Selected");
-        BotAvatarView face=new BotAvatarView(this);applyAvatar(face,name,metadata);face.state("ready",BLUE,0);face.running(visible);avatars.add(face);row.addView(face,new LinearLayout.LayoutParams(dp(30),dp(30)));
-        TextView nameLabel=text(name,15,WHITE);nameLabel.setTag("bot_name");nameLabel.setSingleLine(true);nameLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);LinearLayout names=new LinearLayout(this);names.setOrientation(LinearLayout.VERTICAL);nameLabel.setGravity(Gravity.START);names.addView(nameLabel,new LinearLayout.LayoutParams(-1,-2));String previewText=metadata==null?"":metadata.optString("lastMessagePreview","");if(!previewText.isEmpty()){TextView sub=text(MessageText.plain(previewText),12,SECONDARY);sub.setTag("bot_excerpt");sub.setSingleLine(true);sub.setEllipsize(android.text.TextUtils.TruncateAt.END);sub.setGravity(Gravity.START);names.addView(sub,new LinearLayout.LayoutParams(-1,-2));}row.addView(names,new LinearLayout.LayoutParams(0,-2,1));if(metadata!=null&&(metadata.optBoolean("hasUnread")||metadata.optBoolean("isRunning")||metadata.optBoolean("isRunningTurn")||metadata.optBoolean("isComposingMessage"))){TextView dot=text("•",16,metadata.optBoolean("hasUnread")?BLUE:0xffff9800);dot.setContentDescription(metadata.optBoolean("hasUnread")?"Unread":"Working");row.addView(dot,new LinearLayout.LayoutParams(dp(12),-2));}
+        boolean working=working(metadata);int unread=metadata==null?0:Math.max(0,metadata.optInt("unreadCount",0));boolean hasUnread=metadata!=null&&(unread>0||metadata.optBoolean("hasUnread"));
+        // Avatar with a green dot while the Bot is working, like the live status in Grok Bot's watch views.
+        FrameLayout avatar=new FrameLayout(this);BotAvatarView face=new BotAvatarView(this);applyAvatar(face,name,metadata);face.state("ready",BLUE,0);face.running(visible);avatars.add(face);avatar.addView(face,new FrameLayout.LayoutParams(dp(34),dp(34)));
+        if(working)avatar.addView(statusDot(GREEN,CARD_ROW),dotAt(10,24,24));row.addView(avatar,new LinearLayout.LayoutParams(dp(34),dp(34)));
+        TextView nameLabel=text(name,15,WHITE);nameLabel.setTag("bot_name");nameLabel.setSingleLine(true);nameLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);LinearLayout names=new LinearLayout(this);names.setOrientation(LinearLayout.VERTICAL);nameLabel.setGravity(Gravity.START);names.addView(nameLabel,new LinearLayout.LayoutParams(-1,-2));
+        // Second line: "Working…" while busy, else the latest message, else the Bot's role.
+        String previewText=metadata==null?"":metadata.optString("lastMessagePreview",""),role=metadata==null?"":metadata.optString("title","");
+        String second=working?"Working…":!previewText.isEmpty()?MessageText.plain(previewText):role;
+        if(!second.isEmpty()){TextView sub=text(second,12,working?GREEN:SECONDARY);sub.setTag(working?"bot_status":"bot_excerpt");sub.setSingleLine(true);sub.setEllipsize(android.text.TextUtils.TruncateAt.END);sub.setGravity(Gravity.START);names.addView(sub,new LinearLayout.LayoutParams(-1,-2));}
+        LinearLayout.LayoutParams np=new LinearLayout.LayoutParams(0,-2,1);np.leftMargin=dp(8);row.addView(names,np);
+        if(hasUnread){View badge=unreadBadge(unread);LinearLayout.LayoutParams ub=new LinearLayout.LayoutParams(-2,dp(unread>0?18:8));ub.leftMargin=dp(4);row.addView(badge,ub);}
+        row.setContentDescription(name+(working?", working":"")+(unread>0?", "+unread+" unread":hasUnread?", unread":""));
         if(selected){TextView check=text("✓",16,BLUE);check.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);row.addView(check,new LinearLayout.LayoutParams(dp(20),-2));}
         if(metadata!=null&&!metadata.optString("id","").isEmpty()&&!isPrimaryId(metadata.optString("id")))row.setOnLongClickListener(v->{openBotActions(metadata);return true;});
-        LinearLayout.LayoutParams rp=new LinearLayout.LayoutParams(-1,dp(getResources().getConfiguration().fontScale>1.2f?60:50));rp.topMargin=dp(4);body.addView(row,rp);
+        LinearLayout.LayoutParams rp=new LinearLayout.LayoutParams(-1,dp(getResources().getConfiguration().fontScale>1.2f?62:52));rp.topMargin=dp(6);body.addView(row,rp);
+    }
+    private boolean working(JSONObject metadata){return metadata!=null&&(metadata.optBoolean("isRunning")||metadata.optBoolean("isRunningTurn")||metadata.optBoolean("isComposingMessage"));}
+    /** A round status dot with a ring in the surface colour, so it reads against the avatar. */
+    private View statusDot(int color,int ring){View dot=new View(this);GradientDrawable mark=new GradientDrawable();mark.setShape(GradientDrawable.OVAL);mark.setColor(color);mark.setStroke(dp(2),ring);dot.setBackground(mark);dot.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);return dot;}
+    private FrameLayout.LayoutParams dotAt(int size,int left,int top){FrameLayout.LayoutParams at=new FrameLayout.LayoutParams(dp(size),dp(size),Gravity.TOP|Gravity.LEFT);at.leftMargin=dp(left);at.topMargin=dp(top);return at;}
+    /** Blue pill with the unread count (99+ at most), or a small dot when the count is unknown. */
+    private View unreadBadge(int count){
+        if(count<=0)return statusDot(BLUE,BLUE);
+        TextView badge=text(count>99?"99+":Integer.toString(count),11,WHITE);badge.setTypeface(Typeface.create(Typeface.DEFAULT,600,false));badge.setMinWidth(dp(18));badge.setPadding(dp(5),0,dp(5),0);badge.setBackground(shape(BLUE,9));badge.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);return badge;
     }
     private JSONArray pinIds(){JSONArray pins=botPreferences.optJSONArray("pinnedAgentIds");return pins==null?new JSONArray():pins;}
     private boolean isPinned(String id){JSONArray pins=pinIds();for(int i=0;i<pins.length();i++)if(id.equals(pins.optString(i)))return true;return false;}
@@ -286,10 +310,12 @@ public final class MainActivity extends Activity {
         BotAvatarView face=new BotAvatarView(this);applyAvatar(face,name,bot);face.state("ready",BLUE,0);face.running(visible);avatars.add(face);face.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         // The avatar view draws its face at 76% of its box: a 58 dp box shows the 44 dp face.
         tile.addView(face,new FrameLayout.LayoutParams(dp(58),dp(58),Gravity.TOP|Gravity.CENTER_HORIZONTAL));
-        boolean unread=bot.optBoolean("hasUnread"),working=bot.optBoolean("isRunning")||bot.optBoolean("isRunningTurn")||bot.optBoolean("isComposingMessage");
-        if(unread||working){View dot=new View(this);GradientDrawable mark=new GradientDrawable();mark.setShape(GradientDrawable.OVAL);mark.setColor(unread?BLUE:0xffff9800);mark.setStroke(dp(2),Color.BLACK);dot.setBackground(mark);FrameLayout.LayoutParams at=new FrameLayout.LayoutParams(dp(12),dp(12),Gravity.TOP|Gravity.LEFT);at.leftMargin=dp(47);at.topMargin=dp(6);tile.addView(dot,at);}
+        int count=Math.max(0,bot.optInt("unreadCount",0));boolean unread=count>0||bot.optBoolean("hasUnread"),working=working(bot);
+        // Working: a green dot at the avatar's lower right. Unread: the count badge (or a dot) at its upper right.
+        if(working)tile.addView(statusDot(GREEN,Color.BLACK),dotAt(12,47,40));
+        if(unread){View badge=unreadBadge(count);FrameLayout.LayoutParams at=new FrameLayout.LayoutParams(count>0?-2:dp(12),dp(count>0?18:12),Gravity.TOP|Gravity.LEFT);at.leftMargin=dp(count>0?44:47);at.topMargin=dp(count>0?2:6);tile.addView(badge,at);}
         TextView label=text(name,12,WHITE);label.setSingleLine(true);label.setEllipsize(android.text.TextUtils.TruncateAt.END);FrameLayout.LayoutParams lp=new FrameLayout.LayoutParams(-1,dp(16),Gravity.TOP);lp.topMargin=dp(54);tile.addView(label,lp);
-        tile.setContentDescription(name+", pinned"+(unread?", unread":working?", working":"")+(selected?", selected":""));
+        tile.setContentDescription(name+", pinned"+(working?", working":"")+(count>0?", "+count+" unread":unread?", unread":"")+(selected?", selected":""));
         tile.setOnClickListener(v->{navigation++;primaryAction(bot,false);});tile.setOnLongClickListener(v->{openBotActions(bot);return true;});
         if(id.equals(justPinnedId)){justPinnedId="";tile.setScaleX(.6f);tile.setScaleY(.6f);tile.setAlpha(0);tile.animate().scaleX(1).scaleY(1).alpha(1).setDuration(260).setInterpolator(new android.view.animation.OvershootInterpolator()).start();}
         return tile;
@@ -390,7 +416,8 @@ public final class MainActivity extends Activity {
     private void previewPins(String value){
         try{bots=new JSONArray().put(new JSONObject().put("id","preview-primary").put("name","Main Bot").put("lastMessagePreview","Ready when you are"));
             String[] names={"Research Bot","Travel Bot","Inbox Bot","Release Bot","Notes Bot","Fitness Bot","Budget Bot","Reading Bot","Garden Bot","Music Bot","Recipe Bot"};
-            for(int i=0;i<names.length;i++)bots.put(previewBot(names[i],"Latest update from "+names[i],i==1).put("isRunning",i==2));
+            for(int i=0;i<names.length;i++){JSONObject b=previewBot(names[i],"Latest update from "+names[i],i==1||i==6).put("isRunning",i==2||i==7);
+                if(i==1)b.put("unreadCount",3);if(i==6)b.put("unreadCount",12);if(i==8){b.remove("lastMessagePreview");b.put("title","Platform ops");}bots.put(b);}
             JSONArray pins=new JSONArray().put("preview-primary");int count=value.equals("home_overflow")?11:value.equals("home_pinned")||value.equals("bot_pinned")?4:0;
             for(int i=0;i<count;i++)pins.put(bots.getJSONObject(i+1).getString("id"));
             botPreferences=new JSONObject().put("mainAgentId","preview-primary").put("pinnedAgentIds",pins);
@@ -457,10 +484,31 @@ public final class MainActivity extends Activity {
         if(!safeError.isEmpty())label(safeError,12,SECONDARY);edgeTalk();
     }
     private void chatBubble(JSONObject entry){
-        String value=MessageText.plain(entry.optString("text"));String who=entry.optString("role").equals("user")?"You":botName;
-        TextView bubble=label(value,14,WHITE);bubble.setTag("chat_message");bubble.setGravity(Gravity.START);bubble.setMaxLines(4);bubble.setEllipsize(android.text.TextUtils.TruncateAt.END);bubble.setContentDescription(who+": "+value+". Tap to expand");bubble.setFocusable(true);bubble.setClickable(true);bubble.setStateDescription("Collapsed message");
-        bubble.setOnClickListener(v->{boolean expanding=bubble.getMaxLines()==4;bubble.setMaxLines(expanding?Integer.MAX_VALUE:4);bubble.setEllipsize(expanding?null:android.text.TextUtils.TruncateAt.END);bubble.setStateDescription(expanding?"Expanded message":"Collapsed message");bubble.setContentDescription(who+": "+value+(expanding?". Tap to collapse":". Tap to expand"));});
+        String raw=entry.optString("text"),value=MessageText.plain(raw);String who=entry.optString("role").equals("user")?"You":botName;
+        TextView bubble=label(value,14,WHITE);bubble.setText(rich(raw));bubble.setTag("chat_message");bubble.setGravity(Gravity.START);bubble.setMaxLines(4);bubble.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        bubble.setContentDescription(who+": "+value+". Tap to read");bubble.setFocusable(true);bubble.setClickable(true);
+        // A tap opens the whole message full screen, in larger text, scrolled with the crown.
+        bubble.setOnClickListener(v->{navigation++;readerEntry=entry;readerReturnY=currentScroll==null?0:currentScroll.getScrollY();screen="reader";render();});
         bubble.setPadding(dp(10),dp(8),dp(10),dp(8));bubble.setBackground(shape(entry.optString("role").equals("user")?userBubble():CARD,14));LinearLayout.LayoutParams bp=(LinearLayout.LayoutParams)bubble.getLayoutParams();bp.topMargin=dp(6);bubble.setLayoutParams(bp);
+    }
+    /** Message text with **bold** key words and numbers kept bold. */
+    private CharSequence rich(String raw){
+        MessageText.Styled styled=MessageText.styled(raw);android.text.SpannableString text=new android.text.SpannableString(styled.text);
+        for(int i=0;i+1<styled.bold.length;i+=2)text.setSpan(new android.text.style.StyleSpan(Typeface.BOLD),styled.bold[i],styled.bold[i+1],android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return text;
+    }
+    /** Full-screen reading view for one chat message. */
+    private void reader(){
+        JSONObject entry=readerEntry==null?new JSONObject():readerEntry;String who=entry.optString("role").equals("user")?"You":botName;
+        body.setPadding(dp(side*.11f),dp(18),dp(side*.11f),dp(side*.22f));
+        TextView from=label(who+historyTime(entry),12,SECONDARY);from.setSingleLine(true);from.setEllipsize(android.text.TextUtils.TruncateAt.END);gap(6);
+        String raw=entry.optString("text","Message unavailable");
+        TextView message=label(MessageText.plain(raw),16,WHITE);message.setText(rich(raw));message.setGravity(Gravity.START);message.setLineSpacing(0,1.12f);
+        message.setContentDescription(who+": "+MessageText.plain(raw));
+    }
+    private void closeReader(){
+        screen="ready";render();final ScrollView restored=currentScroll;final int y=readerReturnY;
+        restored.post(()->{if(currentScroll==restored&&screen.equals("ready"))restored.scrollTo(0,y);});
     }
     private int userBubble(){if(selectedMetadata.has("avatarDataUrl"))return GLASS;int color=accent();double[] rgb={Color.red(color)/255d,Color.green(color)/255d,Color.blue(color)/255d};for(int i=0;i<3;i++)rgb[i]=rgb[i]<=.04045?rgb[i]/12.92:Math.pow((rgb[i]+.055)/1.055,2.4);double luminance=.2126*rgb[0]+.7152*rgb[1]+.0722*rgb[2];return 1.05/(luminance+.05)>=4.5?color:GLASS;}
     private String duration(long ms){return String.format(java.util.Locale.ROOT,"%d:%02d",Math.max(0,ms)/60000,(Math.max(0,ms)/1000)%60);}
@@ -607,7 +655,7 @@ public final class MainActivity extends Activity {
     private void historyDetail(){
         historyHeader("Message",()->{screen="history";render();});
         JSONObject entry=historyDetail==null?new JSONObject():historyDetail;String role=entry.optString("role"),who=role.equals("user")?"You":role.equals("assistant")?botName:"Conversation";
-        label((role.equals("user")?"You · ":"")+botName+historyTime(entry),12,SECONDARY);TextView message=label(MessageText.plain(entry.optString("text","Message unavailable")),14,WHITE);
+        label((role.equals("user")?"You · ":"")+botName+historyTime(entry),12,SECONDARY);TextView message=label(MessageText.plain(entry.optString("text","Message unavailable")),16,WHITE);message.setText(rich(entry.optString("text","Message unavailable")));
         message.setGravity(Gravity.START);message.setTextIsSelectable(true);message.setContentDescription("Full message from "+who+": "+entry.optString("text"));
     }
     private boolean historyCurrent(int request,int mine,int route,String id,String binding){

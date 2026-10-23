@@ -166,6 +166,8 @@ final class GrokCore {
                 // Which harness runs the Bot decides the end-of-call handoff (see CallHandoff).
                 String harness=text(b,"harness");
                 if(harness.matches("[a-z][a-z0-9_-]{0,31}"))candidate.put("harness",harness);
+                // The Bot's role line ("platform ops"), shown when there is no message preview.
+                String title=text(b,"title").replaceAll("\\s+"," ").trim();if(!title.isEmpty()&&title.length()<=80&&safeSession(title))candidate.put("title",title);
                 // The Bot's own voice, speed and language, which the official apps send in session.update.
                 String voiceId=text(b,"voiceId");if(voiceId.matches("[A-Za-z0-9_.-]{1,64}"))candidate.put("voiceId",voiceId);
                 double speed=voiceSpeed(b.opt("voiceSpeed"));if(speed>0)candidate.put("voiceSpeed",speed);
