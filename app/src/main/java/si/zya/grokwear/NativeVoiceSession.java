@@ -187,6 +187,8 @@ public final class NativeVoiceSession {
     private volatile long pcmSent,speechStarts,audioOut,heard,toolCalls,toolsServed,toolsRefused;private volatile int tasksRelayed,relayedCallerLines;
     /** Caller lines already handed to the Bot as a task; the end-of-call handoff skips them. */
     public int relayedCallerLines(){return relayedCallerLines;}
+    /** Who spoke last on this call, as the official clients read it from the call record. */
+    private String lastSpeaker(){String who="";for(JSONObject turn:spokenTurns.values())who=turn.optString("speaker");return who;}
     private int finalizedCallerLines(){synchronized(historyGuard){int n=0;for(java.util.Map.Entry<String,JSONObject> e:spokenTurns.entrySet())if(finalizedTurns.contains(e.getKey())&&"user".equals(e.getValue().optString("speaker"))&&!e.getValue().optString("text").trim().isEmpty())n++;return n;}}private volatile int seeded,toolsOffered,instructionChars;private volatile String toolNames="",seedShape="";
     private final java.util.Map<String,Integer> eventTypes=new java.util.LinkedHashMap<>();private volatile int eventsAfterReady;
     // Microphone level only: the loudest sample, frames with speech-level sound, and frames of pure zeros.
@@ -396,9 +398,14 @@ public final class NativeVoiceSession {
     }
     static final int RECONNECT_ATTEMPTS=20;static final long RECONNECT_DIAL_MS=15000;
     static final String RESUME="The line dropped for a moment and is back now. Say so in one short phrase, without apologising at length.";
+    /** The official clients' resume line: finish an interrupted answer, or pick up after the caller's last words. */
+    static String resumeInstructions(String lastSpeaker){
+        return RESUME+("assistant".equals(lastSpeaker)?" You were in the middle of answering; finish that answer from where the caller last heard you, without repeating what you already said."
+            :" Then pick up exactly where the conversation left off. If the caller had asked something you had not answered yet, answer it now.");
+    }
     volatile int reconnectAttempts=RECONNECT_ATTEMPTS;volatile long reconnectBaseMs=1000;
     private volatile boolean reconnecting;private volatile long socketGeneration;private int reconnectAttempt,reconnects;
-    private String droppedConversationId,lostReason="";private boolean owesResume,awaitingCreated;
+    private String droppedConversationId,lostReason="",resumeSpeaker="";private boolean owesResume,awaitingCreated;
     /** Lookup results that finished while the line was down; their function calls live in the dropped conversation. */
     private final java.util.ArrayList<JSONObject> heldOutputs=new java.util.ArrayList<>();
     /**
@@ -413,7 +420,7 @@ public final class NativeVoiceSession {
             if(reconnecting||!live())return;
             reconnecting=true;ready=false;settingsAccepted=false;settingsSent=false;lostReason=safe;reconnectAttempt=0;reconnects++;
             listener.onDiagnostic("call_reconnect lost code="+code);
-            synchronized(historyGuard){droppedConversationId=realtimeConversationId;}
+            synchronized(historyGuard){droppedConversationId=realtimeConversationId;resumeSpeaker=replyInFlight?"assistant":lastSpeaker();}
             owesResume=replyInFlight||(callerSpoke&&!alreadySpoke);
             replyInFlight=false;callerSpeaking=false;
             Wire old=socket;socketGeneration++;if(old!=null)old.cancel();
@@ -467,7 +474,7 @@ public final class NativeVoiceSession {
             // A new conversation never saw those function calls; their results would be orphans.
             toolReplyOwed=false;}
         heldOutputs.clear();
-        if(owesResume){owesResume=false;requestReply(RESUME);}else payToolReply();
+        if(owesResume){owesResume=false;requestReply(resumeInstructions(resumeSpeaker));}else payToolReply();
     }
     /** This call's settled turns, newest first up to 20 turns or 12,000 characters, as conversation items. */
     private JSONArray replayFrames()throws Exception {

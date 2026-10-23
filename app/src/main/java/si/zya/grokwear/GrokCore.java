@@ -361,7 +361,7 @@ final class GrokCore {
             }
             // The official Android client's body; sessionId addresses a teammate's Bot.
             JSONObject body=new JSONObject().put("agentId",job.getString("botId")).put("prompt",job.getString("text"))
-                    .put("clientNonce",job.getString("nonce")).put("source","mobile").put("firstSentAtMs",job.getLong("created"));
+                    .put("clientNonce",job.getString("nonce")).put("source","mobile").put("sendSource","chat").put("firstSentAtMs",job.getLong("created"));
             if(job.has("sessionId"))body.put("sessionId",job.getString("sessionId"));
             JSONObject result=transport.post(config,"sendPrompt",body);
             // The service answers with nothing or {accepted:true}; a repeated nonce is accepted, not doubled.

@@ -230,6 +230,7 @@ public class GrokCoreTest {
         Fixture f=new Fixture();String id=f.c.prepare("  Use three sentences  ");JSONObject job=f.c.job(id);f.c.submit(id);
         assertEquals("main",f.lastSend.getString("agentId"));assertEquals("Use three sentences",f.lastSend.getString("prompt"));
         assertEquals(job.getString("nonce"),f.lastSend.getString("clientNonce"));assertEquals("mobile",f.lastSend.getString("source"));
+        assertEquals("Typed in the chat, as Android 1.17.0 labels its composer","chat",f.lastSend.getString("sendSource"));
         assertEquals(job.getLong("created"),f.lastSend.getLong("firstSentAtMs"));assertFalse(f.lastSend.has("sessionId"));
         JSONObject root=f.mem.data;root.getJSONObject("bot").put("viewerIsOwner",false).put("viewerSessionId","dm:viewer");
         f.c.submit(f.c.prepare("Team question"));assertEquals("dm:viewer",f.lastSend.getString("sessionId"));

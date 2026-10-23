@@ -461,7 +461,8 @@ public final class NativeVoiceSessionTest {
     }
     @Test public void lookupFinishingDuringARedialIsDroppedOnANewConversation()throws Exception {
         try(Fixture f=lookupAcrossADrop("conv-2")){
-            assertEquals(NativeVoiceSession.RESUME,f.frame("response.create").getJSONObject("response").getString("instructions"));
+            // The drop cut the Bot off mid-reply, so it finishes that answer.
+            assertEquals(NativeVoiceSession.resumeInstructions("assistant"),f.frame("response.create").getJSONObject("response").getString("instructions"));
             for(JSONObject frame:f.sent){JSONObject item=frame.optJSONObject("item");assertFalse("Orphaned lookup result sent",item!=null&&"function_call_output".equals(item.optString("type")));}
         }
     }
@@ -483,7 +484,8 @@ public final class NativeVoiceSessionTest {
             f.receive("session.updated");
             JSONObject item=f.frame("conversation.item.create").getJSONObject("item");
             assertEquals("user",item.getString("role"));assertEquals("Book a table",item.getJSONArray("content").getJSONObject(0).getString("text"));
-            assertEquals(NativeVoiceSession.RESUME,f.frame("response.create").getJSONObject("response").getString("instructions"));
+            // The caller spoke last, so the Bot picks up and answers what they asked.
+            assertEquals(NativeVoiceSession.resumeInstructions("user"),f.frame("response.create").getJSONObject("response").getString("instructions"));
         }
     }
     @Test public void closeBeforeReadyIsFailureRatherThanCompletedCall()throws Exception {
