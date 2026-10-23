@@ -14,14 +14,15 @@ public class GrokCoreTest {
     static JSONObject config()throws Exception{return new JSONObject().put("gatewayUrl","https://box.cursorvm.com")
             .put("gatewayToken","synthetic-token").put("headers",new JSONObject().put("x-anyrun-network-token","synthetic-route"));}
     static final class Fixture {
-        Memory mem=new Memory();List<String> calls=new ArrayList<>();JSONObject send=new JSONObject(),thread=new JSONObject(),tail=new JSONObject();
+        Memory mem=new Memory();List<String> calls=new ArrayList<>();JSONObject send=new JSONObject(),thread=new JSONObject(),tail=new JSONObject(),lastSend;
         Exception sendError;GrokCore c;
         Fixture()throws Exception {
             c=new GrokCore(mem,(cfg,method,body)->{calls.add(method);switch(method){
                 case "listAgents":return new JSONObject().put("agents",new JSONArray().put(new JSONObject().put("id","main").put("name","Main Bot")));
-                case "sendPrompt":if(sendError!=null)throw sendError;return send;
+                case "sendPrompt":lastSend=new JSONObject(body.toString());if(sendError!=null)throw sendError;return send;
                 case "getAgentThread":assertEquals("receipt",body.getString("rootId"));return thread;
                 case "getAgentTranscriptTail":return tail;
+                case "setAgentUnread":assertEquals("main",body.getString("id"));assertFalse(body.getBoolean("isUnread"));return new JSONObject();
             }throw new AssertionError(method);});
             c.link(config());c.bots();c.select("main");calls.clear();send.put("messageId","receipt");
         }
@@ -150,6 +151,16 @@ public class GrokCoreTest {
         JSONObject text=bots.getJSONObject(1);assertEquals(.5,text.getDouble("voiceSpeed"),0);assertFalse(text.has("voiceLanguage"));
         JSONObject bad=bots.getJSONObject(2);assertFalse(bad.has("voiceId"));assertFalse(bad.has("voiceSpeed"));assertFalse(bad.has("voiceLanguage"));
     }
+    @Test public void botRoleLineSurvivesDiscoverySingleLineAndBounded()throws Exception {
+        String longTitle=new String(new char[81]).replace('\0','x');
+        GrokCore core=new GrokCore(new Memory(),(cfg,method,body)->new JSONObject().put("agents",new JSONArray()
+            .put(new JSONObject().put("id","ops").put("title","Platform\n  ops"))
+            .put(new JSONObject().put("id","long").put("title",longTitle))
+            .put(new JSONObject().put("id","none"))));
+        core.link(config());JSONArray bots=core.bots();
+        assertEquals("Platform ops",bots.getJSONObject(0).getString("title"));
+        assertFalse(bots.getJSONObject(1).has("title"));assertFalse(bots.getJSONObject(2).has("title"));
+    }
     @Test public void harnessSurvivesDiscoveryOnlyWhenWellFormed()throws Exception {
         GrokCore core=new GrokCore(new Memory(),(cfg,method,body)->new JSONObject().put("agents",new JSONArray()
             .put(new JSONObject().put("id","temporal").put("harness","temporal"))
@@ -170,7 +181,7 @@ public class GrokCoreTest {
     }
     @Test public void cacheBotAndPersistBeforeSending()throws Exception {
         Fixture f=new Fixture();String id=f.c.prepare("hello");assertEquals("prepared",f.c.job(id).getString("state"));assertTrue(f.calls.isEmpty());
-        assertEquals("waiting",f.c.submit(id).getString("state"));assertEquals(Collections.singletonList("sendPrompt"),f.calls);
+        assertEquals("sent",f.c.submit(id).getString("state"));assertEquals(Collections.singletonList("sendPrompt"),f.calls);
         f.c.submit(id);assertEquals(1,f.calls.size());
     }
     @Test public void diskFailurePreventsTransmission()throws Exception {
@@ -203,46 +214,53 @@ public class GrokCoreTest {
         try{f.c.prepare("hello",profile,"main");fail();}catch(GrokCore.Failure expected){}
         assertTrue(f.calls.isEmpty());
     }
-    @Test public void receiptMissingIsUnknown()throws Exception {
-        Fixture f=new Fixture();f.send=new JSONObject();String id=f.c.prepare("hello");assertEquals("unknown",f.c.submit(id).getString("state"));
+    @Test public void markReadSendsTheOfficialOpAndClearsTheSavedBadge()throws Exception {
+        Fixture f=new Fixture();JSONObject root=f.mem.data;
+        root.getJSONArray("candidates").getJSONObject(0).put("hasUnread",true).put("unreadCount",3);root.getJSONObject("bot").put("hasUnread",true).put("unreadCount",3);
+        f.c.markRead("main");assertEquals(Collections.singletonList("setAgentUnread"),f.calls);
+        JSONObject row=f.mem.data.getJSONArray("candidates").getJSONObject(0);assertFalse(row.getBoolean("hasUnread"));assertEquals(0,row.getInt("unreadCount"));
+        assertEquals(0,f.mem.data.getJSONObject("bot").getInt("unreadCount"));
+    }
+    @Test public void emptyOrAcceptedReplyMeansSent()throws Exception {
+        Fixture f=new Fixture();f.send=new JSONObject();String id=f.c.prepare("hello");assertEquals("sent",f.c.submit(id).getString("state"));
         f.c.submit(id);assertEquals(1,f.calls.size());
+        Fixture g=new Fixture();g.send=new JSONObject().put("accepted",true);assertEquals("sent",g.c.submit(g.c.prepare("hello")).getString("state"));
+    }
+    @Test public void sendBodyMatchesTheOfficialMobileClient()throws Exception {
+        Fixture f=new Fixture();String id=f.c.prepare("  Use three sentences  ");JSONObject job=f.c.job(id);f.c.submit(id);
+        assertEquals("main",f.lastSend.getString("agentId"));assertEquals("Use three sentences",f.lastSend.getString("prompt"));
+        assertEquals(job.getString("nonce"),f.lastSend.getString("clientNonce"));assertEquals("mobile",f.lastSend.getString("source"));
+        assertEquals("Typed in the chat, as Android 1.17.0 labels its composer","chat",f.lastSend.getString("sendSource"));
+        assertEquals(job.getLong("created"),f.lastSend.getLong("firstSentAtMs"));assertFalse(f.lastSend.has("sessionId"));
+        JSONObject root=f.mem.data;root.getJSONObject("bot").put("viewerIsOwner",false).put("viewerSessionId","dm:viewer");
+        f.c.submit(f.c.prepare("Team question"));assertEquals("dm:viewer",f.lastSend.getString("sessionId"));
     }
     @Test public void timeoutAndRejectedAreDifferent()throws Exception {
         Fixture f=new Fixture();f.sendError=new java.io.IOException("network");String id=f.c.prepare("hello");assertEquals("unknown",f.c.submit(id).getString("state"));
         Fixture g=new Fixture();g.sendError=new GrokCore.Failure("Denied",true);assertEquals("failed",g.c.submit(g.c.prepare("hello")).getString("state"));
     }
-    @Test public void pendingJobBlocksAnotherPrompt()throws Exception {
-        Fixture f=new Fixture();f.c.submit(f.c.prepare("first"));try{f.c.prepare("second");fail();}catch(GrokCore.Failure expected){}assertEquals(1,f.calls.size());
+    @Test public void onlyAnUnconfirmedMessageBlocksTheNext()throws Exception {
+        Fixture f=new Fixture();f.c.submit(f.c.prepare("first"));f.c.submit(f.c.prepare("second"));assertEquals(2,f.calls.size());
+        f.sendError=new java.io.IOException("network");f.c.submit(f.c.prepare("third"));
+        try{f.c.prepare("fourth");fail();}catch(GrokCore.Failure expected){}assertEquals(3,f.calls.size());
     }
-    @Test public void correlatedReplyNeverNewestMessageGuess()throws Exception {
-        Fixture f=new Fixture();String id=f.c.prepare("hello");f.c.submit(id);
-        f.thread=transcript(entry("other","send-message","wrong answer"));assertEquals("",f.c.poll(id).getString("reply"));
-        f.thread=transcript(entry("reply","send-message","correct").put("rootId","receipt"));assertEquals("correct",f.c.poll(id).getString("reply"));
-    }
-    @Test public void threadAnchorRequiresExactPromptAndUser()throws Exception {
-        JSONObject answer=entry("a","send-message","answer");
-        assertEquals("",GrokCore.matchedReply(transcript(entry("receipt","prompt","different"),answer),"receipt","hello"));
-        assertEquals("",GrokCore.matchedReply(transcript(entry("receipt","send-message","hello"),answer),"receipt","hello"));
-        assertEquals("answer",GrokCore.matchedReply(transcript(entry("receipt","prompt","hello"),answer),"receipt","hello"));
-    }
-    @Test public void foreignRootsAndDuplicateEntriesExcluded()throws Exception {
-        JSONObject root=entry("receipt","prompt","hello"),a=entry("a","send-message","one");
-        assertEquals("one",GrokCore.matchedReply(transcript(root,a,a,entry("b","send-message","wrong").put("rootId","other")),"receipt","hello"));
-    }
-    @Test public void nestedActualReplyShape()throws Exception {
-        JSONObject a=new JSONObject().put("id","reply").put("kind","send-message").put("replyToId","receipt")
-                .put("message",new JSONObject().put("type","text").put("content","चार"));
-        assertEquals("चार",GrokCore.matchedReply(new JSONObject().put("thread",transcript(a)),"receipt","hello"));
-    }
-    @Test public void unknownReconcilesOnlyExactNonceAndPrompt()throws Exception {
-        Fixture f=new Fixture();f.send=new JSONObject();String id=f.c.prepare("hello");f.c.submit(id);String nonce=f.c.job(id).getString("nonce");
-        f.tail=transcript(entry("receipt","prompt","hello").put("clientNonce","other"));f.c.poll(id);assertEquals("unknown",f.c.job(id).getString("state"));
-        f.tail=transcript(entry("receipt","prompt","hello").put("clientNonce",nonce));f.c.poll(id);assertEquals("waiting",f.c.job(id).getString("state"));
+    @Test public void unknownConfirmsOnlyFromItsOwnNonceAndTextAndNeverResends()throws Exception {
+        Fixture f=new Fixture();f.sendError=new java.io.IOException("network");String id=f.c.prepare("hello");f.c.submit(id);String nonce=f.c.job(id).getString("nonce");
+        f.tail=transcript(entry("u","message","hello").put("clientNonce","other"));assertEquals("unknown",f.c.poll(id).getString("state"));
+        f.tail=transcript(entry("u","message","different").put("clientNonce",nonce));assertEquals("unknown",f.c.poll(id).getString("state"));
+        f.tail=transcript(entry("u","message","hello").put("clientNonce",nonce));assertEquals("sent",f.c.poll(id).getString("state"));
         assertEquals(1,Collections.frequency(f.calls,"sendPrompt"));
     }
-    @Test public void ambiguousNonceDoesNotSelectFirst()throws Exception {
+    @Test public void ambiguousEchoDoesNotConfirm()throws Exception {
         JSONObject j=new JSONObject().put("nonce","n").put("text","hello");
-        assertEquals("",GrokCore.reconcile(transcript(entry("a","prompt","hello").put("clientNonce","n"),entry("b","prompt","hello").put("clientNonce","n")),j));
+        assertFalse(GrokCore.echoed(transcript(entry("a","message","hello").put("clientNonce","n"),entry("b","message","hello").put("clientNonce","n")),j));
+        assertFalse(GrokCore.echoed(transcript(entry("a","send-message","hello").put("clientNonce","n")),j));
+    }
+    @Test public void retryReusesTheNonceOnlyWhileUnconfirmedAndAtMostThreeTimes()throws Exception {
+        Fixture f=new Fixture();f.sendError=new java.io.IOException("network");String id=f.c.prepare("hello");f.c.submit(id);String nonce=f.lastSend.getString("clientNonce");
+        f.c.retry(id);assertEquals(nonce,f.lastSend.getString("clientNonce"));f.c.retry(id);f.c.retry(id);
+        assertEquals("Three attempts at most",3,Collections.frequency(f.calls,"sendPrompt"));
+        f.sendError=null;Fixture g=new Fixture();String sent=g.c.prepare("ok");g.c.submit(sent);g.c.retry(sent);assertEquals(1,g.calls.size());
     }
     @Test public void unlinkSeparatesAccountsAndDeletesInbox()throws Exception {
         Fixture f=new Fixture();String id=f.c.prepare("private old text");f.c.unlink();f.c.link(config());
@@ -251,9 +269,6 @@ public class GrokCoreTest {
     }
     @Test public void replacingConnectionNeedsUnlink()throws Exception {
         Fixture f=new Fixture();try{f.c.link(config());fail();}catch(GrokCore.Failure expected){}assertEquals("Main Bot",f.c.view().getJSONObject("bot").getString("name"));
-    }
-    @Test public void oversizedReplyNotSilentlyTruncated()throws Exception {
-        try{GrokCore.matchedReply(transcript(entry("a","send-message",String.join("",Collections.nCopies(33000,"x"))).put("rootId","receipt")),"receipt","hello");fail();}catch(GrokCore.Failure expected){}
     }
     @Test public void secretNetworkErrorsNeverReachUi()throws Exception {
         Fixture f=new Fixture();f.sendError=new Exception("synthetic-token");String id=f.c.prepare("hello");assertFalse(f.c.submit(id).toString().contains("synthetic-token"));
@@ -305,13 +320,13 @@ public class GrokCoreTest {
         assertTrue(f.calls.isEmpty());
     }
     @Test public void refusedPollStopsBackgroundObservationWithoutChangingDelivery()throws Exception {
-        Fixture f=new Fixture();String id=f.c.prepare("hello");f.c.submit(id);f.calls.clear();
+        Fixture f=new Fixture();f.sendError=new java.io.IOException("network");String id=f.c.prepare("hello");f.c.submit(id);f.calls.clear();
         GrokCore c=new GrokCore(f.mem,f.c.transport,root->{throw new GrokCore.Failure("Relink",true);});
-        JSONObject result=c.poll(id);assertEquals("waiting",result.getString("state"));
+        JSONObject result=c.poll(id);assertEquals("unknown",result.getString("state"));
         assertTrue(result.getBoolean("polling_finished"));assertTrue(result.getBoolean("poll_error"));assertEquals("Relink",result.getString("notice"));assertTrue(f.calls.isEmpty());
     }
     @Test public void malformedRefreshedConfigStopsBeforeGatewayAndAutomaticPolling()throws Exception {
-        Fixture f=new Fixture();String waiting=f.c.prepare("first");f.c.submit(waiting);f.calls.clear();
+        Fixture f=new Fixture();f.sendError=new java.io.IOException("network");String waiting=f.c.prepare("first");f.c.submit(waiting);f.calls.clear();
         GrokCore c=new GrokCore(f.mem,f.c.transport,root->config().put("gatewayUrl","https://bad host.cursorvm.com"));
         assertTrue(c.poll(waiting).getBoolean("polling_finished"));assertTrue(f.calls.isEmpty());
         Fixture g=new Fixture();GrokCore submit=new GrokCore(g.mem,g.c.transport,root->{throw new java.io.IOException("private-details");});

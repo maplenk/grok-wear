@@ -18,7 +18,7 @@ public final class NativeVoiceSessionTest {
         volatile byte[] heard;volatile boolean failLookup,cancelled,unheard,failDials;volatile long queued;volatile okhttp3.HttpUrl lastUrl;final AtomicInteger dials=new AtomicInteger();
         volatile NativeVoiceSession.WireEvents events;
         volatile CountDownLatch lookupEntered,lookupRelease;
-        final NativeVoiceSession session;JSONObject settings;volatile String toolKind="served";
+        final NativeVoiceSession session;JSONObject settings;volatile String toolKind="served";volatile JSONObject toolOutput;
         Fixture()throws Exception {this(new JSONArray());}
         Fixture(JSONArray history)throws Exception {this(history,"");}
         Fixture(JSONArray history,String greeting)throws Exception {this(history,greeting,false,false,()->{});}
@@ -34,7 +34,7 @@ public final class NativeVoiceSessionTest {
                 tools.add(new JSONObject(body.toString()));
                 if(lookupEntered!=null)lookupEntered.countDown();if(lookupRelease!=null)lookupRelease.await(3,TimeUnit.SECONDS);
                 if(failLookup)throw new Exception("offline fixture failure");
-                return new JSONObject().put("kind",toolKind).put("output",new JSONObject().put("messages",new JSONArray().put(new JSONObject().put("text","found it"))));
+                return new JSONObject().put("kind",toolKind).put("output",toolOutput!=null?toolOutput:new JSONObject().put("messages",new JSONArray().put(new JSONObject().put("text","found it"))));
             };
             NativeVoiceSession.WireFactory factory=(url,secret,e)->{events=e;lastUrl=url;if(dials.incrementAndGet()>1&&failDials)e.failed(null);else e.opened();return new NativeVoiceSession.Wire(){
                 public boolean send(String text){try{sent.add(new JSONObject(text));return true;}catch(Exception ex){throw new AssertionError(ex);}}
@@ -313,11 +313,22 @@ public final class NativeVoiceSessionTest {
             assertEquals(id,f.tools.get(1).getString("callId"));assertNotEquals("function-one",id);
         }
     }
-    @Test public void mutatingToolRefusedWithoutBackendAndErrorStillSpoken()throws Exception {
+    @Test public void unknownToolRefusedWithoutBackendAndErrorStillSpoken()throws Exception {
         try(Fixture f=new Fixture()){
-            f.ready();int before=f.backendCalls.get();f.tool("write-one","send_task");
-            JSONObject item=f.frame("conversation.item.create").getJSONObject("item");assertEquals("write-one",item.getString("call_id"));assertTrue(item.getString("output").contains("does not permit"));
+            f.ready();int before=f.backendCalls.get();f.tool("write-one","approve_request");
+            JSONObject item=f.frame("conversation.item.create").getJSONObject("item");assertEquals("write-one",item.getString("call_id"));assertTrue(item.getString("output").contains("can't do that"));
             f.frame("response.create");assertEquals(before,f.backendCalls.get());assertTrue(f.tools.isEmpty());
+        }
+    }
+    @Test public void taskGoesToTheHarnessAndItsLinesAreNotHandedOffAgain()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.toolOutput=new JSONObject().put("relay","accepted");f.ready();
+            f.events.message(new JSONObject().put("type","conversation.item.input_audio_transcription.completed").put("item_id","u1").put("transcript","Check my inbox").toString());f.callback("caption");
+            f.receive("response.created");f.tool("task-1","send_task");
+            JSONObject item=f.frame("conversation.item.create").getJSONObject("item");assertEquals("task-1",item.getString("call_id"));assertTrue(item.getString("output").contains("accepted"));
+            long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);while(f.tools.isEmpty()&&System.nanoTime()<until)Thread.sleep(2);
+            JSONObject sent=f.tools.get(0);assertEquals("send_task",sent.getString("name"));assertTrue(sent.getJSONObject("line").has("theyJustTalked"));
+            assertEquals(1,f.session.relayedCallerLines());assertTrue(f.session.handoffLine().getBoolean("receiptOwed"));
         }
     }
     @Test public void failedLookupSchedulesResponse()throws Exception {
@@ -430,6 +441,17 @@ public final class NativeVoiceSessionTest {
             f.receive("session.updated");assertEquals(0,f.failures.get());assertEquals(0,f.disconnections.get());assertEquals(3,f.dials.get());
         }
     }
+    @Test public void currentTimeSectionMatchesAndroid1170()throws Exception {
+        long friday=java.time.ZonedDateTime.of(2026,10,23,12,45,30,0,java.time.ZoneId.of("Asia/Shanghai")).toInstant().toEpochMilli();
+        assertEquals("# Current time\nThe call started at Friday, October 23, 2026 at 12:45 PM GMT+8 (timezone Asia/Shanghai);\n"
+            +"some time may have passed since then. Do not infer anyone's location from it.\nThis is silent background context. Do not respond to this.\n"
+            +"If they ask what day it is, or what today is, answer from this. Do not announce it otherwise.\nAs YYYY-MM-DD, today is 2026-10-23.",
+            NativeVoiceSession.currentTimeSection(friday,java.time.ZoneId.of("Asia/Shanghai")));
+        try(Fixture f=new Fixture()){
+            String sent=f.settings.getJSONObject("session").getString("instructions");
+            assertTrue(sent.startsWith("Talk to this Bot\n\n# Current time\nThe call started at "));
+        }
+    }
     static Fixture lookupAcrossADrop(String newConversationId)throws Exception {
         Fixture f=new Fixture();
         f.ready();f.events.message(new JSONObject().put("type","conversation.created").put("conversation",new JSONObject().put("id","conv-1")).toString());
@@ -450,7 +472,8 @@ public final class NativeVoiceSessionTest {
     }
     @Test public void lookupFinishingDuringARedialIsDroppedOnANewConversation()throws Exception {
         try(Fixture f=lookupAcrossADrop("conv-2")){
-            assertEquals(NativeVoiceSession.RESUME,f.frame("response.create").getJSONObject("response").getString("instructions"));
+            // The drop cut the Bot off mid-reply, so it finishes that answer.
+            assertEquals(NativeVoiceSession.resumeInstructions("assistant"),f.frame("response.create").getJSONObject("response").getString("instructions"));
             for(JSONObject frame:f.sent){JSONObject item=frame.optJSONObject("item");assertFalse("Orphaned lookup result sent",item!=null&&"function_call_output".equals(item.optString("type")));}
         }
     }
@@ -472,7 +495,8 @@ public final class NativeVoiceSessionTest {
             f.receive("session.updated");
             JSONObject item=f.frame("conversation.item.create").getJSONObject("item");
             assertEquals("user",item.getString("role"));assertEquals("Book a table",item.getJSONArray("content").getJSONObject(0).getString("text"));
-            assertEquals(NativeVoiceSession.RESUME,f.frame("response.create").getJSONObject("response").getString("instructions"));
+            // The caller spoke last, so the Bot picks up and answers what they asked.
+            assertEquals(NativeVoiceSession.resumeInstructions("user"),f.frame("response.create").getJSONObject("response").getString("instructions"));
         }
     }
     @Test public void closeBeforeReadyIsFailureRatherThanCompletedCall()throws Exception {

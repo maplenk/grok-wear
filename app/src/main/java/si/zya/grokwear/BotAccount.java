@@ -58,6 +58,13 @@ final class BotAccount {
     }
     void unlink() throws Exception {auth.unlink();core.unlink();continuity.clear();}
     JSONArray bots() throws Exception {bound();JSONArray result=core.bots();bound();return result;}
+    /** A text message reviewed for this Bot; refused if the account or selected Bot changed since. */
+    String prepareMessage(String text,String botId) throws Exception {bound();String id=core.prepare(text,core.view().getString("profile"),botId);bound();return id;}
+    JSONObject sendMessage(String id,java.util.function.BooleanSupplier admitted) throws Exception {bound();return core.submit(id,admitted);}
+    JSONObject confirmMessage(String id) throws Exception {bound();return core.poll(id);}
+    JSONObject retryMessage(String id) throws Exception {bound();return core.retry(id);}
+    JSONArray messages(String botId) throws Exception {bound();return core.messages(botId);}
+    void markRead(String botId) throws Exception {bound();core.markRead(botId);}
     /** Disk-only account-scoped roster; never renews credentials or contacts Grok. */
     JSONObject cachedRoster() throws Exception {
         synchronized(core){synchronized(GrokAuthCore.LOCK){
@@ -264,18 +271,30 @@ final class BotAccount {
         finally{java.util.Arrays.fill(bytes,(byte)0);}
     }
     private static JSONObject gateway(JSONObject config,String method,JSONObject body) throws Exception {
-        if(!java.util.Arrays.asList("listAgents","setVoiceCallPresence").contains(method))throw new GrokCore.Failure("This Grok operation is not enabled.",true);
+        if(!java.util.Arrays.asList("listAgents","setVoiceCallPresence","sendPrompt","getAgentTranscriptTail","setAgentUnread").contains(method))throw new GrokCore.Failure("This Grok operation is not enabled.",true);
         JSONObject valid=GrokCore.validateConfig(config);
         Request.Builder request=new Request.Builder().url(valid.getString("gatewayUrl")+"/api/"+method)
             .header("Authorization","Bearer "+valid.getString("gatewayToken"));
         JSONObject headers=valid.getJSONObject("headers");Iterator<String> keys=headers.keys();
         while(keys.hasNext()){String key=keys.next();request.header(key,headers.getString(key));}
-        return execute(request,body,true);
+        if(!"sendPrompt".equals(method))return execute(request,body,true);
+        try{return execute(request,body,false);}
+        catch(GrokCore.Failure refused){
+            if(!refused.rejected)throw refused;
+            // The service's own refusal codes, in words; anything else stays a plain refusal.
+            switch(refused.code){
+                case "send/message-too-long":throw new GrokCore.Failure("This message is too long for Grok. Nothing was sent.",true,refused.code);
+                case "send/agent-unavailable":throw new GrokCore.Failure("This Bot can't take messages right now. Nothing was sent.",true,refused.code);
+                case "send/agent-no-access":throw new GrokCore.Failure("You can't message this Bot. Nothing was sent.",true,refused.code);
+                case "send/nonce-digest-mismatch":throw new GrokCore.Failure("Grok already has a different message with this id. Nothing new was sent.",true,refused.code);
+                default:throw new GrokCore.Failure("Grok refused the message. Nothing was sent.",true,refused.code);
+            }
+        }
     }
     /** The Connect error code token of a refused call, or "". Nothing else from the body is kept. */
     private static String errorCode(Response response){
         try{if(response.body()==null)return "";byte[] received=GrokVault.readBounded(response.body().byteStream(),16384);
-            try{String code=new JSONObject(new String(received,StandardCharsets.UTF_8)).optString("code");return code.matches("[a-z_]{1,40}")?code:"";}
+            try{JSONObject error=new JSONObject(new String(received,StandardCharsets.UTF_8));String code=error.optString("failureCode",error.optString("code"));return code.matches("[a-z_/-]{1,60}")?code:"";}
             finally{java.util.Arrays.fill(received,(byte)0);}
         }catch(Exception unreadable){return "";}
     }
@@ -291,16 +310,20 @@ final class BotAccount {
                 public void writeTo(okio.BufferedSink sink)throws java.io.IOException{sink.write(bytes);}
             };
             try(Response response=client.newCall(request.post(payload).build()).execute()) {
-                if(response.code()!=200)throw new GrokCore.Failure("Grok request failed (HTTP "+response.code()+").",true,errorCode(response));
+                // A 4xx is the service refusing; a 5xx may or may not have taken effect.
+                if(response.code()!=200)throw new GrokCore.Failure("Grok request failed (HTTP "+response.code()+").",response.code()<500,errorCode(response));
                 if(response.body()==null)throw new java.io.IOException();
                 byte[] received=GrokVault.readBounded(response.body().byteStream(),1024*1024);
                 try {String text=new String(received,StandardCharsets.UTF_8);
+                    // Some operations answer with nothing (or null) on success.
+                    if(text.trim().isEmpty()||text.trim().equals("null"))return new JSONObject();
                     if(arrayAllowed&&text.trim().startsWith("["))return new JSONObject().put("agents",new JSONArray(text));
                     return new JSONObject(text);
                 }finally{java.util.Arrays.fill(received,(byte)0);}
             }
         }catch(GrokCore.Failure safe){throw safe;}
-        catch(Exception failure){throw new GrokCore.Failure("Grok connection failed. Check sign-in before trying again.",true);}
+        // A dropped or timed-out request may have reached Grok: not a refusal.
+        catch(Exception failure){throw new GrokCore.Failure("Grok connection failed. Check sign-in before trying again.",false);}
         finally{java.util.Arrays.fill(bytes,(byte)0);}
     }
 }

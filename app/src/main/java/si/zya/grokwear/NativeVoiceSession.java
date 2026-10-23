@@ -20,7 +20,7 @@ import okhttp3.WebSocket;
 import okhttp3.WebSocketListener;
 import okio.ByteString;
 
-/** One bounded, non-reconnecting, read-only preview call. Never logs or persists audio/secrets. */
+/** One bounded voice call: lookups and tasks through the Bot's harness, reconnecting a dropped line. Never logs or persists audio/secrets. */
 public final class NativeVoiceSession {
     public interface Listener {
         /** Content-free diagnostic line (counts, phases, fixed tokens only). */
@@ -38,7 +38,8 @@ public final class NativeVoiceSession {
     }
     private static final long MAX_QUEUE=256L*1024;
     private static final int MAX_EVENT=512*1024;
-    private static final Set<String> READ_TOOLS=Set.of("recall_text_messages","search_conversations","stay_silent","end_the_call");
+    // The tools the official clients offer: lookups, silence, hanging up, and handing a task to the Bot's main agent.
+    private static final Set<String> CALL_TOOLS=Set.of("recall_text_messages","search_conversations","stay_silent","end_the_call","send_task");
     private final Object callbackGuard=new Object();
     interface Backend {JSONObject request(String method,JSONObject body)throws Exception;}
     interface Wire {boolean send(String text);long queueSize();void cancel();}
@@ -183,7 +184,12 @@ public final class NativeVoiceSession {
     private final Set<String> interruptedItems=new HashSet<>();
     /** Fixed diagnostic tokens and counters only; never server messages, IDs or transcripts. */
     // Content-free call counters for the call_stop log line: sizes, counts and protocol event names only.
-    private volatile long pcmSent,speechStarts,audioOut,heard,toolCalls,toolsServed,toolsRefused;private volatile int seeded,toolsOffered,instructionChars;private volatile String toolNames="",seedShape="";
+    private volatile long pcmSent,speechStarts,audioOut,heard,toolCalls,toolsServed,toolsRefused;private volatile int tasksRelayed,relayedCallerLines;
+    /** Caller lines already handed to the Bot as a task; the end-of-call handoff skips them. */
+    public int relayedCallerLines(){return relayedCallerLines;}
+    /** Who spoke last on this call, as the official clients read it from the call record. */
+    private String lastSpeaker(){String who="";for(JSONObject turn:spokenTurns.values())who=turn.optString("speaker");return who;}
+    private int finalizedCallerLines(){synchronized(historyGuard){int n=0;for(java.util.Map.Entry<String,JSONObject> e:spokenTurns.entrySet())if(finalizedTurns.contains(e.getKey())&&"user".equals(e.getValue().optString("speaker"))&&!e.getValue().optString("text").trim().isEmpty())n++;return n;}}private volatile int seeded,toolsOffered,instructionChars;private volatile String toolNames="",seedShape="";
     private final java.util.Map<String,Integer> eventTypes=new java.util.LinkedHashMap<>();private volatile int eventsAfterReady;
     // Microphone level only: the loudest sample, frames with speech-level sound, and frames of pure zeros.
     private volatile int micPeak;private volatile long micFrames,loudFrames,zeroFrames;
@@ -195,7 +201,7 @@ public final class NativeVoiceSession {
         return "received="+received+",errors="+protocolErrors+",class="+lastProtocolClass+",code="+lastProtocolCode
         +",ready="+ready+",muted="+muted+",pcm="+pcmSent+",speech="+speechStarts+",heard="+heard+",responses="+responsesSeen+",audio_out="+audioOut
         +",voice="+(voiceId.isEmpty()?"default":"bot")+",speed="+voiceSpeed+",language="+(voiceLanguage.isEmpty()?"auto":"hint")
-        +",reconnects="+reconnects+",tool_calls="+toolCalls+",tools_served="+toolsServed+",tools_refused="+toolsRefused+",seeded="+seeded+"["+seedShape+"],tools="+toolsOffered+"["+toolNames+"],instructions="+instructionChars
+        +",reconnects="+reconnects+",tasks="+tasksRelayed+",tool_calls="+toolCalls+",tools_served="+toolsServed+",tools_refused="+toolsRefused+",seeded="+seeded+"["+seedShape+"],tools="+toolsOffered+"["+toolNames+"],instructions="+instructionChars
         +",pool="+poolAtDial+",open_ms="+openMs+",updated_ms="+updatedMs+",ready_ms="+readyMs+",ttfa_ms="+lastTtfaMs+",ttfa_max_ms="+maxTtfaMs
         +",after_ready="+eventsAfterReady+",mic_peak="+micPeak+",mic_frames="+micFrames+",loud="+loudFrames+",zero="+zeroFrames+",events="+types;}
     /** Roles, sizes and character classes of the seeded history, never its text. */
@@ -324,7 +330,7 @@ public final class NativeVoiceSession {
                     JSONObject tool=tools.optJSONObject(i);
                     if(tool==null)continue;
                     String name=tool.optString("name","");
-                    if(READ_TOOLS.contains(name)){filtered.put(new JSONObject(tool.toString()));offered.add(name);}
+                    if(CALL_TOOLS.contains(name)){filtered.put(new JSONObject(tool.toString()));offered.add(name);}
                 }
                 plan.put("tools",filtered);
                 if(plan.optString("instructions","").isEmpty())throw new IllegalArgumentException();
@@ -391,10 +397,23 @@ public final class NativeVoiceSession {
         if(terminal.get())socket.cancel();
     }
     static final int RECONNECT_ATTEMPTS=20;static final long RECONNECT_DIAL_MS=15000;
+    /** Android 1.17.0's "# Current time" section, added after the Bot's instructions so it knows the caller's day and time. */
+    static String currentTimeSection(long startedAtMs,java.time.ZoneId zone){
+        java.time.ZonedDateTime at=java.time.Instant.ofEpochMilli(startedAtMs).atZone(zone);
+        String spoken=at.format(java.time.format.DateTimeFormatter.ofPattern("EEEE, MMMM d, yyyy 'at' h:mm a O",java.util.Locale.US));
+        return "# Current time\nThe call started at "+spoken+" (timezone "+zone.getId()+");\nsome time may have passed since then. Do not infer anyone's location from it."
+            +"\nThis is silent background context. Do not respond to this.\nIf they ask what day it is, or what today is, answer from this. Do not announce it otherwise."
+            +"\nAs YYYY-MM-DD, today is "+at.toLocalDate()+".";
+    }
     static final String RESUME="The line dropped for a moment and is back now. Say so in one short phrase, without apologising at length.";
+    /** The official clients' resume line: finish an interrupted answer, or pick up after the caller's last words. */
+    static String resumeInstructions(String lastSpeaker){
+        return RESUME+("assistant".equals(lastSpeaker)?" You were in the middle of answering; finish that answer from where the caller last heard you, without repeating what you already said."
+            :" Then pick up exactly where the conversation left off. If the caller had asked something you had not answered yet, answer it now.");
+    }
     volatile int reconnectAttempts=RECONNECT_ATTEMPTS;volatile long reconnectBaseMs=1000;
     private volatile boolean reconnecting;private volatile long socketGeneration;private int reconnectAttempt,reconnects;
-    private String droppedConversationId,lostReason="";private boolean owesResume,awaitingCreated;
+    private String droppedConversationId,lostReason="",resumeSpeaker="";private boolean owesResume,awaitingCreated;
     /** Lookup results that finished while the line was down; their function calls live in the dropped conversation. */
     private final java.util.ArrayList<JSONObject> heldOutputs=new java.util.ArrayList<>();
     /**
@@ -409,7 +428,7 @@ public final class NativeVoiceSession {
             if(reconnecting||!live())return;
             reconnecting=true;ready=false;settingsAccepted=false;settingsSent=false;lostReason=safe;reconnectAttempt=0;reconnects++;
             listener.onDiagnostic("call_reconnect lost code="+code);
-            synchronized(historyGuard){droppedConversationId=realtimeConversationId;}
+            synchronized(historyGuard){droppedConversationId=realtimeConversationId;resumeSpeaker=replyInFlight?"assistant":lastSpeaker();}
             owesResume=replyInFlight||(callerSpoke&&!alreadySpoke);
             replyInFlight=false;callerSpeaking=false;
             Wire old=socket;socketGeneration++;if(old!=null)old.cancel();
@@ -463,7 +482,7 @@ public final class NativeVoiceSession {
             // A new conversation never saw those function calls; their results would be orphans.
             toolReplyOwed=false;}
         heldOutputs.clear();
-        if(owesResume){owesResume=false;requestReply(RESUME);}else payToolReply();
+        if(owesResume){owesResume=false;requestReply(resumeInstructions(resumeSpeaker));}else payToolReply();
     }
     /** This call's settled turns, newest first up to 20 turns or 12,000 characters, as conversation items. */
     private JSONArray replayFrames()throws Exception {
@@ -481,7 +500,8 @@ public final class NativeVoiceSession {
                 .put("output",new JSONObject().put("format",format).put("speed",voiceSpeed));
         instructionChars=plan.getString("instructions").length();JSONArray offered=plan.getJSONArray("tools");toolsOffered=offered.length();
         StringBuilder names=new StringBuilder();for(int i=0;i<offered.length();i++){String name=offered.optJSONObject(i)==null?"":offered.optJSONObject(i).optString("name");if(name.matches("[a-z_]{1,40}")){if(names.length()>0)names.append(' ');names.append(name);}}toolNames=names.toString();
-        JSONObject session=new JSONObject().put("instructions",plan.getString("instructions"))
+        String instructions=plan.getString("instructions")+"\n\n"+currentTimeSection(connectedAtMs>0?connectedAtMs:System.currentTimeMillis(),java.time.ZoneId.systemDefault());
+        JSONObject session=new JSONObject().put("instructions",instructions)
                 .put("tools",plan.getJSONArray("tools")).put("turn_detection",new JSONObject().put("type","server_vad"))
                 .put("audio",audio).put("resumption",new JSONObject().put("enabled",true));
         // The Bot's chosen voice, as the official clients send it; otherwise Grok's default.
@@ -579,7 +599,7 @@ public final class NativeVoiceSession {
             case "response.audio.delta":case "response.output_audio.delta":
                 if(!callerSpeaking&&!interruptedReply&&belongsToCurrentReply(e)){String encoded=e.optString("delta","");
                     if(!encoded.isEmpty()){byte[] pcm=codec.decode(encoded);
-                        if(pcm.length%2!=0)throw new IllegalArgumentException();alreadySpoke=true;audioOut+=pcm.length;
+                        if(pcm.length%2!=0)throw new IllegalArgumentException();alreadySpoke=true;receiptOwed=false;audioOut+=pcm.length;
                         if(speechStoppedNanos!=0){lastTtfaMs=(System.nanoTime()-speechStoppedNanos)/1_000_000;maxTtfaMs=Math.max(maxTtfaMs,lastTtfaMs);speechStoppedNanos=0;}
                         if(!announcedSpeaking){announcedSpeaking=true;emit(()->listener.onState("Speaking"));}emit(()->listener.onAudio(pcm));}}
                 break;
@@ -636,8 +656,8 @@ public final class NativeVoiceSession {
         if(calls.contains(id))return; // One execution per function-call ID, including refusals.
         if(calls.size()>=128){finish("Call preview reached its tool limit.",false);return;}
         calls.add(id);
-        if(!READ_TOOLS.contains(name)||!offered.contains(name)) {
-            toolResultWithReply(id,new JSONObject().put("error","This read-only preview does not permit that action."));return;
+        if(!CALL_TOOLS.contains(name)||!offered.contains(name)) {
+            toolResultWithReply(id,new JSONObject().put("error","This watch can't do that action."));return;
         }
         if("end_the_call".equals(name)){toolOutput(id,new JSONObject().put("hangUp",true));requestGracefulEnd();return;}
         JSONObject input=new JSONObject(e.optString("arguments","{}"));
@@ -656,14 +676,16 @@ public final class NativeVoiceSession {
                     // The wire carries the enum name; the official clients map it to "served" before checking.
                     String kind=result.optString("kind","");
                     if(!"served".equals(kind)&&!CallHandoff.SERVED.equals(kind)) {toolsRefused++;
-                        toolResultForTurn(id,new JSONObject().put("error","The requested read-only tool was not available."),requestedTurn);return;
+                        toolResultForTurn(id,new JSONObject().put("error","The requested tool was not available."),requestedTurn);return;
                     }
                     Object output=result.opt("output");toolsServed++;
+                    // An accepted task owes the caller a receipt, and its caller lines must not be handed off again after the call.
+                    if("send_task".equals(name)&&output instanceof JSONObject&&"accepted".equals(((JSONObject)output).optString("relay"))){receiptOwed=true;tasksRelayed++;relayedCallerLines=finalizedCallerLines();}
                     toolOutput(id,output==null?new JSONObject():output);
                     if(requestedTurn==callerTurn&&(!(output instanceof JSONObject)||!"silent".equals(((JSONObject)output).optString("plan","")))){toolReplyOwed=true;payToolReply();}
                     else settleIfQuiet();
                 });
-            } catch(Exception ignored){execute(()->{if(requestedTurn==callerTurn)pendingLookups=Math.max(0,pendingLookups-1);toolResultForTurn(id,new JSONObject().put("error","The read-only lookup failed."),requestedTurn);});}
+            } catch(Exception ignored){execute(()->{if(requestedTurn==callerTurn)pendingLookups=Math.max(0,pendingLookups-1);toolResultForTurn(id,new JSONObject().put("error","The lookup failed."),requestedTurn);});}
         });} catch(java.util.concurrent.RejectedExecutionException ignored){fail("Call preview reached its pending lookup limit.");}
     }
 

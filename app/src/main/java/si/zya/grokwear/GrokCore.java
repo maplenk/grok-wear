@@ -166,6 +166,8 @@ final class GrokCore {
                 // Which harness runs the Bot decides the end-of-call handoff (see CallHandoff).
                 String harness=text(b,"harness");
                 if(harness.matches("[a-z][a-z0-9_-]{0,31}"))candidate.put("harness",harness);
+                // The Bot's role line ("platform ops"), shown when there is no message preview.
+                String title=text(b,"title").replaceAll("\\s+"," ").trim();if(!title.isEmpty()&&title.length()<=80&&safeSession(title))candidate.put("title",title);
                 // The Bot's own voice, speed and language, which the official apps send in session.update.
                 String voiceId=text(b,"voiceId");if(voiceId.matches("[A-Za-z0-9_.-]{1,64}"))candidate.put("voiceId",voiceId);
                 double speed=voiceSpeed(b.opt("voiceSpeed"));if(speed>0)candidate.put("voiceSpeed",speed);
@@ -289,6 +291,7 @@ final class GrokCore {
                 .put("profile",r.optString("profile")).put("bot",r.optJSONObject("bot")).put("jobs", jobs==null?new JSONArray():jobs);
         }
     }
+    /** A message reviewed for this account and Bot: refused if either changed since the review. */
     synchronized String prepare(String prompt, String profile, String botId) throws Exception {
         JSONObject root=linked(),bot=root.optJSONObject("bot");
         if(!profile.equals(root.optString("profile"))||bot==null||!botId.equals(bot.optString("id")))
@@ -300,30 +303,51 @@ final class GrokCore {
             throw new Failure("Use a message between 1 and 4,096 characters.",true);
         JSONObject root=linked(); JSONObject bot=root.optJSONObject("bot");
         if (bot==null) throw new Failure("Choose your Grok Bot first.",true);
-        JSONArray jobs=root.getJSONArray("jobs");
-        if(jobs.length()>=50) throw new Failure("Grok inbox is full. Delete an old request first.",true);
+        JSONArray jobs=pruned(root.getJSONArray("jobs"));root.put("jobs",jobs);
         for(int i=0;i<jobs.length();i++) if(pending(jobs.getJSONObject(i).optString("state")))
-            throw new Failure("Check the pending Grok request before sending another.",true);
+            throw new Failure("Wait until your last message is confirmed before sending another.",true);
         String id=UUID.randomUUID().toString();
         JSONObject job=new JSONObject().put("id",id).put("nonce",UUID.randomUUID().toString())
                 .put("botId",bot.getString("id")).put("botName",bot.getString("name"))
                 .put("text",prompt.trim()).put("state","prepared").put("created",System.currentTimeMillis())
-                .put("reply","").put("notice","Prepared locally; not sent. Delete this draft and review a new message to send it.");
+                .put("notice","Not sent yet.");
+        // A teammate's Bot answers in the viewer's own session, as the desktop client addresses it.
+        if(!bot.optBoolean("viewerIsOwner",true)&&!bot.optString("viewerSessionId").isEmpty())job.put("sessionId",bot.getString("viewerSessionId"));
         jobs.put(job);
         JSONObject draft=root.optJSONObject("draft");
         if(draft!=null&&draft.optBoolean("gateway")&&prompt.trim().equals(draft.optString("text").trim()))root.remove("draft");
         store.write(root);return id;
     }
-    static boolean pending(String s) { return s.equals("prepared")||s.equals("submitting")||s.equals("unknown")||s.equals("waiting"); }
+    /** A message being sent or not yet confirmed blocks the next one, so nothing is sent twice by mistake. */
+    static boolean pending(String s) { return s.equals("prepared")||s.equals("submitting")||s.equals("unknown"); }
+    /** Keeps every unresolved message and the 20 newest settled ones. */
+    private static JSONArray pruned(JSONArray jobs)throws Exception {
+        int settled=0;for(int i=0;i<jobs.length();i++)if(!pending(jobs.getJSONObject(i).optString("state")))settled++;
+        JSONArray keep=new JSONArray();
+        for(int i=0;i<jobs.length();i++){JSONObject job=jobs.getJSONObject(i);if(!pending(job.optString("state"))&&settled-->20)continue;keep.put(job);}
+        return keep;
+    }
     synchronized JSONObject submit(String id) throws Exception {
         return submit(id,()->true);
     }
     synchronized JSONObject submit(String id, BooleanSupplier admitted) throws Exception {
         JSONObject root=linked(), job=find(root,id);
         if(!job.getString("state").equals("prepared")) return copy(job); // Never resend, including after process death.
-        job.put("state","submitting");store.write(root); // Durable uncertainty before touching the network.
+        return send(root,job,admitted);
+    }
+    /**
+     * Sends an unconfirmed message again with the same nonce and text, as the official Android client's
+     * retry does: the service keeps one copy per nonce. At most three attempts in all.
+     */
+    synchronized JSONObject retry(String id) throws Exception {
+        JSONObject root=linked(),job=find(root,id);
+        if(!job.getString("state").equals("unknown")||job.optInt("attempts",1)>=3)return copy(job);
+        return send(root,job,()->true);
+    }
+    private JSONObject send(JSONObject root,JSONObject job,BooleanSupplier admitted)throws Exception {
+        job.put("state","submitting").put("attempts",job.optInt("attempts",0)+1);store.write(root); // Durable uncertainty before touching the network.
         // Final admission boundary: cancellation during disk I/O must not reach transport.
-        // Once admitted, a transmitted request cannot be recalled by closing the screen/call.
+        // Once admitted, a transmitted request cannot be recalled by closing the screen.
         if(!admitted.getAsBoolean()) {
             job.put("state","failed").put("notice","Cancelled before sending. Nothing was sent to Grok.");
             store.write(root);return copy(job);
@@ -335,128 +359,70 @@ final class GrokCore {
                 job.put("state","failed").put("notice","Cancelled before sending. Nothing was sent to Grok.");
                 store.write(root);return copy(job);
             }
-            JSONObject result=transport.post(config,"sendPrompt",new JSONObject()
-                    .put("agentId",job.getString("botId")).put("prompt",job.getString("text"))
-                    .put("clientNonce",job.getString("nonce")));
-            String receipt=text(result,"messageId");
-            if(receipt.isEmpty()||receipt.length()>512) job.put("state","unknown").put("notice","Delivery is uncertain. Do not resend; check Grok.");
-            else job.put("receipt",receipt).put("state","waiting").put("notice","Grok accepted the request.");
+            // The official Android client's body; sessionId addresses a teammate's Bot.
+            JSONObject body=new JSONObject().put("agentId",job.getString("botId")).put("prompt",job.getString("text"))
+                    .put("clientNonce",job.getString("nonce")).put("source","mobile").put("sendSource","chat").put("firstSentAtMs",job.getLong("created"));
+            if(job.has("sessionId"))body.put("sessionId",job.getString("sessionId"));
+            JSONObject result=transport.post(config,"sendPrompt",body);
+            // The service answers with nothing or {accepted:true}; a repeated nonce is accepted, not doubled.
+            if(result!=null&&result.has("accepted")&&!result.optBoolean("accepted"))job.put("state","unknown").put("notice","Not confirmed yet. It won't be sent again on its own.");
+            else job.put("state","sent").put("notice","Sent");
         } catch(Exception e) {
+            // A refusal is final; a timeout or a dropped connection leaves delivery unknown.
             boolean rejected=e instanceof Failure && ((Failure)e).rejected;
-            job.put("state",rejected?"failed":"unknown").put("notice",rejected?safe(e):"Delivery is uncertain. Check Grok before sending again.");
+            job.put("state",rejected?"failed":"unknown").put("notice",rejected?safe(e):"Not confirmed yet. It won't be sent again on its own.");
         }
         store.write(root);return copy(job);
     }
+    /** Confirms an unknown message from the chat: its own nonce and text there means it arrived. Never sends. */
     synchronized JSONObject poll(String id) throws Exception {
         JSONObject root=linked(),job=find(root,id);String state=job.getString("state");
-        if(state.equals("submitting")){job.put("state","unknown");state="unknown";}
-        if(state.equals("prepared")||state.equals("failed")) return copy(job);
+        if(state.equals("submitting")){job.put("state","unknown");state="unknown";store.write(root);} // Interrupted mid-send.
+        if(!state.equals("unknown")) return copy(job);
         job.remove("polling_finished");job.remove("poll_error");
         try {
-            if(state.equals("unknown")) {
-                JSONObject tail=post(root,"getAgentTranscriptTail",new JSONObject()
-                        .put("id",job.getString("botId")).put("limit",200));
-                String receipt=reconcile(tail,job);
-                if(receipt.isEmpty()) {job.put("notice","No matching receipt yet. Check Grok; this request will not be resent.");store.write(root);return copy(job);}
-                job.put("receipt",receipt).put("state","waiting");store.write(root);
-            }
-            String receipt=job.getString("receipt");
-            JSONObject thread=post(root,"getAgentThread",new JSONObject()
-                    .put("id",job.getString("botId")).put("rootId",receipt));
-            String reply=matchedReply(thread,receipt,job.getString("text"));
-            if(reply.isEmpty()) {
-                JSONObject tail=post(root,"getAgentTranscriptTail",new JSONObject()
-                        .put("id",job.getString("botId")).put("limit",200));
-                reply=matchedTailReply(tail,receipt,job.getString("text"),job.getString("nonce"));
-            }
-            if(!reply.isEmpty()) job.put("reply",reply).put("state","reply").put("notice","Reply received. Grok may still be working.");
-            else job.put("notice","Waiting for a reply linked to this request. Check Grok if it already answered.");
+            JSONObject body=new JSONObject().put("id",job.getString("botId")).put("limit",50);
+            if(job.has("sessionId"))body.put("sessionId",job.getString("sessionId"));
+            if(echoed(post(root,"getAgentTranscriptTail",body),job))job.put("state","sent").put("notice","Sent");
+            else job.put("notice","Not confirmed yet. It won't be sent again on its own.");
         } catch(Exception e) {job.put("notice",safe(e));if(e instanceof Failure&&((Failure)e).rejected)job.put("polling_finished",true).put("poll_error",true);}
         store.write(root);return copy(job);
     }
-    static String reconcile(JSONObject tail,JSONObject job) throws Exception {
-        JSONArray entries=tail.optJSONArray("entries");String found="";
-        if(entries==null||entries.length()>200)return "";
+    /** Exactly one chat row from the caller carries this message's nonce and text. */
+    static boolean echoed(JSONObject tail,JSONObject job) throws Exception {
+        JSONArray entries=tail.optJSONArray("entries");
+        if(entries==null||entries.length()>200)return false;
+        int found=0;
         for(int i=0;i<entries.length();i++) {
             JSONObject e=entries.optJSONObject(i);if(e==null)continue;
-            if(job.getString("nonce").equals(text(e,"clientNonce")) && job.getString("text").equals(entryText(e))
-                    && isUser(e) && !text(e,"id").isEmpty()) {
-                if(!found.isEmpty())return "";found=text(e,"id");
-            }
+            if(job.getString("nonce").equals(text(e,"clientNonce"))&&job.getString("text").equals(entryText(e))&&!"send-message".equals(text(e,"kind"))&&!"assistant".equals(text(e,"role")))found++;
         }
-        return found;
+        return found==1;
     }
-    static boolean isUser(JSONObject e) {return "user".equals(text(e,"role"))||"user-message".equals(text(e,"kind"))||"prompt".equals(text(e,"kind"));}
     static String entryText(JSONObject e) {
         for(String k:new String[]{"text","prompt","content"}) if(!text(e,k).isEmpty())return text(e,k);
         return text(e.optJSONObject("message"),"content");
     }
-    static String matchedReply(JSONObject payload,String receipt,String prompt) throws Exception {
-        JSONObject thread=payload.optJSONObject("thread");if(thread==null)thread=payload;
-        JSONArray entries=thread.optJSONArray("entries");if(entries==null||entries.length()>200)return "";
-        boolean anchored=false;
-        for(int i=0;i<entries.length();i++) {
-            JSONObject e=entries.optJSONObject(i);
-            if(e!=null&&receipt.equals(text(e,"id"))&&isUser(e)&&prompt.equals(entryText(e))) anchored=true;
-        }
-        StringBuilder answer=new StringBuilder();java.util.Set<String> seen=new java.util.HashSet<>();
-        for(int i=0;i<entries.length();i++) {
-            JSONObject e=entries.optJSONObject(i);if(e==null||!"send-message".equals(text(e,"kind")))continue;
-            String id=text(e,"id");if(id.isEmpty()||id.equals(receipt)||!seen.add(id))continue;
-            String root=text(e,"rootId"),parent=text(e,"replyToId");
-            if((!root.isEmpty()&&!root.equals(receipt))||(!parent.isEmpty()&&!parent.equals(receipt)))continue;
-            if(!anchored&&!receipt.equals(root)&&!receipt.equals(parent))continue;
-            String text=entryText(e);if(text.isEmpty())continue;
-            if(answer.length()+text.length()>32768)throw new Failure("Grok reply is too long. Read the complete answer in Grok.",true);
-            if(answer.length()>0)answer.append("\n\n");answer.append(text);
-        }
-        return answer.toString();
-    }
-    /** Bounded tail correlation observed on the watch: exact origin -> native requestId -> Bot reply. */
-    static String matchedTailReply(JSONObject payload,String receipt,String prompt,String nonce)throws Exception {
-        JSONArray entries=payload.optJSONArray("entries");
-        if(entries==null||entries.length()>200||!validCorrelationId(receipt)||nonce==null||nonce.isEmpty()||prompt==null||prompt.isEmpty())return "";
-        String request="";int origins=0;
-        for(int i=0;i<entries.length();i++){
-            JSONObject e=entries.optJSONObject(i);if(e==null)continue;
-            boolean idMatch=receipt.equals(text(e,"id")),nonceMatch=nonce.equals(text(e,"clientNonce"));
-            if(!idMatch&&!nonceMatch)continue;
-            // Receipt or nonce collisions cannot be resolved by choosing a convenient row.
-            if(!idMatch||!nonceMatch||!"user".equals(text(e,"role"))||!"message".equals(text(e,"kind"))
-                    ||!prompt.equals(entryText(e))||!validCorrelationId(text(e,"requestId"))||++origins!=1)return "";
-            request=text(e,"requestId");
-        }
-        if(origins!=1)return "";
-        java.util.Map<String,JSONObject> identities=new java.util.HashMap<>();java.util.Set<String> conflictingIds=new java.util.HashSet<>();
-        for(int i=0;i<entries.length();i++){
-            JSONObject entry=entries.optJSONObject(i);if(entry==null)continue;String id=text(entry,"id");
-            JSONObject previous=identities.put(id,entry);
-            if(previous!=null&&!sameCorrelationEntry(previous,entry))conflictingIds.add(id);
-        }
-        StringBuilder answer=new StringBuilder();java.util.Map<String,String> seen=new java.util.HashMap<>();
-        for(int i=0;i<entries.length();i++){
-            JSONObject e=entries.optJSONObject(i);if(e==null||!request.equals(text(e,"requestId")))continue;
-            String id=text(e,"id");
-            if("user".equals(text(e,"role"))){if(!receipt.equals(id))return "";continue;}
-            if(!"send-message".equals(text(e,"kind")))continue;
-            if(!validCorrelationId(id)||receipt.equals(id)||conflictingIds.contains(id))return "";
-            String root=text(e,"rootId"),parent=text(e,"replyToId");
-            if((!root.isEmpty()&&!receipt.equals(root))||(!parent.isEmpty()&&!receipt.equals(parent)))return "";
-            JSONObject message=e.optJSONObject("message");String type=text(message,"type");
-            if("auto-review-approval".equals(type)||"local-tool-permission".equals(type))continue;
-            String body=entryText(e);if(body.isEmpty())continue;
-            String previous=seen.put(id,body);if(previous!=null){if(!previous.equals(body))return "";continue;}
-            if(answer.length()+body.length()+(answer.length()>0?2:0)>32768)throw new Failure("Grok reply is too long. Read the complete answer in Grok.",true);
-            if(answer.length()>0)answer.append("\n\n");answer.append(body);
-        }
-        return answer.toString();
-    }
-    private static boolean sameCorrelationEntry(JSONObject a,JSONObject b){
-        for(String key:new String[]{"requestId","kind","role","rootId","replyToId","clientNonce"})if(!text(a,key).equals(text(b,key)))return false;
-        return entryText(a).equals(entryText(b))&&text(a.optJSONObject("message"),"type").equals(text(b.optJSONObject("message"),"type"));
-    }
-    private static boolean validCorrelationId(String value){return value!=null&&!value.isEmpty()&&value.length()<=512&&!value.matches("(?s).*[\\p{Cntrl}].*");}
     synchronized JSONObject job(String id) throws Exception { return copy(find(linked(),id)); }
+    /** This Bot's messages from the watch, oldest first. */
+    synchronized JSONArray messages(String botId) throws Exception {
+        JSONArray jobs=linked().getJSONArray("jobs"),mine=new JSONArray();
+        for(int i=0;i<jobs.length();i++)if(botId.equals(jobs.getJSONObject(i).optString("botId")))mine.put(copy(jobs.getJSONObject(i)));
+        return mine;
+    }
+    /**
+     * Marks the Bot's chat read, as the official apps do when it is opened (setAgentUnread), and clears
+     * the saved roster row so the badge goes at once.
+     */
+    synchronized void markRead(String botId) throws Exception {
+        JSONObject root=linked();post(root,"setAgentUnread",new JSONObject().put("id",botId).put("isUnread",false));
+        synchronized(ACCOUNT_STATE_LOCK){
+            root=linked();JSONArray rows=root.optJSONArray("candidates");boolean changed=false;
+            if(rows!=null)for(int i=0;i<rows.length();i++){JSONObject row=rows.optJSONObject(i);if(row!=null&&botId.equals(row.optString("id"))){row.put("hasUnread",false).put("unreadCount",0);changed=true;}}
+            JSONObject bot=root.optJSONObject("bot");if(bot!=null&&botId.equals(bot.optString("id"))){bot.put("hasUnread",false).put("unreadCount",0);changed=true;}
+            if(changed)store.write(root);
+        }
+    }
     synchronized void delete(String id) throws Exception {
         JSONObject root=linked();JSONArray rows=root.getJSONArray("jobs"), keep=new JSONArray();
         for(int i=0;i<rows.length();i++)if(!id.equals(rows.getJSONObject(i).getString("id")))keep.put(rows.getJSONObject(i));
