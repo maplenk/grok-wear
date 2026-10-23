@@ -441,6 +441,17 @@ public final class NativeVoiceSessionTest {
             f.receive("session.updated");assertEquals(0,f.failures.get());assertEquals(0,f.disconnections.get());assertEquals(3,f.dials.get());
         }
     }
+    @Test public void currentTimeSectionMatchesAndroid1170()throws Exception {
+        long friday=java.time.ZonedDateTime.of(2026,10,23,12,45,30,0,java.time.ZoneId.of("Asia/Shanghai")).toInstant().toEpochMilli();
+        assertEquals("# Current time\nThe call started at Friday, October 23, 2026 at 12:45 PM GMT+8 (timezone Asia/Shanghai);\n"
+            +"some time may have passed since then. Do not infer anyone's location from it.\nThis is silent background context. Do not respond to this.\n"
+            +"If they ask what day it is, or what today is, answer from this. Do not announce it otherwise.\nAs YYYY-MM-DD, today is 2026-10-23.",
+            NativeVoiceSession.currentTimeSection(friday,java.time.ZoneId.of("Asia/Shanghai")));
+        try(Fixture f=new Fixture()){
+            String sent=f.settings.getJSONObject("session").getString("instructions");
+            assertTrue(sent.startsWith("Talk to this Bot\n\n# Current time\nThe call started at "));
+        }
+    }
     static Fixture lookupAcrossADrop(String newConversationId)throws Exception {
         Fixture f=new Fixture();
         f.ready();f.events.message(new JSONObject().put("type","conversation.created").put("conversation",new JSONObject().put("id","conv-1")).toString());

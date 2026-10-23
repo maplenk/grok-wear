@@ -397,6 +397,14 @@ public final class NativeVoiceSession {
         if(terminal.get())socket.cancel();
     }
     static final int RECONNECT_ATTEMPTS=20;static final long RECONNECT_DIAL_MS=15000;
+    /** Android 1.17.0's "# Current time" section, added after the Bot's instructions so it knows the caller's day and time. */
+    static String currentTimeSection(long startedAtMs,java.time.ZoneId zone){
+        java.time.ZonedDateTime at=java.time.Instant.ofEpochMilli(startedAtMs).atZone(zone);
+        String spoken=at.format(java.time.format.DateTimeFormatter.ofPattern("EEEE, MMMM d, yyyy 'at' h:mm a O",java.util.Locale.US));
+        return "# Current time\nThe call started at "+spoken+" (timezone "+zone.getId()+");\nsome time may have passed since then. Do not infer anyone's location from it."
+            +"\nThis is silent background context. Do not respond to this.\nIf they ask what day it is, or what today is, answer from this. Do not announce it otherwise."
+            +"\nAs YYYY-MM-DD, today is "+at.toLocalDate()+".";
+    }
     static final String RESUME="The line dropped for a moment and is back now. Say so in one short phrase, without apologising at length.";
     /** The official clients' resume line: finish an interrupted answer, or pick up after the caller's last words. */
     static String resumeInstructions(String lastSpeaker){
@@ -492,7 +500,8 @@ public final class NativeVoiceSession {
                 .put("output",new JSONObject().put("format",format).put("speed",voiceSpeed));
         instructionChars=plan.getString("instructions").length();JSONArray offered=plan.getJSONArray("tools");toolsOffered=offered.length();
         StringBuilder names=new StringBuilder();for(int i=0;i<offered.length();i++){String name=offered.optJSONObject(i)==null?"":offered.optJSONObject(i).optString("name");if(name.matches("[a-z_]{1,40}")){if(names.length()>0)names.append(' ');names.append(name);}}toolNames=names.toString();
-        JSONObject session=new JSONObject().put("instructions",plan.getString("instructions"))
+        String instructions=plan.getString("instructions")+"\n\n"+currentTimeSection(connectedAtMs>0?connectedAtMs:System.currentTimeMillis(),java.time.ZoneId.systemDefault());
+        JSONObject session=new JSONObject().put("instructions",instructions)
                 .put("tools",plan.getJSONArray("tools")).put("turn_detection",new JSONObject().put("type","server_vad"))
                 .put("audio",audio).put("resumption",new JSONObject().put("enabled",true));
         // The Bot's chosen voice, as the official clients send it; otherwise Grok's default.
