@@ -15,9 +15,12 @@ import java.util.Map;
 /** Cached shipped avatar outlines and eye expressions, sampled with original motion keyframes. */
 public final class BotAvatarView extends View {
     private static final class Face {
-        final Path body;final Path[] eyes;final RectF[] bounds;
+        final Path body;final Path[] eyes,painted;final RectF[] bounds;final int[] paints;
         Face(JSONObject shape,String expression)throws Exception {
             body=PathParser.createPathFromPathData(shape.getString("body"));JSONArray paths=shape.getJSONObject("eyes").getJSONArray(expression);
+            // Fixed-colour parts drawn over the body, such as the pumpkin's stem.
+            JSONArray parts=shape.optJSONArray("painted");painted=new Path[parts==null?0:parts.length()];paints=new int[painted.length];
+            for(int i=0;i<painted.length;i++){JSONObject part=parts.getJSONObject(i);painted[i]=PathParser.createPathFromPathData(part.getString("d"));paints[i]=Color.parseColor(AvatarPolicy.colorHex(part.getString("fill")));}
             eyes=new Path[paths.length()];bounds=new RectF[eyes.length];
             for(int i=0;i<eyes.length;i++){eyes[i]=PathParser.createPathFromPathData(paths.getString(i));bounds[i]=new RectF();eyes[i].computeBounds(bounds[i],true);}
         }
@@ -105,7 +108,7 @@ public final class BotAvatarView extends View {
             canvas.save();float bodyScale=reduce||photo!=null?1:BotAppearance.breathe(state,time);
             canvas.scale(bodyScale,bodyScale,50,50);canvas.translate(0,reduce||photo!=null?0:BotAppearance.bob(state,time));
             if(photo!=null){float zoom=100f/Math.min(photo.getWidth(),photo.getHeight());photoMatrix.setScale(zoom,zoom);photoMatrix.postTranslate((100-photo.getWidth()*zoom)/2,(100-photo.getHeight()*zoom)/2);photoShader.setLocalMatrix(photoMatrix);paint.setShader(photoShader);canvas.drawCircle(50,50,50,paint);paint.setShader(null);}
-            else canvas.drawPath(face.body,paint);
+            else{canvas.drawPath(face.body,paint);for(int i=0;i<face.painted.length;i++){paint.setColor(face.paints[i]);canvas.drawPath(face.painted[i],paint);}}
             float gaze=reduce?0:BotAppearance.gaze(state,time);double blink=reduce?0:BotAppearance.blink(state,time);
             paint.setColor(Color.BLACK);canvas.save();canvas.translate(gaze,0);
             for(int i=0;photo==null&&i<face.eyes.length;i++){canvas.save();RectF bounds=face.bounds[i];canvas.scale(1,(float)Math.max(.08,1-blink),bounds.centerX(),bounds.centerY());canvas.drawPath(face.eyes[i],paint);canvas.restore();}

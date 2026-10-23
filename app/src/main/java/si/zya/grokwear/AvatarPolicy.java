@@ -4,7 +4,7 @@ import java.util.Locale;
 
 /** Watch state mapping; expression names are shipped desktop design tokens. */
 final class AvatarPolicy {
-    private static final java.util.Set<String> SHAPES=java.util.Set.of("blob","pebble","bean","egg","squircle","tablet","capsule","cylinder","hex","gem","crystal","wedge","shield","dome","arch","cloud","teardrop","leaf","square","sparkle","clover","flower","heart","house","star");
+    private static final java.util.Set<String> SHAPES=java.util.Set.of("blob","pebble","bean","egg","squircle","tablet","capsule","cylinder","hex","gem","crystal","wedge","shield","dome","arch","cloud","teardrop","leaf","square","sparkle","clover","flower","heart","house","star","pumpkin");
     private static final java.util.Set<String> COLORS=java.util.Set.of("black","brown","red","orange","yellow","green","cyan","blue","violet","magenta","gray");
     static String colorHex(String value){
         if(value!=null&&value.matches("#[0-9a-fA-F]{3}"))return "#"+value.charAt(1)+value.charAt(1)+value.charAt(2)+value.charAt(2)+value.charAt(3)+value.charAt(3);
