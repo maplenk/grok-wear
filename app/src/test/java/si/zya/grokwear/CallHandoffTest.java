@@ -31,6 +31,11 @@ public final class CallHandoffTest {
         assertEquals("Move the second one to Friday. What the user said on the call: \"What's on today?\"",requests.get(1));
         assertEquals("Only one line",CallHandoff.requests(turns("user","Only one line")).get(1));
     }
+    @Test public void linesAlreadyHandedOffAsATaskAreNotSentAgain()throws Exception {
+        JSONArray call=turns("user","Check my inbox","assistant","On it.","user","Also book the table for eight");
+        assertEquals("Also book the table for eight",CallHandoff.requests(call,1).get(1));
+        assertEquals(java.util.Arrays.asList(CallHandoff.CALL_ENDED),CallHandoff.requests(turns("user","Check my inbox"),1));
+    }
     @Test public void keepsTheLastSixCallerLines()throws Exception {
         String[] spoken=new String[16];for(int i=0;i<8;i++){spoken[2*i]="user";spoken[2*i+1]="line "+i;}
         String request=CallHandoff.requests(turns(spoken)).get(1);

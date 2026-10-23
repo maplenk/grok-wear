@@ -272,7 +272,7 @@ public final class VoiceService extends Service {
         if(old!=null&&old.didConnect()&&account!=null&&context!=null){
             try{
                 String ending="Call dropped".equals(finalState)?"disconnected":safe.isEmpty()?"hung-up":"failed";
-                JSONObject record=old.recordSnapshot(ending,System.currentTimeMillis(),finishedElapsed),line=old.handoffLine();syncStatus="Saving shared history";savingRecord=true;
+                JSONObject record=old.recordSnapshot(ending,System.currentTimeMillis(),finishedElapsed),line=old.handoffLine();int relayed=old.relayedCallerLines();syncStatus="Saving shared history";savingRecord=true;
                 long finishedGeneration=generation;
                 // The upload and the handoff run after hang-up, often with the wrist down. Stay in the
                 // foreground with the CPU awake until both finish, or a paused app could drop the
@@ -294,7 +294,7 @@ public final class VoiceService extends Service {
                         // Tell the Bot the call ended, as the official clients do, so anything owed follows up in its chat.
                         // At most once: no retry after any failure, so no request can reach the Bot twice.
                         if(CallHandoff.applies(bot)){
-                            String outcome=CallHandoff.send(body->account.handoffTool(context.binding(),body),bot.optString("id"),record.optString("callId"),CallHandoff.requests(record.optJSONArray("turns")),line);
+                            String outcome=CallHandoff.send(body->account.handoffTool(context.binding(),body),bot.optString("id"),record.optString("callId"),CallHandoff.requests(record.optJSONArray("turns"),relayed),line);
                             android.util.Log.i("GrokWearVoice","call_handoff result="+outcome);
                         }else android.util.Log.i("GrokWearVoice","call_handoff skipped harness="+(bot==null||bot.optString("harness").isEmpty()?"unknown":bot.optString("harness")));
                     }finally{

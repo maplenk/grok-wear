@@ -22,13 +22,15 @@ final class CallHandoff {
     /** Only Bots run by the temporal harness take the handoff, as in the official clients. */
     static boolean applies(JSONObject bot){return bot!=null&&"temporal".equals(bot.optString("harness"));}
 
+    static List<String> requests(JSONArray turns){return requests(turns,0);}
     /**
-     * The notice, then the leftover request. The watch relays nothing during a call, so every
-     * finalized caller line counts as unrelayed; the last six are kept.
+     * The notice, then the leftover request: the caller lines after the last task the Bot accepted
+     * during the call (the first {@code relayed} lines were already handed off); the last six are kept.
      */
-    static List<String> requests(JSONArray turns){
+    static List<String> requests(JSONArray turns,int relayed){
         List<String> lines=new ArrayList<>();
         if(turns!=null)for(int i=0;i<turns.length();i++){JSONObject turn=turns.optJSONObject(i);if(turn==null||!"user".equals(turn.optString("speaker")))continue;String text=turn.optString("text","").trim();if(!text.isEmpty())lines.add(text);}
+        lines=new ArrayList<>(lines.subList(Math.min(Math.max(0,relayed),lines.size()),lines.size()));
         if(lines.size()>MAX_LINES)lines=new ArrayList<>(lines.subList(lines.size()-MAX_LINES,lines.size()));
         List<String> requests=new ArrayList<>();requests.add(CALL_ENDED);
         String leftover=leftoverRequest(lines);if(leftover!=null)requests.add(leftover);

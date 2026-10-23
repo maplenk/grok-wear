@@ -27,7 +27,7 @@ Talk to any of your Grok Bots from your Wear OS watch. Hands-free, real-time voi
 - **Shared conversation.** Each Bot's page shows its recent chat. During a call the Bot can look up your chats, as in the official apps, and the call's transcript is saved back to the Bot's history.
 - **The Bot's own voice.** Calls use the voice, speed and language you chose for each Bot in the official apps.
 - **Follow-up in chat.** When you hang up, the Bot gets the same end-of-call note the official apps send, plus anything you asked for on the call. It can then finish the job in its chat on your phone or desktop.
-- **Read-only calls.** During a call the Bot can look things up, but actions that change things (sending tasks, approvals) are refused on the watch.
+- **Tasks during calls.** Like the official apps, the Bot can look things up and hand tasks to its main agent while you talk ("check my inbox"); results follow in its chat. Approvals still happen on your phone or desktop.
 
 ## Status and limits
 

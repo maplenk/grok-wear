@@ -711,7 +711,7 @@ public final class MainActivity extends Activity {
         else label("Chat history isn’t synced to this watch.",14,SECONDARY);action("Back",()->goHome());}
     private void openSettings(){settingsReturnScreen=screen.equals("ready")||screen.equals("done")?"ready":"bots";screen="settings";render();}
     private void leaveSettings(){screen=settingsReturnScreen.equals("ready")?"ready":"bots";render();}
-    private void settings(){title("Settings");label("Unofficial Grok client",12,SECONDARY);label("Not affiliated with or endorsed by xAI or Cursor.",12,SECONDARY);gap(4);label("Read-only · 5-minute calls",12,SECONDARY);label("Calls share this Bot’s main chat.",12,SECONDARY);
+    private void settings(){title("Settings");label("Unofficial Grok client",12,SECONDARY);label("Not affiliated with or endorsed by xAI or Cursor.",12,SECONDARY);gap(4);label("5-minute calls · tasks go to your Bot",12,SECONDARY);label("Calls share this Bot’s main chat.",12,SECONDARY);
         action("Back",()->leaveSettings());gap(24);
         action("Sign out…",()->{screen="signout_confirm";render();});
     }
@@ -734,7 +734,7 @@ public final class MainActivity extends Activity {
         if(signOutFailed){safeError="Sign-out couldn’t finish. Check your account state before trying again.";screen="account_error";render();}
         else{screen="welcome";render();loadAccount();}
     }
-    private void approval(){title("Needs your approval");label(preview?"Demo request · calendar change":"Approvals aren’t available on this watch yet. Voice chats are read-only.",14,SECONDARY);
+    private void approval(){title("Needs your approval");label(preview?"Demo request · calendar change":"Approvals aren’t available on this watch yet. Approve them on your phone or desktop.",14,SECONDARY);
         if(preview){action("Approve",()->{goHome();feedback("Demo only · no action sent");});action("Deny",()->{goHome();feedback("Demo dismissed");});}
         else action("Back",()->goHome());}
     private void task(){label("Async tasks · Subagent",12,SECONDARY);title("Needs attention");label(preview?"Demo task · a calendar change needs review":"Tasks aren’t available on this watch yet.",14,SECONDARY);

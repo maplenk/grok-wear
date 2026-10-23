@@ -26,7 +26,7 @@ Talk:    sign-in check ─┬─ Bot voice setup (instructions + tools) ─┐
 | `GrokCore`, `BotAccount` | Bot roster, Primary/pinned preferences, pin and unpin, and the narrow set of allowed service operations. Every request rechecks that the account and selected Bot have not changed. A pin write re-reads the account's list first, changes only that Bot (pins are added at the end), sends the whole list back, and keeps the list the server stored. |
 | `HistoryCoordinator` | Shared-chat pages for the Bot page, and a durable outbox for call transcripts. |
 | `VoiceStartup` | Runs Bot voice setup and credential minting in parallel under a 45-second budget. |
-| `NativeVoiceSession` | One realtime voice session: settings (including the Bot's own voice, speed and language), turn handling, interruption, the read-only tool allowlist, the caller-first greeting and reconnecting a dropped line. |
+| `NativeVoiceSession` | One realtime voice session: settings (including the Bot's own voice, speed and language), turn handling, interruption, the tool allowlist, the caller-first greeting and reconnecting a dropped line. |
 | `NativeAudio`, `PcmPlaybackBuffer` | Microphone capture and speaker playback (24 kHz mono PCM16) with echo cancellation where available, a bounded playback buffer, audio-focus pause and resume, and routing to a headset or the speaker. |
 | `VoiceService` | Foreground service that owns a call: admission, ongoing notification, network loss detection, captions and saving the transcript. |
 | `CallHandoff` | The end-of-call note and leftover request sent to the Bot after the transcript is saved. |
@@ -36,7 +36,7 @@ Talk:    sign-in check ─┬─ Bot voice setup (instructions + tools) ─┐
 
 - A call starts only from an explicit Talk tap on an unlocked, visible watch. Opening or resuming the app never starts one.
 - Like the official apps, a call doesn't preload chat history. The Bot's instructions and its lookup tools give it context. Audio follows the settings on the same socket as soon as it opens; an error or close before Grok confirms the settings fails the start, and settings never confirmed end the call after 10 seconds.
-- Only read-only tools are offered to the voice model (`recall_text_messages`, `search_conversations`, `stay_silent`, `end_the_call`). Anything else is refused locally.
+- The voice model gets the official clients' tools when the Bot's harness offers them: `recall_text_messages`, `search_conversations`, `stay_silent`, `end_the_call` and `send_task` (a task handed to the Bot's main agent). All are served by `VoiceCallHarnessTool`; anything else is refused locally. Caller lines already handed off as a task are left out of the end-of-call handoff.
 - The caller goes first. If nobody speaks within 15 seconds, the Bot gets its greeting.
 - Each call is capped at five minutes.
 - After the transcript is saved, Bots on the `temporal` harness get the official end-of-call handoff through `VoiceCallHarnessTool` (`send_task`). First comes the fixed "The call ended…" notice, then the caller's last request with up to five earlier lines quoted (2,000 characters at most). Sending stops at the first reply that is not accepted, and nothing is retried, so a request never reaches the Bot twice. It goes to the Bot that took the call, even if another Bot is selected by then.
