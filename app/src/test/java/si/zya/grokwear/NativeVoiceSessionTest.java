@@ -316,7 +316,7 @@ public final class NativeVoiceSessionTest {
     @Test public void unknownToolRefusedWithoutBackendAndErrorStillSpoken()throws Exception {
         try(Fixture f=new Fixture()){
             f.ready();int before=f.backendCalls.get();f.tool("write-one","approve_request");
-            JSONObject item=f.frame("conversation.item.create").getJSONObject("item");assertEquals("write-one",item.getString("call_id"));assertTrue(item.getString("output").contains("does not permit"));
+            JSONObject item=f.frame("conversation.item.create").getJSONObject("item");assertEquals("write-one",item.getString("call_id"));assertTrue(item.getString("output").contains("can't do that"));
             f.frame("response.create");assertEquals(before,f.backendCalls.get());assertTrue(f.tools.isEmpty());
         }
     }
