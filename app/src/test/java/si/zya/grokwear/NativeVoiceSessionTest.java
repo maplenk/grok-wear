@@ -15,10 +15,10 @@ public final class NativeVoiceSessionTest {
         final BlockingQueue<JSONObject> sent=new LinkedBlockingQueue<>();
         final List<JSONObject> tools=new CopyOnWriteArrayList<>();
         final AtomicInteger ready=new AtomicInteger(),audioCount=new AtomicInteger(),backendCalls=new AtomicInteger(),completions=new AtomicInteger(),failures=new AtomicInteger(),disconnections=new AtomicInteger();
-        volatile byte[] heard;volatile boolean failLookup,cancelled,unheard;volatile long queued;
+        volatile byte[] heard;volatile boolean failLookup,cancelled,unheard,failDials;volatile long queued;volatile okhttp3.HttpUrl lastUrl;final AtomicInteger dials=new AtomicInteger();
         volatile NativeVoiceSession.WireEvents events;
         volatile CountDownLatch lookupEntered,lookupRelease;
-        final NativeVoiceSession session;
+        final NativeVoiceSession session;JSONObject settings;volatile String toolKind="served";
         Fixture()throws Exception {this(new JSONArray());}
         Fixture(JSONArray history)throws Exception {this(history,"");}
         Fixture(JSONArray history,String greeting)throws Exception {this(history,greeting,false,false,()->{});}
@@ -34,21 +34,23 @@ public final class NativeVoiceSessionTest {
                 tools.add(new JSONObject(body.toString()));
                 if(lookupEntered!=null)lookupEntered.countDown();if(lookupRelease!=null)lookupRelease.await(3,TimeUnit.SECONDS);
                 if(failLookup)throw new Exception("offline fixture failure");
-                return new JSONObject().put("kind","served").put("output",new JSONObject().put("messages",new JSONArray()));
+                return new JSONObject().put("kind",toolKind).put("output",new JSONObject().put("messages",new JSONArray().put(new JSONObject().put("text","found it"))));
             };
-            NativeVoiceSession.WireFactory factory=(url,secret,e)->{events=e;e.opened();return new NativeVoiceSession.Wire(){
+            NativeVoiceSession.WireFactory factory=(url,secret,e)->{events=e;lastUrl=url;if(dials.incrementAndGet()>1&&failDials)e.failed(null);else e.opened();return new NativeVoiceSession.Wire(){
                 public boolean send(String text){try{sent.add(new JSONObject(text));return true;}catch(Exception ex){throw new AssertionError(ex);}}
                 public long queueSize(){return queued;}public void cancel(){cancelled=true;}
             };};
             NativeVoiceSession.PcmCodec codec=new NativeVoiceSession.PcmCodec(){public String encode(byte[] bytes){return Base64.getEncoder().encodeToString(bytes);}public byte[] decode(String text){return Base64.getDecoder().decode(text);}};
-            session=new NativeVoiceSession(backend,new JSONObject().put("id","bot-test").put("name","Test Bot"),factory,codec,this);
+            session=new NativeVoiceSession(backend,nextBot!=null?nextBot:new JSONObject().put("id","bot-test").put("name","Test Bot"),factory,codec,this);nextBot=null;
+            if(nextGraceMs>0){session.greetingGraceMs=nextGraceMs;nextGraceMs=0;}
             session.setHistory(history);if(deferred)session.deferHistory();
             if(prepared)session.preparedStartup(new JSONObject().put("instructions","Prepared harness").put("tools",new JSONArray()).put("greeting",new JSONObject().put("direction","Say hello")),
                 new JSONObject().put("clientSecret","prepared-public-test").put("model","fake-model").put("expiresAtUnixSeconds",expired?1:System.currentTimeMillis()/1000+600).put("websocketUrl","wss://api.x.ai/test-only"),guard);
-            session.start();if(expired){callback("failure");return;}JSONObject settings=frame("session.update");assertTrue(settings.getJSONObject("session").getJSONObject("resumption").getBoolean("enabled"));
+            session.start();if(expired){callback("failure");return;}settings=frame("session.update");assertTrue(settings.getJSONObject("session").getJSONObject("resumption").getBoolean("enabled"));
         }
         void receive(String type)throws Exception{events.message(new JSONObject().put("type",type).toString());}
-        void ready()throws Exception{receive("session.created");receive("session.updated");callback("ready");}
+        void ready()throws Exception{receive("session.created");receive("session.updated");callback("ready");
+            long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);while(!session.isLive()&&System.nanoTime()<until)Thread.sleep(2);assertTrue("Settings never confirmed",session.isLive());}
         void tool(String id,String name)throws Exception{events.message(new JSONObject().put("type","response.function_call_arguments.done").put("call_id",id).put("name",name).put("arguments","{}").toString());}
         JSONObject frame(String type)throws Exception{long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);while(System.nanoTime()<until){JSONObject frame=sent.poll(Math.max(1,until-System.nanoTime()),TimeUnit.NANOSECONDS);if(frame==null)break;if(type.equals(frame.optString("type")))return frame;}throw new AssertionError("Missing frame "+type);}
         void callback(String expected)throws Exception{long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);while(System.nanoTime()<until){String event=callbacks.poll(Math.max(1,until-System.nanoTime()),TimeUnit.NANOSECONDS);if(expected.equals(event))return;if(event==null)break;}throw new AssertionError("Missing callback "+expected);}
@@ -60,6 +62,47 @@ public final class NativeVoiceSessionTest {
         public void onReady(){ready.incrementAndGet();callbacks.add("ready");}
         public boolean hasUnheardReplyAudio(){return unheard;}
         public void close(){session.end();}
+    }
+    @Test public void lookupServedUnderTheWireEnumNameReachesTheModel()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.toolKind="VOICE_CALL_HARNESS_TOOL_OUTCOME_KIND_SERVED";f.ready();f.receive("response.created");
+            f.tool("lookup-1","search_conversations");
+            JSONObject item=f.frame("conversation.item.create").getJSONObject("item");
+            assertEquals("function_call_output",item.getString("type"));assertTrue(item.getString("output"),item.getString("output").contains("found it"));
+        }
+    }
+    static long nextGraceMs;
+    @Test public void mutingMidSentenceSendsSilenceSoTheTurnEnds()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.ready();f.receive("input_audio_buffer.speech_started");f.callback("speech");f.session.mute(true);
+            for(int i=0;i<2;i++){JSONObject append=f.frame("input_audio_buffer.append");byte[] pcm=Base64.getDecoder().decode(append.getString("audio"));
+                assertEquals(NativeVoiceSession.MUTE_SILENCE_BYTES/2,pcm.length);for(byte b:pcm)assertEquals(0,b);}
+        }
+    }
+    @Test public void botGreetsOnlyAfterTheCallerStaysQuiet()throws Exception {
+        nextGraceMs=50;
+        try(Fixture f=new Fixture(new JSONArray(),"Say hello now")){
+            JSONObject create=f.frame("response.create");assertEquals("Say hello now",create.getJSONObject("response").getString("instructions"));
+        }
+        nextGraceMs=400;
+        try(Fixture f=new Fixture(new JSONArray(),"Say hello now")){
+            f.receive("input_audio_buffer.speech_started");f.callback("speech");Thread.sleep(700);
+            for(JSONObject frame:f.sent)assertFalse("Greeting sent after the caller spoke","response.create".equals(frame.optString("type")));
+        }
+    }
+    static JSONObject nextBot;
+    @Test public void sessionUsesTheBotsOwnVoiceSpeedAndLanguage()throws Exception {
+        nextBot=new JSONObject().put("id","bot-voice").put("name","Voice Bot").put("voiceId","ara").put("voiceSpeed",1.5).put("voiceLanguage","hi");
+        try(Fixture f=new Fixture()){
+            JSONObject session=f.settings.getJSONObject("session");assertEquals("ara",session.getString("voice"));
+            assertEquals(1.5,session.getJSONObject("audio").getJSONObject("output").getDouble("speed"),0);
+            assertEquals("hi",session.getJSONObject("audio").getJSONObject("input").getJSONObject("transcription").getString("language_hint"));
+        }
+        try(Fixture f=new Fixture()){
+            JSONObject session=f.settings.getJSONObject("session");assertFalse(session.has("voice"));
+            assertEquals(1.0,session.getJSONObject("audio").getJSONObject("output").getDouble("speed"),0);
+            assertFalse(session.getJSONObject("audio").getJSONObject("input").getJSONObject("transcription").has("language_hint"));
+        }
     }
     @Test public void preparedStartupSkipsBackendAndStillRequiresEveryHistoryAcknowledgement()throws Exception {
         JSONArray history=new JSONArray().put(new JSONObject().put("speaker","user").put("text","Earlier question"))
@@ -143,10 +186,21 @@ public final class NativeVoiceSessionTest {
             assertNull(f.events);assertEquals(0,f.backendCalls.get());assertEquals(0,f.ready.get());
         }
     }
-    @Test public void bindingChangeDuringHandshakeCannotAdmitMicrophone()throws Exception {
+    @Test public void bindingChangeBeforeSettingsAreConfirmedEndsTheCall()throws Exception {
         AtomicBoolean changed=new AtomicBoolean();
         try(Fixture f=new Fixture(new JSONArray(),"",true,false,()->{if(changed.get())throw new IllegalStateException();})){
-            changed.set(true);f.receive("session.updated");f.callback("failure");assertEquals(0,f.ready.get());
+            f.callback("ready");changed.set(true);f.receive("session.updated");f.callback("failure");
+        }
+    }
+    @Test public void audioFollowsTheSettingsWithoutWaitingForConfirmation()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.callback("ready");f.session.sendPcm(new byte[]{1,2,3,4});
+            assertEquals("input_audio_buffer.append",f.frame("input_audio_buffer.append").getString("type"));
+        }
+    }
+    @Test public void settingsErrorBeforeConfirmationIsFatalEvenWithAudioFlowing()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.callback("ready");f.events.message(new JSONObject().put("type","error").put("error",new JSONObject().put("type","invalid_request_error")).toString());f.callback("failure");
         }
     }
     @Test public void reopeningSharedConversationWaitsForFreshSpeechDespiteHarnessGreeting()throws Exception {
@@ -242,7 +296,8 @@ public final class NativeVoiceSessionTest {
     }
     @Test public void acceptedSettingsAdmitOneReadyAndGeneratedPcmRoundTrip()throws Exception {
         try(Fixture f=new Fixture()){
-            assertEquals(0,f.ready.get());f.ready();f.receive("session.updated");f.barrier();assertEquals(1,f.ready.get());
+            // The call is ready once its settings are sent; a later session.updated must not admit it twice.
+            f.ready();f.receive("session.updated");f.barrier();assertEquals(1,f.ready.get());
             byte[] pcm=new byte[960];for(int i=0;i<pcm.length;i++)pcm[i]=(byte)(i*17);
             f.session.sendPcm(pcm);JSONObject input=f.frame("input_audio_buffer.append");assertArrayEquals(pcm,Base64.getDecoder().decode(input.getString("audio")));
             f.events.message(new JSONObject().put("type","response.audio.delta").put("delta",input.getString("audio")).toString());f.callback("audio");assertArrayEquals(pcm,f.heard);
@@ -309,17 +364,116 @@ public final class NativeVoiceSessionTest {
         assertFalse(NativeVoiceSession.websocketFailure(-1).contains("-1"));
     }
 
-    @Test public void unexpectedCloseAfterReadyIsDroppedNeverHappyAndLateCallbacksIgnored()throws Exception {
+    static void quickRedial(Fixture f,int attempts){f.session.reconnectAttempts=attempts;f.session.reconnectBaseMs=1;}
+    @Test public void unexpectedCloseAfterReadyRedialsThenDropsAndLateCallbacksAreIgnored()throws Exception {
         try(Fixture f=new Fixture()){
-            f.ready();f.events.closed();f.callback("disconnected");assertTrue(f.cancelled);
-            assertEquals(0,f.completions.get());assertEquals(0,f.failures.get());assertEquals(1,f.disconnections.get());
+            f.ready();quickRedial(f,2);f.failDials=true;f.events.closed();f.callback("Reconnecting");f.callback("disconnected");assertTrue(f.cancelled);
+            assertEquals(0,f.completions.get());assertEquals(0,f.failures.get());assertEquals(1,f.disconnections.get());assertEquals(3,f.dials.get());
             f.events.closed();f.events.failed(null);f.receive("session.updated");f.tool("late","recall_text_messages");
             assertEquals(1,f.disconnections.get());assertEquals(0,f.completions.get());assertEquals(1,f.ready.get());assertTrue(f.tools.isEmpty());
         }
     }
-    @Test public void networkFailureAfterReadyIsDroppedButHttpFailureIsServiceFailure()throws Exception {
-        try(Fixture f=new Fixture()){f.ready();f.events.failed(null);f.callback("disconnected");assertEquals(0,f.completions.get());}
+    @Test public void networkFailureAfterReadyRedialsButHttpFailureIsServiceFailure()throws Exception {
+        try(Fixture f=new Fixture()){f.ready();quickRedial(f,1);f.failDials=true;f.events.failed(null);f.callback("Reconnecting");f.callback("disconnected");assertEquals(0,f.completions.get());}
         try(Fixture f=new Fixture()){f.ready();f.events.failed(403);f.callback("failure");assertEquals(0,f.disconnections.get());assertEquals(0,f.completions.get());}
+    }
+    @Test public void policyCloseEndsTheCallWithoutRedialling()throws Exception {
+        try(Fixture f=new Fixture()){f.ready();f.events.closedWith(1008);f.callback("disconnected");assertEquals(1,f.dials.get());}
+        try(Fixture f=new Fixture()){f.ready();f.events.closedWith(1000);f.callback("complete");assertEquals(1,f.dials.get());assertEquals(0,f.disconnections.get());}
+        // A phone taking over while the watch redials (4001) ends the watch's call instead of taking it back.
+        try(Fixture f=new Fixture()){f.ready();f.events.closed();f.callback("Reconnecting");f.frame("session.update");f.events.closedWith(4001);f.callback("disconnected");assertEquals(2,f.dials.get());}
+    }
+    @Test public void droppedLineRedialsTheSameConversationAndCarriesOn()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.ready();f.events.message(new JSONObject().put("type","conversation.created").put("conversation",new JSONObject().put("id","conv-1")).toString());
+            f.events.closed();f.callback("Reconnecting");
+            f.frame("session.update");assertEquals("conv-1",f.lastUrl.queryParameter("conversation_id"));
+            f.events.message(new JSONObject().put("type","conversation.created").put("conversation",new JSONObject().put("id","conv-1")).toString());
+            f.receive("session.updated");f.session.sendPcm(new byte[]{1,2});
+            assertEquals("Same conversation: no replay","input_audio_buffer.append",f.frame("input_audio_buffer.append").getString("type"));
+            for(JSONObject frame:f.sent)assertFalse("conversation.item.create".equals(frame.optString("type")));
+            assertEquals(0,f.disconnections.get());assertEquals(0,f.failures.get());
+        }
+    }
+    @Test public void firstSocketsSettingsDeadlineCannotEndALaterRedial()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.ready();f.events.closed();f.callback("Reconnecting");f.frame("session.update");
+            // Redial open but not yet confirmed when the first socket's 10 s deadline would fire.
+            Thread.sleep(NativeVoiceSession.SETTINGS_DEADLINE_MS+500);
+            assertEquals(0,f.failures.get());f.receive("session.updated");assertEquals(0,f.failures.get());assertEquals(0,f.disconnections.get());
+        }
+    }
+    @Test public void reconnectKeepsTheCallsStartTimeForItsRecord()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.ready();long started=f.session.recordSnapshot("hung-up",System.currentTimeMillis(),1000).getLong("startedAtMs");
+            Thread.sleep(20);f.events.closed();f.callback("Reconnecting");f.frame("session.update");f.receive("session.updated");
+            long t=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);while(!f.session.isLive()&&System.nanoTime()<t)Thread.sleep(2);
+            assertEquals(started,f.session.recordSnapshot("hung-up",System.currentTimeMillis(),1000).getLong("startedAtMs"));
+        }
+    }
+    @Test public void noAudioBeforeARedialsSettingsAreConfirmedEvenAfterAFailedAttempt()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.ready();f.events.closed();f.callback("Reconnecting");f.frame("session.update");
+            f.events.closed();f.frame("session.update");  // the first redial opened, then died before confirmation
+            f.session.sendPcm(new byte[]{1,2,3,4});Thread.sleep(200);
+            for(JSONObject frame:f.sent)assertFalse("Audio sent before the redial was confirmed","input_audio_buffer.append".equals(frame.optString("type")));
+            f.receive("session.updated");long t=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);while(!f.session.isLive()&&System.nanoTime()<t)Thread.sleep(2);
+            f.session.sendPcm(new byte[]{1,2,3,4});assertEquals("input_audio_buffer.append",f.frame("input_audio_buffer.append").getString("type"));
+        }
+    }
+    @Test public void refusedRedialRetriesOnAFreshConversationInsteadOfEndingTheCall()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.ready();f.events.message(new JSONObject().put("type","conversation.created").put("conversation",new JSONObject().put("id","conv-1")).toString());
+            f.events.closed();f.callback("Reconnecting");f.frame("session.update");assertEquals("conv-1",f.lastUrl.queryParameter("conversation_id"));
+            f.events.message(new JSONObject().put("type","error").put("error",new JSONObject().put("type","invalid_request_error")).toString());
+            f.frame("session.update");assertNull(f.lastUrl.queryParameter("conversation_id"));
+            f.receive("session.updated");assertEquals(0,f.failures.get());assertEquals(0,f.disconnections.get());assertEquals(3,f.dials.get());
+        }
+    }
+    static Fixture lookupAcrossADrop(String newConversationId)throws Exception {
+        Fixture f=new Fixture();
+        f.ready();f.events.message(new JSONObject().put("type","conversation.created").put("conversation",new JSONObject().put("id","conv-1")).toString());
+        f.lookupEntered=new CountDownLatch(1);f.lookupRelease=new CountDownLatch(1);
+        f.receive("response.created");f.tool("lookup-held","search_conversations");assertTrue(f.lookupEntered.await(3,TimeUnit.SECONDS));
+        f.events.closed();f.callback("Reconnecting");f.frame("session.update");
+        f.lookupRelease.countDown();Thread.sleep(200);  // the result lands while the redial waits for confirmation
+        for(JSONObject frame:f.sent)assertFalse("Lookup result sent before the redial was confirmed","conversation.item.create".equals(frame.optString("type")));
+        f.events.message(new JSONObject().put("type","conversation.created").put("conversation",new JSONObject().put("id",newConversationId)).toString());
+        f.receive("session.updated");return f;
+    }
+    @Test public void lookupFinishingDuringARedialReachesAResumedConversation()throws Exception {
+        try(Fixture f=lookupAcrossADrop("conv-1")){
+            JSONObject item=f.frame("conversation.item.create").getJSONObject("item");
+            assertEquals("function_call_output",item.getString("type"));assertEquals("lookup-held",item.getString("call_id"));
+            f.frame("response.create");
+        }
+    }
+    @Test public void lookupFinishingDuringARedialIsDroppedOnANewConversation()throws Exception {
+        try(Fixture f=lookupAcrossADrop("conv-2")){
+            assertEquals(NativeVoiceSession.RESUME,f.frame("response.create").getJSONObject("response").getString("instructions"));
+            for(JSONObject frame:f.sent){JSONObject item=frame.optJSONObject("item");assertFalse("Orphaned lookup result sent",item!=null&&"function_call_output".equals(item.optString("type")));}
+        }
+    }
+    @Test public void refusedReplyRequestFreesTheLineForTheNextOne()throws Exception {
+        nextGraceMs=50;
+        try(Fixture f=new Fixture(new JSONArray(),"Say hello now")){
+            f.frame("response.create");f.ready();
+            f.events.message(new JSONObject().put("type","error").put("error",new JSONObject().put("type","invalid_request_error")).toString());
+            f.tool("after-refusal","search_conversations");f.frame("conversation.item.create");f.frame("response.create");
+        }
+    }
+    @Test public void newConversationAfterRedialReplaysTheCallAndOwesTheCallerAnAnswer()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.ready();f.events.message(new JSONObject().put("type","conversation.created").put("conversation",new JSONObject().put("id","conv-1")).toString());
+            f.receive("input_audio_buffer.speech_started");f.callback("speech");
+            f.events.message(new JSONObject().put("type","conversation.item.input_audio_transcription.completed").put("item_id","u1").put("transcript","Book a table").toString());f.callback("caption");
+            f.events.closed();f.callback("Reconnecting");f.frame("session.update");
+            f.events.message(new JSONObject().put("type","conversation.created").put("conversation",new JSONObject().put("id","conv-2")).toString());
+            f.receive("session.updated");
+            JSONObject item=f.frame("conversation.item.create").getJSONObject("item");
+            assertEquals("user",item.getString("role"));assertEquals("Book a table",item.getJSONArray("content").getJSONObject(0).getString("text"));
+            assertEquals(NativeVoiceSession.RESUME,f.frame("response.create").getJSONObject("response").getString("instructions"));
+        }
     }
     @Test public void closeBeforeReadyIsFailureRatherThanCompletedCall()throws Exception {
         try(Fixture f=new Fixture()){f.events.closed();f.callback("failure");assertEquals(0,f.disconnections.get());assertEquals(0,f.completions.get());}
@@ -528,10 +682,11 @@ public final class NativeVoiceSessionTest {
             f.receive("response.done");f.callback("Thinking");
             f.lookupRelease.countDown();f.frame("response.create");}
     }
-    @Test public void lostNetworkDisconnectsALiveCallWithoutAFailure()throws Exception {
-        try(Fixture f=new Fixture()){f.ready();f.session.networkLost();f.callback("disconnected");assertEquals(0,f.failures.get());}
+    @Test public void lostNetworkRedialsALiveCallWithoutAFailure()throws Exception {
+        try(Fixture f=new Fixture()){f.ready();f.session.networkLost();f.callback("Reconnecting");f.frame("session.update");assertEquals(0,f.failures.get());assertEquals(2,f.dials.get());}
+        try(Fixture f=new Fixture()){f.ready();quickRedial(f,1);f.failDials=true;f.session.networkLost();f.callback("disconnected");assertEquals(0,f.failures.get());}
     }
     @Test public void outgoingQueueThatStopsDrainingIsALostConnection()throws Exception {
-        try(Fixture f=new Fixture()){f.ready();f.queued=300*1024;f.session.sendPcm(new byte[]{1,2});f.callback("disconnected");assertEquals(0,f.failures.get());}
+        try(Fixture f=new Fixture()){f.ready();quickRedial(f,1);f.failDials=true;f.queued=300*1024;f.session.sendPcm(new byte[]{1,2});f.callback("Reconnecting");f.callback("disconnected");assertEquals(0,f.failures.get());}
     }
 }

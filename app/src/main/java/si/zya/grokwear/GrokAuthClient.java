@@ -16,6 +16,7 @@ final class GrokAuthClient {
     private static final OkHttpClient HTTP=new OkHttpClient.Builder().connectTimeout(10,TimeUnit.SECONDS)
             .readTimeout(20,TimeUnit.SECONDS).writeTimeout(20,TimeUnit.SECONDS).callTimeout(30,TimeUnit.SECONDS)
             .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).build();
+    static void networkChanged(){try{HTTP.connectionPool().evictAll();}catch(RuntimeException ignored){}}
     final GrokAuthCore core;
     GrokAuthClient(Context context) {core=new GrokAuthCore(new GrokAuthVault(context),GrokAuthClient::request,System::currentTimeMillis);}
     JSONObject begin()throws Exception{return core.begin();}

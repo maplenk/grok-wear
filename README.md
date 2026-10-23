@@ -24,7 +24,8 @@ Talk to any of your Grok Bots from your Wear OS watch. Hands-free, real-time voi
 - **Pick any Bot.** Your Primary Bot sits at the top of Home, then your pinned Bots as big tiles, then the rest of your roster.
 - **Pinned Bots.** Hold a Bot to pin or unpin it, or use Pin on its page. Pins are your account's own list, shared with the official apps on your phone and desktop.
 - **Talk.** One tap starts a hands-free voice conversation. The Bot hears you through the watch microphone and answers through the watch speaker, with captions that follow along. Speak over it to interrupt.
-- **Shared conversation.** Each Bot's page shows its recent chat. A voice call starts from that context, and its transcript is saved back to the Bot's history.
+- **Shared conversation.** Each Bot's page shows its recent chat. During a call the Bot can look up your chats, as in the official apps, and the call's transcript is saved back to the Bot's history.
+- **The Bot's own voice.** Calls use the voice, speed and language you chose for each Bot in the official apps.
 - **Follow-up in chat.** When you hang up, the Bot gets the same end-of-call note the official apps send, plus anything you asked for on the call. It can then finish the job in its chat on your phone or desktop.
 - **Read-only calls.** During a call the Bot can look things up, but actions that change things (sending tasks, approvals) are refused on the watch.
 
@@ -32,7 +33,7 @@ Talk to any of your Grok Bots from your Wear OS watch. Hands-free, real-time voi
 
 This is an experimental client. It talks to Grok Bot's **private, undocumented client API**, reconstructed from the official apps. That API can change or break without notice, and using it may not be permitted by xAI's terms. Use it at your own risk, with an account you are responsible for.
 
-- Calls end after five minutes. A dropped connection ends the call; there is no automatic reconnect.
+- Calls end after five minutes. A dropped connection is redialled automatically for up to about two minutes.
 - The watch needs its own internet connection (Wi-Fi or LTE).
 
 ## Build from source

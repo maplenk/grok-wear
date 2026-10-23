@@ -23,6 +23,8 @@ import okio.ByteString;
 /** One bounded, non-reconnecting, read-only preview call. Never logs or persists audio/secrets. */
 public final class NativeVoiceSession {
     public interface Listener {
+        /** Content-free diagnostic line (counts, phases, fixed tokens only). */
+        default void onDiagnostic(String line){}
         void onState(String state);
         void onAudio(byte[] pcm);
         void onCaption(String who,String text);
@@ -40,7 +42,7 @@ public final class NativeVoiceSession {
     private final Object callbackGuard=new Object();
     interface Backend {JSONObject request(String method,JSONObject body)throws Exception;}
     interface Wire {boolean send(String text);long queueSize();void cancel();}
-    interface WireEvents {void opened();void message(String text);void failed(Integer httpStatus);void closed();}
+    interface WireEvents {void opened();void message(String text);void failed(Integer httpStatus);void closed();default void closedWith(int code){closed();}}
     interface WireFactory {Wire open(HttpUrl url,String secret,WireEvents events);}
     interface PcmCodec {String encode(byte[] pcm);byte[] decode(String text);}
     private final Backend backend;
@@ -61,9 +63,24 @@ public final class NativeVoiceSession {
     private final Set<String> offered=new HashSet<>(), calls=new HashSet<>();
     // Pings detect a silently dead socket (for example a Wi-Fi handover) without a read timeout
     // that would also end quiet listening periods. VoiceService reports outright network loss sooner.
-    private final OkHttpClient http=new OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS)
+    // One client for every call, so its connection pool can hand a warmed connection to the socket.
+    private static final OkHttpClient HTTP=new OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS)
             .readTimeout(0,TimeUnit.SECONDS).writeTimeout(15,TimeUnit.SECONDS).pingInterval(15,TimeUnit.SECONDS)
             .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).build();
+    private final OkHttpClient http=HTTP;
+    /**
+     * Opens a connection to the voice host while the Bot's plan and credential load, so the socket
+     * can skip DNS, TCP and TLS. OkHttp dials WebSockets over HTTP/1.1 from the same pool, so this
+     * HEAD uses HTTP/1.1 too. Only a bare HEAD is sent; any failure just means a cold dial.
+     */
+    static void networkChanged(){try{HTTP.connectionPool().evictAll();}catch(RuntimeException ignored){}}
+    static void prewarm(){
+        try{HTTP.newBuilder().protocols(java.util.Collections.singletonList(okhttp3.Protocol.HTTP_1_1)).build()
+            .newCall(new Request.Builder().url("https://api.x.ai/").head().build()).enqueue(new okhttp3.Callback(){
+                public void onFailure(okhttp3.Call call,java.io.IOException failed){}
+                public void onResponse(okhttp3.Call call,Response response){response.close();}
+            });}catch(RuntimeException ignored){}
+    }
     private volatile Wire socket;
     private volatile boolean muted,ending;
     private boolean endingAnnounced;
@@ -166,14 +183,20 @@ public final class NativeVoiceSession {
     private final Set<String> interruptedItems=new HashSet<>();
     /** Fixed diagnostic tokens and counters only; never server messages, IDs or transcripts. */
     // Content-free call counters for the call_stop log line: sizes, counts and protocol event names only.
-    private volatile long pcmSent,speechStarts,audioOut,heard,toolCalls;private volatile int seeded,toolsOffered,instructionChars;private volatile String toolNames="",seedShape="";
+    private volatile long pcmSent,speechStarts,audioOut,heard,toolCalls,toolsServed,toolsRefused;private volatile int seeded,toolsOffered,instructionChars;private volatile String toolNames="",seedShape="";
     private final java.util.Map<String,Integer> eventTypes=new java.util.LinkedHashMap<>();private volatile int eventsAfterReady;
     // Microphone level only: the loudest sample, frames with speech-level sound, and frames of pure zeros.
     private volatile int micPeak;private volatile long micFrames,loudFrames,zeroFrames;
+    // Phase times in ms from start(): socket open, settings accepted, ready; and speech end to first reply audio.
+    private volatile int poolAtDial=-1;
+    private volatile long startedNanos,openMs=-1,updatedMs=-1,readyMs=-1,speechStoppedNanos,lastTtfaMs=-1,maxTtfaMs=-1;
+    private long sinceStart(){return startedNanos==0?-1:(System.nanoTime()-startedNanos)/1_000_000;}
     public String protocolDiagnostics(){String types;synchronized(eventTypes){types=eventTypes.toString();}
         return "received="+received+",errors="+protocolErrors+",class="+lastProtocolClass+",code="+lastProtocolCode
         +",ready="+ready+",muted="+muted+",pcm="+pcmSent+",speech="+speechStarts+",heard="+heard+",responses="+responsesSeen+",audio_out="+audioOut
-        +",tool_calls="+toolCalls+",seeded="+seeded+"["+seedShape+"],tools="+toolsOffered+"["+toolNames+"],instructions="+instructionChars
+        +",voice="+(voiceId.isEmpty()?"default":"bot")+",speed="+voiceSpeed+",language="+(voiceLanguage.isEmpty()?"auto":"hint")
+        +",reconnects="+reconnects+",tool_calls="+toolCalls+",tools_served="+toolsServed+",tools_refused="+toolsRefused+",seeded="+seeded+"["+seedShape+"],tools="+toolsOffered+"["+toolNames+"],instructions="+instructionChars
+        +",pool="+poolAtDial+",open_ms="+openMs+",updated_ms="+updatedMs+",ready_ms="+readyMs+",ttfa_ms="+lastTtfaMs+",ttfa_max_ms="+maxTtfaMs
         +",after_ready="+eventsAfterReady+",mic_peak="+micPeak+",mic_frames="+micFrames+",loud="+loudFrames+",zero="+zeroFrames+",events="+types;}
     /** Roles, sizes and character classes of the seeded history, never its text. */
     static String seedShape(JSONArray frames){
@@ -224,17 +247,26 @@ public final class NativeVoiceSession {
         String code=fault.optString("code","");
         lastProtocolCode=Set.of("internal_error","async_not_enabled","invalid_request_error","missing_tool_call_results").contains(code)?code:"unrecognized";
         protocolErrors++;
-        if(!ready||"authentication_error".equals(kind))fail("Grok refused the voice session or one of its requests.");
+        if(reconnecting&&!settingsAccepted){listener.onDiagnostic("call_reconnect refused class="+lastProtocolClass);droppedConversationId=null;redialLater();return;}
+        // Our reply request was refused before any response started: free the line for the next one.
+        if(ready&&settingsAccepted&&awaitingCreated){awaitingCreated=false;replyInFlight=false;settleIfQuiet();}
+        if(!ready||!settingsAccepted||"authentication_error".equals(kind))fail("Grok refused the voice session or one of its requests.");
         // Live request errors do not imply a closed session. Preserve turn ownership;
         // a subsequent response event or socket close provides the definitive state.
     }
     private volatile boolean ready;
-    private boolean settingsAccepted;
+    private volatile boolean settingsAccepted,settingsSent;
+    private final String voiceId,voiceLanguage;private final double voiceSpeed;
+    /** A call is live once Grok confirmed its settings; a drop before that is a failed start, not a dropped call. */
+    private boolean live(){return ready&&settingsAccepted;}
+    boolean isLive(){return live();}
+    static final long SETTINGS_DEADLINE_MS=10000;
     private final Set<String> pendingHistory=new HashSet<>();
     private boolean callerSpeaking,replyInFlight,callerSpoke,alreadySpoke,newsOwed,receiptOwed,toolReplyOwed,announcedSpeaking;
     /** Lookups started in the current caller turn; older turns' lookups cannot produce its answer. */
     private long responsesSeen;private int pendingLookups;
-    static final long THINKING_FALLBACK_MS=8000;
+    static final long THINKING_FALLBACK_MS=8000,GREETING_GRACE_MS=15000;
+    volatile long greetingGraceMs=GREETING_GRACE_MS;
     volatile long thinkingFallbackMs=THINKING_FALLBACK_MS;
 
     public NativeVoiceSession(BotAccount account,JSONObject selectedBot,Listener listener) {
@@ -255,20 +287,26 @@ public final class NativeVoiceSession {
         this.backend=backend;this.listener=listener;this.codec=codec;
         this.wireFactory=factory==null?this::openRealWire:factory;
         botId=selectedBot.optString("id","").trim();botName=selectedBot.optString("name","").trim();
+        voiceId=selectedBot.optString("voiceId","");voiceLanguage=selectedBot.optString("voiceLanguage","");
+        double speed=selectedBot.optDouble("voiceSpeed",1);voiceSpeed=Double.isFinite(speed)&&speed>0?speed:1;
     }
     private Wire openRealWire(HttpUrl url,String secret,WireEvents events){
         Request request=new Request.Builder().url(url).header("Sec-WebSocket-Protocol","xai-client-secret."+secret).build();
+        AtomicBoolean reported=new AtomicBoolean();
         WebSocket websocket=http.newWebSocket(request,new WebSocketListener(){
             @Override public void onOpen(WebSocket ws,Response response){events.opened();}
             @Override public void onMessage(WebSocket ws,String text){events.message(text);}
             @Override public void onMessage(WebSocket ws,ByteString bytes){fail("Grok voice returned an unexpected audio format.");}
             @Override public void onFailure(WebSocket ws,Throwable error,Response response){events.failed(response==null?null:response.code());}
-            @Override public void onClosed(WebSocket ws,int code,String reason){events.closed();}
+            // OkHttp reports the server's close frame through onClosing and only calls onClosed after our
+            // own close; answer the close and report it once, with its code (1000, 1008, 4001 are final).
+            @Override public void onClosing(WebSocket ws,int code,String reason){if(reported.compareAndSet(false,true))events.closedWith(code);ws.close(1000,null);}
+            @Override public void onClosed(WebSocket ws,int code,String reason){if(reported.compareAndSet(false,true))events.closedWith(code);}
         });
         return new Wire(){public boolean send(String text){return websocket.send(text);}public long queueSize(){return websocket.queueSize();}public void cancel(){websocket.cancel();}};
     }
     public void start() {
-        if(!started.compareAndSet(false,true)||terminal.get())return;
+        if(!started.compareAndSet(false,true)||terminal.get())return;startedNanos=System.nanoTime();
         startupDeadline=startupWatchdog.schedule(()->fail("Grok voice did not become ready in time."),startupTimeoutMillis,TimeUnit.MILLISECONDS);
         worker.schedule(()->finish("Call preview reached its five-minute limit.",false),5,TimeUnit.MINUTES);
         execute(()->{
@@ -294,29 +332,9 @@ public final class NativeVoiceSession {
                 JSONObject credential=preparedCredential!=null?preparedCredential:backend.request("MintSandVoiceCallSecret",new JSONObject());
                 preparedCredential=null;
                 if(terminal.get())return;
-                String secret=credential.optString("clientSecret","");
-                String model=credential.optString("model","");
-                if(credential.optLong("expiresAtUnixSeconds",0)<=System.currentTimeMillis()/1000)throw new IllegalArgumentException();
-                if(secret.isEmpty()||model.isEmpty()||!secret.matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+"))throw new IllegalArgumentException();
-                HttpUrl url=voiceUrl(credential.getString("websocketUrl"),model);
                 if(terminal.get())return;
                 startupGuard.check();
-                if(terminal.get())return;
-                socket=wireFactory.open(url,secret,new WireEvents(){
-                    public void opened(){synchronized(historyGuard){if(terminal.get())return;didConnect=true;connectedAtMs=System.currentTimeMillis();}enqueueEvent(()->NativeVoiceSession.this.opened());}
-                    public void message(String text){if(text.length()>MAX_EVENT){fail("Voice returned an oversized event.");return;}enqueueEvent(()->event(text));}
-                    public void failed(Integer status){
-                        if(ending&&status==null){execute(()->{replyInFlight=false;announceEndingIfReady();});}
-                        else if(ready&&status==null)disconnect("The voice connection was interrupted. Start a new voice chat to reconnect.");
-                        else fail(websocketFailure(status));
-                    }
-                    public void closed(){
-                        if(ending){execute(()->{replyInFlight=false;announceEndingIfReady();});}
-                        else if(ready)disconnect("The voice connection closed unexpectedly. Start a new voice chat to reconnect.");
-                        else fail("Grok voice closed before the session became ready. Start a new voice chat to try again.");
-                    }
-                });
-                if(terminal.get())socket.cancel();
+                dial(credential,null);
 
             } catch(Exception failure){fail(setupFailure(failure));}
         });
@@ -339,18 +357,141 @@ public final class NativeVoiceSession {
         // OkHttp represents a secure WebSocket request with its HTTPS URL internally.
         return HttpUrl.get("https"+raw.substring(raw.indexOf(':'))).newBuilder().setQueryParameter("model",model).build();
     }
+    /** Opens one socket generation; after a redial, events from an older socket are ignored. */
+    private void dial(JSONObject credential,String conversationId)throws Exception {
+        String secret=credential.optString("clientSecret","");
+        String model=credential.optString("model","");
+        if(credential.optLong("expiresAtUnixSeconds",0)<=System.currentTimeMillis()/1000)throw new IllegalArgumentException();
+        if(secret.isEmpty()||model.isEmpty()||!secret.matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+"))throw new IllegalArgumentException();
+        HttpUrl url=voiceUrl(credential.getString("websocketUrl"),model);
+        if(conversationId!=null)url=url.newBuilder().setQueryParameter("conversation_id",conversationId).build();
+        if(terminal.get())return;
+        long generation=++socketGeneration;poolAtDial=HTTP.connectionPool().idleConnectionCount();
+        socket=wireFactory.open(url,secret,new WireEvents(){
+            boolean current(){return generation==socketGeneration;}
+            public void opened(){if(!current())return;synchronized(historyGuard){if(terminal.get())return;
+                // The call started at its first connection; a redial must not move it, or the saved record's timing no longer adds up.
+                if(!didConnect){didConnect=true;connectedAtMs=System.currentTimeMillis();}if(openMs<0)openMs=sinceStart();}enqueueEvent(()->{if(current())NativeVoiceSession.this.opened();});}
+            public void message(String text){if(!current())return;if(text.length()>MAX_EVENT){fail("Voice returned an oversized event.");return;}enqueueEvent(()->{if(current())event(text);});}
+            public void failed(Integer status){if(!current())return;
+                if(ending&&status==null){execute(()->{replyInFlight=false;announceEndingIfReady();});}
+                else if(reconnecting)execute(()->{if(current())redialLater();});
+                else if(live()&&status==null)lineLost("The voice connection was interrupted. Start a new voice chat to reconnect.",-1);
+                else fail(websocketFailure(status));
+            }
+            public void closed(){closedWith(-1);}
+            public void closedWith(int code){if(!current())return;
+                if(!ending&&(code==1000||code==1008||code==4001)){finalClose(code,"The voice connection closed unexpectedly. Start a new voice chat to reconnect.");return;}
+                if(ending){execute(()->{replyInFlight=false;announceEndingIfReady();});}
+                else if(reconnecting)execute(()->{if(current())redialLater();});
+                else if(live())lineLost("The voice connection closed unexpectedly. Start a new voice chat to reconnect.",code);
+                else fail("Grok voice closed before the session became ready. Start a new voice chat to try again.");
+            }
+        });
+        if(terminal.get())socket.cancel();
+    }
+    static final int RECONNECT_ATTEMPTS=20;static final long RECONNECT_DIAL_MS=15000;
+    static final String RESUME="The line dropped for a moment and is back now. Say so in one short phrase, without apologising at length.";
+    volatile int reconnectAttempts=RECONNECT_ATTEMPTS;volatile long reconnectBaseMs=1000;
+    private volatile boolean reconnecting;private volatile long socketGeneration;private int reconnectAttempt,reconnects;
+    private String droppedConversationId,lostReason="";private boolean owesResume,awaitingCreated;
+    /** Lookup results that finished while the line was down; their function calls live in the dropped conversation. */
+    private final java.util.ArrayList<JSONObject> heldOutputs=new java.util.ArrayList<>();
+    /**
+     * Like the official Android client, a live call whose line drops redials instead of ending:
+     * a fresh credential, the same conversation, backoff from 1 s to 10 s, up to 20 tries. Policy
+     * (1008) and superseded (4001) closes are final, as in the official clients.
+     */
+    private void lineLost(String safe,int code){
+        if(code==1000||code==1008||code==4001){finalClose(code,safe);return;}
+        if(ending||terminal.get()){disconnect(safe);return;}
+        execute(()->{
+            if(reconnecting||!live())return;
+            reconnecting=true;ready=false;settingsAccepted=false;settingsSent=false;lostReason=safe;reconnectAttempt=0;reconnects++;
+            listener.onDiagnostic("call_reconnect lost code="+code);
+            synchronized(historyGuard){droppedConversationId=realtimeConversationId;}
+            owesResume=replyInFlight||(callerSpoke&&!alreadySpoke);
+            replyInFlight=false;callerSpeaking=false;
+            Wire old=socket;socketGeneration++;if(old!=null)old.cancel();
+            emit(()->listener.onState("Reconnecting"));
+            redialLater();
+        });
+    }
+    // Reconnect requests get their own threads: one stuck on a dead network must not hold up the next try.
+    private final java.util.concurrent.ExecutorService redials=Executors.newCachedThreadPool(r->{Thread t=new Thread(r,"grok-voice-redial");t.setDaemon(true);return t;});
+    /** The watch has a network again: drop any attempt stuck on the old one and redial now. */
+    boolean isReconnecting(){return reconnecting;}
+    public void networkAvailable(){execute(()->{if(!reconnecting||terminal.get())return;HTTP.connectionPool().evictAll();listener.onDiagnostic("call_reconnect network_back");redialNow=true;redialLater();});}
+    private boolean redialNow;
+    /** Optional backend for redials (fresh connections); the call's own backend otherwise. */
+    volatile Backend redialBackend;
+    /** A clean (1000) close is Grok ending the call; policy (1008) and superseded (4001) closes drop it. Never redialled. */
+    private void finalClose(int code,String safe){
+        listener.onDiagnostic("call_closed code="+code);
+        if(code==1000)finish("Grok ended the call.",false);else disconnect(reconnecting?lostReason:safe);
+    }
+    private void redialLater(){
+        if(terminal.get()||!reconnecting)return;
+        if(reconnectAttempt>=reconnectAttempts){listener.onDiagnostic("call_reconnect gave_up attempts="+reconnectAttempt);disconnect(lostReason);return;}
+        // An attempt that opened but died before confirmation must not leave audio admitted for the next socket.
+        if(ready){ready=false;emit(()->listener.onState("Reconnecting"));}settingsSent=false;settingsAccepted=false;
+        long delay=reconnectAttempt==0||redialNow?0:Math.min(10000,(long)(reconnectBaseMs*Math.pow(1.2,reconnectAttempt-1)));redialNow=false;
+        reconnectAttempt++;long generation=++socketGeneration;listener.onDiagnostic("call_reconnect attempt="+reconnectAttempt+" delay_ms="+delay);
+        Wire old=socket;if(old!=null)old.cancel();
+        try{worker.schedule(()->{
+            try{redials.execute(()->{
+                if(terminal.get()||!reconnecting||generation!=socketGeneration)return;
+                try{JSONObject credential=(redialBackend!=null?redialBackend:backend).request("MintSandVoiceCallSecret",new JSONObject());
+                    execute(()->{if(!reconnecting||generation!=socketGeneration)return;
+                        try{startupGuard.check();}catch(Exception changed){fail(setupFailure(changed));return;}
+                        dial(credential,droppedConversationId);watchDial(socketGeneration);});
+                }catch(Exception failed){listener.onDiagnostic("call_reconnect mint_failed");execute(()->{if(generation==socketGeneration)redialLater();});}
+            });}catch(java.util.concurrent.RejectedExecutionException busy){listener.onDiagnostic("call_reconnect busy");execute(this::redialLater);}
+        },delay,TimeUnit.MILLISECONDS);}catch(java.util.concurrent.RejectedExecutionException ignored){}
+    }
+    /** A redial that hasn't had its settings confirmed within 15 s is abandoned for the next try. */
+    private void watchDial(long generation){
+        try{worker.schedule(()->execute(()->{if(reconnecting&&generation==socketGeneration&&!settingsAccepted)redialLater();}),RECONNECT_DIAL_MS,TimeUnit.MILLISECONDS);}
+        catch(java.util.concurrent.RejectedExecutionException ignored){}
+    }
+    /** Back on the line: replay this call's turns if the server started a new conversation, then owe the caller a word. */
+    private void resumeAfterReconnect()throws Exception {
+        String dropped=droppedConversationId,now;droppedConversationId=null;synchronized(historyGuard){now=realtimeConversationId;}
+        boolean resumed=dropped!=null&&dropped.equals(now);
+        if(resumed){for(JSONObject held:heldOutputs)send(held);}
+        else{JSONArray frames=replayFrames();for(int i=0;i<frames.length();i++)send(frames.getJSONObject(i));
+            // A new conversation never saw those function calls; their results would be orphans.
+            toolReplyOwed=false;}
+        heldOutputs.clear();
+        if(owesResume){owesResume=false;requestReply(RESUME);}else payToolReply();
+    }
+    /** This call's settled turns, newest first up to 20 turns or 12,000 characters, as conversation items. */
+    private JSONArray replayFrames()throws Exception {
+        java.util.ArrayList<JSONObject> settled=new java.util.ArrayList<>();
+        synchronized(historyGuard){for(java.util.Map.Entry<String,JSONObject> entry:spokenTurns.entrySet())if(finalizedTurns.contains(entry.getKey()))settled.add(entry.getValue());}
+        java.util.ArrayList<JSONObject> kept=new java.util.ArrayList<>();int chars=0;
+        for(int i=settled.size()-1;i>=0&&kept.size()<20;i--){String text=settled.get(i).optString("text");if(text.isBlank())continue;if(chars+text.length()>12000)break;chars+=text.length();kept.add(0,new JSONObject().put("speaker",settled.get(i).optString("speaker")).put("text",text));}
+        return historyFrames(new JSONArray(kept));
+    }
     private void opened()throws Exception {
         if(terminal.get())return;
         JSONObject format=new JSONObject().put("type","audio/pcm").put("rate",24000);
-        JSONObject audio=new JSONObject().put("input",new JSONObject().put("format",format)
-                .put("transcription",new JSONObject().put("model","grok-transcribe")))
-                .put("output",new JSONObject().put("format",format).put("speed",1.0));
+        JSONObject transcription=new JSONObject().put("model","grok-transcribe");if(!voiceLanguage.isEmpty())transcription.put("language_hint",voiceLanguage);
+        JSONObject audio=new JSONObject().put("input",new JSONObject().put("format",format).put("transcription",transcription))
+                .put("output",new JSONObject().put("format",format).put("speed",voiceSpeed));
         instructionChars=plan.getString("instructions").length();JSONArray offered=plan.getJSONArray("tools");toolsOffered=offered.length();
         StringBuilder names=new StringBuilder();for(int i=0;i<offered.length();i++){String name=offered.optJSONObject(i)==null?"":offered.optJSONObject(i).optString("name");if(name.matches("[a-z_]{1,40}")){if(names.length()>0)names.append(' ');names.append(name);}}toolNames=names.toString();
         JSONObject session=new JSONObject().put("instructions",plan.getString("instructions"))
                 .put("tools",plan.getJSONArray("tools")).put("turn_detection",new JSONObject().put("type","server_vad"))
                 .put("audio",audio).put("resumption",new JSONObject().put("enabled",true));
+        // The Bot's chosen voice, as the official clients send it; otherwise Grok's default.
+        if(!voiceId.isEmpty())session.put("voice",voiceId);
         send(new JSONObject().put("type","session.update").put("session",session));
+        // Like the official clients, audio may follow the settings on the same ordered socket at
+        // once; waiting for session.updated cost about 0.8 s. History, when given, still waits.
+        if(historyAvailable&&historicalTurns.length()==0&&!terminal.get()){settingsSent=true;historySeeded=true;
+            // A redial waits for Grok to confirm the settings and for the replay before audio flows again.
+            if(!reconnecting)admitReady();}
     }
     public void sendPcm(byte[] pcm) {
         if(pcm==null||pcm.length==0||pcm.length>16384||pcm.length%2!=0||terminal.get()||muted||ending)return;
@@ -370,10 +511,16 @@ public final class NativeVoiceSession {
         if(replyInFlight&&!cancelRequested){cancelRequested=true;send(new JSONObject().put("type","response.cancel"));}
         else if(!replyInFlight)emit(()->listener.onState("speechidle"));
     }
-    public void mute(boolean value){muted=value;}
+    static final int MUTE_SILENCE_BYTES=28800;
+    public void mute(boolean value){
+        boolean closing=value&&!muted;muted=value;
+        // Like the official Android client: muting mid-sentence sends 600 ms of silence so Grok ends the turn.
+        if(closing)execute(()->{if(ready&&callerSpeaking&&!ending&&!terminal.get()){byte[] silence=new byte[MUTE_SILENCE_BYTES/2];
+            for(int i=0;i<2;i++){send(new JSONObject().put("type","input_audio_buffer.append").put("audio",codec.encode(silence)));pcmSent+=silence.length;}}});
+    }
     static final String LOST="Your watch lost its connection.";
     /** The network carrying this call disappeared; its socket cannot recover. */
-    public void networkLost(){if(ready)disconnect(LOST);else fail(LOST);}
+    public void networkLost(){if(live())lineLost(LOST,-1);else if(!reconnecting)fail(LOST);}
     public void end(){finish("Call ended.",false);}
     /** Service acknowledges that the final native speech has actually left AudioTrack. */
     public void completeAfterPlayback(){execute(()->{if(ending&&!replyInFlight)finish("Grok ended the call.",false);});}
@@ -399,8 +546,12 @@ public final class NativeVoiceSession {
             case "conversation.created":
                 JSONObject conversation=e.optJSONObject("conversation");if(conversation!=null){String id=conversation.optString("id","");if(!id.isEmpty()&&id.length()<=256)synchronized(historyGuard){realtimeConversationId=id;}}break;
             case "session.created":break; // Created precedes acceptance of our actual settings.
-            case "session.updated":
-                if(!settingsAccepted){settingsAccepted=true;seedHistoryIfReady();}
+            case "session.updated":if(updatedMs<0)updatedMs=sinceStart();
+                if(!settingsAccepted){settingsAccepted=true;
+                    // Audio already flows; the account and Bot must still be the ones this call started with.
+                    if(ready)try{startupGuard.check();}catch(Exception changed){fail(setupFailure(changed));break;}
+                    if(reconnecting){listener.onDiagnostic("call_reconnect confirmed attempts="+reconnectAttempt);reconnecting=false;reconnectAttempt=0;resumeAfterReconnect();admitReady();}
+                    seedHistoryIfReady();}
                 break;
             case "conversation.item.created":case "conversation.item.added":
                 JSONObject item=e.optJSONObject("item");if(item!=null&&pendingHistory.remove(item.optString("id","")))admitReady();break;
@@ -409,14 +560,14 @@ public final class NativeVoiceSession {
                 callerTurn++;toolReplyOwed=false;pendingLookups=0;interruptReply();
                 // server_vad has already cancelled generation. Only stop local playback.
                 emit(()->listener.onSpeechStarted());break;
-            case "input_audio_buffer.speech_stopped":callerSpeaking=false;emit(()->listener.onState("Thinking"));
+            case "input_audio_buffer.speech_stopped":callerSpeaking=false;speechStoppedNanos=System.nanoTime();emit(()->listener.onState("Thinking"));
                 // Speech detection can end on noise that never becomes a reply. Without
                 // a response or lookup, return to Listening instead of thinking forever.
                 long turn=callerTurn,seenBefore=responsesSeen;
-                try{worker.schedule(()->{if(terminal.get()||ending||callerSpeaking||replyInFlight||pendingLookups>0||callerTurn!=turn||responsesSeen!=seenBefore)return;
+                try{worker.schedule(()->{if(terminal.get()||ending||reconnecting||callerSpeaking||replyInFlight||pendingLookups>0||callerTurn!=turn||responsesSeen!=seenBefore)return;
                     emit(()->listener.onState("speechidle"));},thinkingFallbackMs,TimeUnit.MILLISECONDS);}catch(java.util.concurrent.RejectedExecutionException ignored){}
                 break;
-            case "response.created":
+            case "response.created":awaitingCreated=false;
                 activeResponseId=responseId(e);interruptedReply=callerSpeaking;cancelRequested=false;responsesSeen++;
                 synchronized(historyGuard){assistantItem="";currentReplyItems.clear();suppressReplyTranscript=callerSpeaking;}
                 replyInFlight=true;announcedSpeaking=false;break;
@@ -429,6 +580,7 @@ public final class NativeVoiceSession {
                 if(!callerSpeaking&&!interruptedReply&&belongsToCurrentReply(e)){String encoded=e.optString("delta","");
                     if(!encoded.isEmpty()){byte[] pcm=codec.decode(encoded);
                         if(pcm.length%2!=0)throw new IllegalArgumentException();alreadySpoke=true;audioOut+=pcm.length;
+                        if(speechStoppedNanos!=0){lastTtfaMs=(System.nanoTime()-speechStoppedNanos)/1_000_000;maxTtfaMs=Math.max(maxTtfaMs,lastTtfaMs);speechStoppedNanos=0;}
                         if(!announcedSpeaking){announcedSpeaking=true;emit(()->listener.onState("Speaking"));}emit(()->listener.onAudio(pcm));}}
                 break;
             case "conversation.item.input_audio_transcription.updated":case "conversation.item.input_audio_transcription.completed":
@@ -454,20 +606,29 @@ public final class NativeVoiceSession {
         historicalTurns=new JSONArray();admitReady();
     }
     private void admitReady(){
-        if(!ready&&settingsAccepted&&historySeeded&&pendingHistory.isEmpty()&&!terminal.get()){
+        if(!ready&&(settingsAccepted||settingsSent)&&historySeeded&&pendingHistory.isEmpty()&&!terminal.get()){
             try{startupGuard.check();}catch(Exception changed){fail(setupFailure(changed));return;}
             if(terminal.get())return;
-            ready=true;cancelStartupDeadline();emit(()->listener.onState("Listening · read-only voice preview"));emit(()->listener.onReady());
-            // Shared history is context, not a new prompt. The desktop harness may
-            // offer a proactive greeting, but a watch call waits for fresh speech.
+            ready=true;if(readyMs<0)readyMs=sinceStart();cancelStartupDeadline();
+            // The caller goes first, as in the official clients: the Bot's greeting plays only after 15 s with no speech.
+            try{worker.schedule(()->execute(this::greetIfQuiet),greetingGraceMs,TimeUnit.MILLISECONDS);}catch(java.util.concurrent.RejectedExecutionException ignored){}
+            // Settings that are never confirmed would leave a call that can't hear the caller.
+            // The deadline belongs to this socket only: a later redial has its own dial watchdog.
+            long generation=socketGeneration;
+            if(!settingsAccepted&&reconnects==0)try{worker.schedule(()->execute(()->{if(!settingsAccepted&&!reconnecting&&generation==socketGeneration&&!terminal.get())fail("Grok voice did not accept the call settings. Start a new call.");}),SETTINGS_DEADLINE_MS,TimeUnit.MILLISECONDS);}catch(java.util.concurrent.RejectedExecutionException ignored){}emit(()->listener.onState("Listening · read-only voice preview"));emit(()->listener.onReady());
         }
+    }
+    private void greetIfQuiet()throws Exception {
+        if(terminal.get()||ending||callerSpoke||replyInFlight||responsesSeen>0||reconnects>0||plan==null)return;
+        JSONObject greeting=plan.optJSONObject("greeting");String direction=greeting==null?"":greeting.optString("direction","");
+        if(!direction.isBlank())requestReply(direction);
     }
     private void caption(String who,String text){if(!text.isBlank())emit(()->listener.onCaption(who,text.substring(0,Math.min(text.length(),8000))));}
     private void requestReply(String instructions)throws Exception {
         JSONObject response=new JSONObject();
         if(instructions!=null&&!instructions.isBlank())response.put("instructions",instructions);
         send(new JSONObject().put("type","response.create").put("response",response));
-        replyInFlight=true;
+        replyInFlight=true;awaitingCreated=true;
     }
     private void tool(JSONObject e)throws Exception {
         String id=e.optString("call_id",""),name=e.optString("name","");toolCalls++;
@@ -492,10 +653,12 @@ public final class NativeVoiceSession {
                 if(terminal.get()||ending)return;
                 execute(()->{
                     if(requestedTurn==callerTurn)pendingLookups=Math.max(0,pendingLookups-1);
-                    if(!"served".equals(result.optString("kind",""))) {
+                    // The wire carries the enum name; the official clients map it to "served" before checking.
+                    String kind=result.optString("kind","");
+                    if(!"served".equals(kind)&&!CallHandoff.SERVED.equals(kind)) {toolsRefused++;
                         toolResultForTurn(id,new JSONObject().put("error","The requested read-only tool was not available."),requestedTurn);return;
                     }
-                    Object output=result.opt("output");
+                    Object output=result.opt("output");toolsServed++;
                     toolOutput(id,output==null?new JSONObject():output);
                     if(requestedTurn==callerTurn&&(!(output instanceof JSONObject)||!"silent".equals(((JSONObject)output).optString("plan","")))){toolReplyOwed=true;payToolReply();}
                     else settleIfQuiet();
@@ -505,7 +668,7 @@ public final class NativeVoiceSession {
     }
 
     private void payToolReply()throws Exception {
-        if(toolReplyOwed&&!callerSpeaking&&!replyInFlight&&!ending){toolReplyOwed=false;requestReply(null);}
+        if(toolReplyOwed&&!callerSpeaking&&!replyInFlight&&!ending&&!reconnecting){toolReplyOwed=false;requestReply(null);}
     }
     static JSONObject toolRequest(String botId,String callId,String name,JSONObject input,JSONObject line)throws Exception {
         return new JSONObject().put("agentId",botId).put("callId",callId).put("name",name).put("input",input).put("line",line);
@@ -514,7 +677,7 @@ public final class NativeVoiceSession {
         toolOutput(id,output);if(turn==callerTurn){toolReplyOwed=true;payToolReply();}else settleIfQuiet();
     }
     /** A silent or superseded lookup leaves nothing to say: show Listening again. */
-    private void settleIfQuiet(){if(pendingLookups==0&&!replyInFlight&&!callerSpeaking&&!ending)emit(()->listener.onState("speechidle"));}
+    private void settleIfQuiet(){if(pendingLookups==0&&!replyInFlight&&!callerSpeaking&&!ending&&!reconnecting)emit(()->listener.onState("speechidle"));}
     private void toolResultWithReply(String id,Object output)throws Exception {
         toolOutput(id,output);toolReplyOwed=true;payToolReply();
     }
@@ -531,6 +694,11 @@ public final class NativeVoiceSession {
                 .put("type","function_call_output").put("call_id",id).put("output",encoded)));
     }
     private void send(JSONObject frame)throws Exception {
+        // While a redial waits for its settings to be confirmed, only the settings may go out.
+        if(reconnecting&&!"session.update".equals(frame.optString("type"))){
+            JSONObject item=frame.optJSONObject("item");
+            if(item!=null&&"function_call_output".equals(item.optString("type"))&&heldOutputs.size()<16)heldOutputs.add(frame);
+            return;}
         Wire ws=socket;
         if(terminal.get())return;
         String text=frame.toString();
@@ -538,7 +706,7 @@ public final class NativeVoiceSession {
         if(ws==null||bytes>MAX_QUEUE){fail("Grok voice could not keep up with the connection.");return;}
         // A full outgoing queue or a refused send means the socket is no longer draining:
         // on a watch that is a lost network far more often than a slow encoder.
-        if(ws.queueSize()+bytes>MAX_QUEUE||!ws.send(text)){if(ready)disconnect(LOST);else fail("Grok voice could not keep up with the connection.");}
+        if(ws.queueSize()+bytes>MAX_QUEUE||!ws.send(text)){if(live())lineLost(LOST,-1);else if(!reconnecting)fail("Grok voice could not keep up with the connection.");}
     }
     private interface Work {void run()throws Exception;}
     private boolean execute(Work work) {
@@ -565,7 +733,8 @@ public final class NativeVoiceSession {
         Wire ws=socket;if(ws!=null)ws.cancel();
         // BotAccount's active HTTP request has its own 30s bound; it is not cancellable here.
         // Guards after every backend return prevent a timed-out startup from minting/opening later.
-        worker.shutdownNow();lookups.shutdownNow();http.dispatcher().cancelAll();http.connectionPool().evictAll();
+        // The HTTP client is shared with the next call, so only this call's socket is cancelled (above).
+        worker.shutdownNow();lookups.shutdownNow();redials.shutdownNow();
         if(disconnected)listener.onDisconnected(reason);else if(failure)listener.onFailure(reason);else listener.onComplete(reason);
     }
 }

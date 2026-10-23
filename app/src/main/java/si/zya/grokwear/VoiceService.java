@@ -82,54 +82,67 @@ public final class VoiceService extends Service {
     private volatile String replyText="";private volatile long replyStartFrame;private String lastSpoken="";
     /** Rough frames of speech per character, used until the whole answer's audio has arrived. */
     private static final double FRAMES_PER_CHAR=1500;
-    private ConnectivityManager.NetworkCallback networkWatch;private volatile android.net.Network callNetwork;
+    private ConnectivityManager.NetworkCallback networkWatch,defaultWatch;private volatile android.net.Network callNetwork;
     private long liveStartedAt,finishedElapsed,callDeadlineElapsed;
+    /** The session is redialling: keep showing Reconnecting until it reports Listening again. */
+    private boolean lineDown;
+    // Startup phase times in ms from Talk, for the call_stop diagnostics line.
+    private volatile long talkElapsed,leaseMs=-1,planMs=-1,mintMs=-1,dialMs=-1,listeningMs=-1;
+    private long sinceTalk(){return SystemClock.elapsedRealtime()-talkElapsed;}
     @Override public IBinder onBind(Intent intent){return null;}
     @Override public int onStartCommand(Intent intent,int flags,int startId){
         String action=intent==null?"":intent.getAction();
         if(END.equals(action)){finish("Call ended.","");return START_NOT_STICKY;}
-        if(MUTE.equals(action)){if(running&&!ending){muted=!muted;if(session!=null)session.mute(muted);if(audio!=null)audio.mute(muted);inputLevel=0;emit();notifyCall();}return START_NOT_STICKY;}
+        if(MUTE.equals(action)){if(running&&!ending){muted=!muted;if(session!=null)session.mute(muted);if(audio!=null&&liveStartedAt>0)audio.mute(muted);inputLevel=0;emit();notifyCall();}return START_NOT_STICKY;}
         if(INTERRUPT.equals(action)){if(running&&!ending&&session!=null)session.cancelReply();return START_NOT_STICKY;}
         if(!START.equals(action)||running||!consume(intent)){if(!running){publish(new Snapshot("Ready","","","Tap Voice chat again to start voice.","",false,false,0,0));stopSelf();}return START_NOT_STICKY;}
         PowerManager power=(PowerManager)getSystemService(POWER_SERVICE);KeyguardManager keyguard=(KeyguardManager)getSystemService(KEYGUARD_SERVICE);
         if(!power.isInteractive()||keyguard.isKeyguardLocked()||checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){finish("Ready","Tap Voice chat again while the watch is unlocked.");return START_NOT_STICKY;}
-        running=true;callHistoryEpoch=historyEpoch;long mine=++generation;state="Connecting";caption="";speaker="";error="";muted=false;responseIdle=true;drained=true;ending=false;endReady=false;
-        liveStartedAt=0;finishedElapsed=0;callDeadlineElapsed=SystemClock.elapsedRealtime()+300000;syncStatus="Loading shared history";callAccount=null;callContext=null;
+        running=true;callHistoryEpoch=historyEpoch;long mine=++generation;talkElapsed=SystemClock.elapsedRealtime();lineDown=false;leaseMs=-1;planMs=-1;mintMs=-1;dialMs=-1;listeningMs=-1;state="Connecting";caption="";speaker="";error="";muted=false;responseIdle=true;drained=true;ending=false;endReady=false;
+        liveStartedAt=0;finishedElapsed=0;callDeadlineElapsed=SystemClock.elapsedRealtime()+300000;syncStatus="Connecting voice";callAccount=null;callContext=null;
         try{Notification notification=notification();startForeground(NOTIFICATION,notification,ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE|ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
             wake=power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,"grokwear:voice");wake.setReferenceCounted(false);wake.acquire(310000);
         }catch(RuntimeException refused){finish("Ready","Watch could not keep this voice call in the foreground.");return START_NOT_STICKY;}
         emit();main.postDelayed(()->{if(valid(mine))finish("Call ended","Voice call reached its five-minute limit.");},Math.max(0,callDeadlineElapsed-SystemClock.elapsedRealtime()));
         watchNetwork(mine);replyText="";replyStartFrame=0;
+        NativeVoiceSession.prewarm();
         VoiceStartup pipeline=new VoiceStartup();startup=pipeline;
         setup.execute(()->{try{BotAccount account=new BotAccount(this);JSONObject bot=account.selectedBot();
             JSONObject binding=account.historyBinding();
             if(!binding.getString("agentId").equals(bot.optString("id")))throw new IllegalStateException();
-            NativeVoiceSession.Backend lease=account.startupBackend(binding);pipeline.check();
-            VoiceStartup.Result prepared=pipeline.prepare(()->account.continuity.prepare(binding),
-                ()->lease.request("VoiceCallHarnessSession",new JSONObject().put("agentId",bot.getString("id")).put("agentName",bot.getString("name"))),
-                ()->lease.request("MintSandVoiceCallSecret",new JSONObject()),
+            NativeVoiceSession.Backend lease=account.startupBackend(binding);leaseMs=sinceTalk();pipeline.check();
+            // Like the official apps, a call starts without preloading chat history: the Bot's
+            // instructions and its lookup tools carry context, and the microphone isn't held
+            // behind history pages or per-message acknowledgements. The binding still saves the call.
+            VoiceStartup.Result prepared=pipeline.prepare(()->new HistoryCoordinator.Context(binding,new org.json.JSONArray()),
+                ()->{JSONObject plan=lease.request("VoiceCallHarnessSession",new JSONObject().put("agentId",bot.getString("id")).put("agentName",bot.getString("name")));planMs=sinceTalk();return plan;},
+                ()->{JSONObject credential=lease.request("MintSandVoiceCallSecret",new JSONObject());mintMs=sinceTalk();return credential;},
                 (plan,credential)->post(mine,()->openPreparedSession(mine,account,bot,binding,plan,credential,pipeline)));
             account.verifyHistoryBinding(binding,true);
             post(mine,()->{
                 try{
                     if(session==null)throw new IllegalStateException("Voice transport missing");
-                    callContext=prepared.history;syncStatus="Connecting voice";emit();
-                    session.provideHistory(prepared.history.turns());
-                }catch(Exception invalid){finish("Call stopped","Shared history could not be prepared safely.");}
+                    callContext=prepared.history;emit();
+                }catch(Exception invalid){finish("Call stopped","Voice could not start safely. Try again.");}
             });
         }catch(Exception failed){String reason=setupReason(failed);post(mine,()->finish("Ready",reason));}});
         return START_NOT_STICKY;
     }
     private void openPreparedSession(long mine,BotAccount account,JSONObject bot,JSONObject binding,JSONObject plan,JSONObject credential,VoiceStartup pipeline){
-        if(!valid(mine))return;
+        if(!valid(mine))return;dialMs=sinceTalk();
         botName=bot.optString("name","");callAccount=account;callBot=bot;
         ConnectivityManager manager=getSystemService(ConnectivityManager.class);if(manager!=null&&manager.getActiveNetwork()!=null)callNetwork=manager.getActiveNetwork();
         try{session=new NativeVoiceSession(account,bot,new NativeVoiceSession.Listener(){
+                    public void onDiagnostic(String line){android.util.Log.i("GrokWearVoice",line);}
                     public void onState(String value){post(mine,()->{
                         if("ending".equals(value)||"finishing".equals(value)){ending=true;endReady="ending".equals(value);muted=true;if(audio!=null)audio.mute(true);state="Ending";
                             if(endReady&&drained&&session!=null)session.completeAfterPlayback();emit();notifyCall();return;}
                         if(ending)return;
-                        if("speechidle".equals(value)){responseIdle=true;if(drained)state="Listening";}
+                        if("Reconnecting".equals(value)){lineDown=true;responseIdle=true;state="Reconnecting";emit();notifyCall();return;}
+                        if(value.startsWith("Listening")&&lineDown){lineDown=false;
+                            // Back on the line: whatever network carries it now is the one to watch.
+                            ConnectivityManager manager=getSystemService(ConnectivityManager.class);if(manager!=null&&manager.getActiveNetwork()!=null)callNetwork=manager.getActiveNetwork();}
+                        if("speechidle".equals(value)){responseIdle=true;if(drained&&!lineDown)state="Listening";}
                         else if(value.startsWith("Speaking")){responseIdle=false;state="Speaking";}else if(value.startsWith("Thinking")){responseIdle=false;state="Thinking";}
                         else if(value.startsWith("Listening")){if(audio!=null&&drained)state="Listening";}emit();});}
                     public void onReady(){post(mine,()->startAudio(mine));}
@@ -143,22 +156,23 @@ public final class VoiceService extends Service {
                         // Flush on the session callback, before it can enqueue the next
                         // response's audio. A delayed main-thread flush could erase that reply.
                         synchronized(VoiceService.this){if(!valid(mine)||ending)return;if(audio!=null)audio.interrupt();drained=true;responseIdle=false;}
-                        post(mine,()->{if(!ending){state="Listening";emit();}});
+                        post(mine,()->{if(!ending&&!lineDown){state="Listening";emit();}});
                     }
                     public void onComplete(String reason){post(mine,()->finish(reason,""));}
                     public void onFailure(String safe){post(mine,()->finish("Call stopped",safe));}
                     public void onDisconnected(String safe){post(mine,()->finish("Call dropped",safe));}
                 },pipeline.remainingMillis());
-            session.deferHistory();session.preparedStartup(plan,credential,()->account.verifyHistoryBinding(binding,true));
-            emit();notifyCall();session.start();
-        }catch(Exception invalid){finish("Call stopped","Shared history could not be prepared safely.");}
+            session.redialBackend=account::redialBackend;
+            session.preparedStartup(plan,credential,()->account.verifyHistoryBinding(binding,true));
+            emit();notifyCall();session.start();prepareAudio(mine);
+        }catch(Exception invalid){finish("Call stopped","Voice could not start safely. Try again.");}
     }
     /** Fixed local messages only: a Failure carries a safe sentence; anything else may hold private detail. */
     private String setupReason(Exception failed){
         if(!online(this))return OFFLINE;
         if(failed instanceof GrokCore.Failure&&failed.getMessage()!=null&&!failed.getMessage().isBlank())return failed.getMessage();
-        if(failed instanceof java.util.concurrent.TimeoutException)return "Your chat took too long to load on this connection. Try again with a stronger signal.";
-        return "Shared history could not be loaded. Check your connection and try again.";
+        if(failed instanceof java.util.concurrent.TimeoutException)return "Voice took too long to connect on this connection. Try again with a stronger signal.";
+        return "Voice could not start. Check your connection and try again.";
     }
     static final String OFFLINE="You're offline. Check Wi-Fi or your watch's connection, then try again.";
     static boolean online(Context context){
@@ -171,17 +185,29 @@ public final class VoiceService extends Service {
     private void watchNetwork(long mine){
         ConnectivityManager manager=getSystemService(ConnectivityManager.class);if(manager==null)return;
         callNetwork=manager.getActiveNetwork();
-        networkWatch=new ConnectivityManager.NetworkCallback(){@Override public void onLost(android.net.Network lost){post(mine,()->{
+        networkWatch=new ConnectivityManager.NetworkCallback(){
+            @Override public void onLost(android.net.Network lost){
+                // On this callback thread (closing sockets is I/O): only the call's own network, or the last one, matters.
+                if(lost.equals(callNetwork)||manager.getActiveNetwork()==null)BotAccount.networkChanged();
+                post(mine,()->{
             NativeVoiceSession live=session;
             // Before the socket exists, another network can still finish setup; only no network at all ends it.
             if(live!=null&&lost.equals(callNetwork))live.networkLost();else if(manager.getActiveNetwork()==null){if(live!=null)live.networkLost();else finish("Ready",OFFLINE);}
         });}};
         try{manager.registerNetworkCallback(new NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build(),networkWatch);}
         catch(RuntimeException unavailable){networkWatch=null;}
+        // A dropped call redials as soon as the watch has a new default network, instead of waiting out a stuck
+        // attempt. Other networks coming and going (Bluetooth proxy, LTE) are ignored.
+        defaultWatch=new ConnectivityManager.NetworkCallback(){@Override public void onAvailable(android.net.Network available){
+            NativeVoiceSession pending=session;if(pending==null||!pending.isReconnecting())return;BotAccount.networkChanged();
+            post(mine,()->{NativeVoiceSession live=session;if(live==null||!live.isReconnecting())return;callNetwork=available;live.networkAvailable();});}};
+        try{manager.registerDefaultNetworkCallback(defaultWatch);}catch(RuntimeException unavailable){defaultWatch=null;}
     }
     private void unwatchNetwork(){
-        ConnectivityManager.NetworkCallback watch=networkWatch;networkWatch=null;callNetwork=null;if(watch==null)return;
-        try{getSystemService(ConnectivityManager.class).unregisterNetworkCallback(watch);}catch(RuntimeException ignored){}
+        ConnectivityManager.NetworkCallback watch=networkWatch,defaults=defaultWatch;networkWatch=null;defaultWatch=null;callNetwork=null;
+        ConnectivityManager manager=getSystemService(ConnectivityManager.class);if(manager==null)return;
+        if(watch!=null)try{manager.unregisterNetworkCallback(watch);}catch(RuntimeException ignored){}
+        if(defaults!=null)try{manager.unregisterNetworkCallback(defaults);}catch(RuntimeException ignored){}
     }
     private boolean valid(long mine){return running&&generation==mine;}
     private void post(long mine,Runnable work){main.post(()->{if(valid(mine))work.run();});}
@@ -192,15 +218,20 @@ public final class VoiceService extends Service {
             // Synthesis arrives in bursts of many chunks; the UI needs the state, not every chunk.
             long now=SystemClock.uptimeMillis();announce=now-lastAudioPost>=150;if(announce)lastAudioPost=now;}
         if(announce)post(mine,()->{if(!ending)state="Speaking";emit();});}
-    private void startAudio(long mine){if(!valid(mine)||audio!=null)return;
-        syncStatus="Shared history loaded";
-        liveStartedAt=SystemClock.elapsedRealtime();
+    /** Audio focus, call mode and both audio tracks are set up while the socket dials; the microphone stays off until ready. */
+    private void prepareAudio(long mine){if(!valid(mine)||audio!=null)return;
         audio=new NativeAudio(this,new NativeAudio.Listener(){
             public void input(byte[] pcm,float level){NativeVoiceSession live=session;if(valid(mine)&&!muted&&live!=null){live.sendPcm(pcm);meter(mine,level,true);}}
             public void output(float level){meter(mine,level,false);}
-            public void drained(){post(mine,()->{synchronized(VoiceService.this){if(audio==null||!audio.isDrained())return;drained=true;}outputLevel=0;if(ending){if(endReady&&session!=null)session.completeAfterPlayback();}else if(responseIdle)state="Listening";emit();});}
+            public void drained(){post(mine,()->{synchronized(VoiceService.this){if(audio==null||!audio.isDrained())return;drained=true;}outputLevel=0;if(ending){if(endReady&&session!=null)session.completeAfterPlayback();}else if(responseIdle&&!lineDown)state="Listening";emit();});}
             public void failure(String safe){post(mine,()->finish("Call stopped",safe));}
-        });audio.start(muted||ending);if(valid(mine)){state=ending?"Ending":"Listening";emit();notifyCall();}
+        });audio.start(true);
+    }
+    private void startAudio(long mine){if(!valid(mine)||liveStartedAt>0)return;
+        syncStatus="Connected";
+        liveStartedAt=SystemClock.elapsedRealtime();
+        if(audio==null)prepareAudio(mine);NativeAudio prepared=audio;if(prepared==null||!valid(mine))return;
+        prepared.mute(muted||ending);listeningMs=sinceTalk();state=ending?"Ending":"Listening";emit();notifyCall();
     }
     private void meter(long mine,float level,boolean input){long now=SystemClock.elapsedRealtime();synchronized(this){if(now-lastMeter<70&&level!=0)return;lastMeter=now;}post(mine,()->{if(input)inputLevel=muted?0:level;else outputLevel=level;emit();});}
     private void emit(){long elapsed=liveStartedAt==0?finishedElapsed:Math.max(0,SystemClock.elapsedRealtime()-liveStartedAt);
@@ -233,6 +264,7 @@ public final class VoiceService extends Service {
         if(liveStartedAt!=0){finishedElapsed=Math.max(0,SystemClock.elapsedRealtime()-liveStartedAt);liveStartedAt=0;}
         // Fixed categories only: no captions, Bot/account identifiers, credentials or remote messages.
         android.util.Log.i("GrokWearVoice","call_stop cause="+stopCategory(finalState,safe)+" duration_ms="+finishedElapsed
+                +" lease_ms="+leaseMs+",plan_ms="+planMs+",mint_ms="+mintMs+",dial_ms="+dialMs+",listening_ms="+listeningMs
                 +(session==null?"":" "+session.protocolDiagnostics()));
         unwatchNetwork();replyText="";lastSpoken="";
         running=false;generation++;VoiceStartup preparing=startup;startup=null;if(preparing!=null)preparing.close();main.removeCallbacksAndMessages(null);NativeVoiceSession old=session;session=null;if(old!=null){if(!drained)old.discardUnheardReply();old.end();}
@@ -250,14 +282,14 @@ public final class VoiceService extends Service {
                 historyWriter.execute(()->{
                     try{
                         try{HistoryCoordinator.stage(account,context,record);}
-                        catch(Exception ignored){MAIN.post(()->{if(generation==finishedGeneration&&!running&&callHistoryEpoch==historyEpoch){
+                        catch(Exception refused){android.util.Log.i("GrokWearVoice","call_record staged=false reason="+(refused instanceof GrokCore.Failure?refused.getMessage():refused.getClass().getSimpleName()));MAIN.post(()->{if(generation==finishedGeneration&&!running&&callHistoryEpoch==historyEpoch){
                             savingRecord=false;syncStatus="rejected";emit();}});return;}
                         // Encrypted pending record is durable and prepare() merges it into the next call,
                         // so Talk works again now, while the upload and the handoff continue.
                         MAIN.post(()->{if(generation==finishedGeneration&&!running&&callHistoryEpoch==historyEpoch){
                             savingRecord=false;syncStatus="pending";emit();}});
                         String status;try{status=HistoryCoordinator.record(account,context,record).optString("syncStatus","uncertain");}
-                        catch(Exception ignored){status="uncertain";}String result=status;
+                        catch(Exception ignored){status="uncertain";}String result=status;android.util.Log.i("GrokWearVoice","call_record staged=true sync="+result);
                         MAIN.post(()->{if(generation==finishedGeneration&&!running&&callHistoryEpoch==historyEpoch){syncStatus=result;emit();}});
                         // Tell the Bot the call ended, as the official clients do, so anything owed follows up in its chat.
                         // At most once: no retry after any failure, so no request can reach the Bot twice.
