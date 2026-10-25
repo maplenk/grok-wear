@@ -21,7 +21,7 @@ Talk:    sign-in check ─┬─ Bot voice setup (instructions + tools) ─┐
 
 | Class | Role |
 |---|---|
-| `GrokAuthCore`, `GrokAuthClient`, `GrokAuthVault` | Browser/QR sign-in with a watch-held verifier, token refresh, and connection bootstrap. A refresh is never retried after an uncertain outcome. |
+| `GrokAuthCore`, `GrokAuthClient`, `GrokAuthVault` | Browser/QR sign-in with a watch-held verifier, token refresh, and connection bootstrap. Callers that need either while one is running wait for it instead of failing. A refresh is never retried after an uncertain outcome. |
 | `GrokVault`, `VaultSnapshotCache` | AES-GCM encrypted files with a non-exportable Android Keystore key, plus an in-memory snapshot cache that is invalidated on every write. |
 | `GrokCore`, `BotAccount` | Bot roster, Primary/pinned preferences, pin and unpin, and the narrow set of allowed service operations. Every request rechecks that the account and selected Bot have not changed. A pin write re-reads the account's list first, changes only that Bot (pins are added at the end), sends the whole list back, and keeps the list the server stored. |
 | `HistoryCoordinator` | Shared-chat pages for the Bot page, and a durable outbox for call transcripts. |
@@ -30,6 +30,8 @@ Talk:    sign-in check ─┬─ Bot voice setup (instructions + tools) ─┐
 | `NativeAudio`, `PcmPlaybackBuffer` | Microphone capture and speaker playback (24 kHz mono PCM16) with echo cancellation where available, a bounded playback buffer, audio-focus pause and resume, and routing to a headset or the speaker. |
 | `VoiceService` | Foreground service that owns a call: admission, ongoing notification, network loss detection, captions and saving the transcript. |
 | `CallHandoff` | The end-of-call note and leftover request sent to the Bot after the transcript is saved. |
+| `BotEvents`, `EventStream` | The gateway's live event stream (`/events`, read as the official Android app reads it): roster changes and new chat entries. One connection while the app is open or a reply alert waits. Events only refresh what's shown; the roster and chat are still read the usual way. |
+| `ReplyAlertService` | Foreground service that waits for the reply to a message sent from the watch, then posts a notification that opens the chat. It stays quiet if that chat is on screen. |
 | `MainActivity` and views | Round-screen UI: Home roster, Bot page with chat, call screen, sign-in and settings. |
 
 ## Call rules
@@ -49,6 +51,8 @@ Talk:    sign-in check ─┬─ Bot voice setup (instructions + tools) ─┐
 - A live call whose line drops redials, like the official Android app: a fresh credential (over a fresh connection, 10-second deadline), the same conversation, the first try at once and then 1 s ×1.2 up to 10 s, at most 20 tries, 15 seconds per dial. A network coming back redials at once. If the server starts a new conversation, the call's turns are replayed. Policy and superseded closes, the caller's hang-up, and calls that never went live are not redialled.
 - A short audio interruption (alarm, timer, assistant) pauses the microphone and speaker until focus returns; only a permanent loss of audio focus ends the call. Failed microphone reads are retried for about 2 seconds.
 - If speech never turns into a reply, the call returns to Listening after 8 seconds.
+- The live event stream treats 45 seconds without data as a dead link (the gateway sends a keep-alive every 15 seconds), dials a fresh connection each time, and reconnects at once on a new network. After a gap, the app and a waiting reply alert read the chat again instead of trusting events they may have missed.
+- A reply alert ends at the Bot's first message after yours (found by order in the chat, not by clocks), ten minutes after sending, or once the Bot has been idle for two minutes. Android blocks network access for apps in the background, so the alert runs as a foreground service.
 
 ## Limits
 

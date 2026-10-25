@@ -64,6 +64,12 @@ public final class MainActivity extends Activity {
     // Text messages: the draft under review, this Bot's messages from the watch, and the reply watch after sending.
     private String draftMessage="",editDraft="",markedReadId="";private JSONArray botMessages=new JSONArray();private boolean messageSending;private int replyChecks;private long replyWatchSince;private String replyWatchText="";private Runnable replyWatch;
     private static final int MESSAGE_INPUT=31;
+    // Live updates: the gateway's event stream while the app is open. openChat is the Bot whose chat is on
+    // screen, so a reply alert stays quiet for it; a reply notification brings its Bot's chat back.
+    static volatile String openChat="";private static boolean notificationsAsked;private String pendingOpenBot="",alertBot="",alertName="",alertMessage="";private long liveReadAt;
+    // Settings: a refused notification permission turns Reply alerts back off and says where to allow it.
+    private boolean alertsBlocked,previewAlerts=true;
+    private static final int NOTIFICATIONS=18;
     private FrameLayout root;
     private LinearLayout body;
     private BotAvatarView orb;
@@ -93,7 +99,9 @@ public final class MainActivity extends Activity {
         // Launch-media captures: no preview label, a short demo chat per Bot. Synthetic data only.
         previewMedia=preview&&getIntent().getBooleanExtra("preview_media",false);
         // Real launches show a blank frame until the saved sign-in is read, never a flash of "Sign in".
-        if(!preview){botName="Your Bot";screen="launch";getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);account=new BotAccount(this);}
+        if(!preview){botName="Your Bot";screen="launch";getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);account=new BotAccount(this);
+            // A notification tap opens its Bot once; reopening from recents or after a restart doesn't replay it.
+            if(state==null&&(getIntent().getFlags()&Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY)==0)pendingOpenBot=openBotExtra(getIntent());}
         side=(int)(getResources().getDisplayMetrics().widthPixels/getResources().getDisplayMetrics().density);
         if(android.os.Build.VERSION.SDK_INT>=33){modernBack=this::handleBack;getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,modernBack);}
         if(preview)setPreviewScreen(getIntent().getStringExtra("preview_screen"));else render();
@@ -101,12 +109,17 @@ public final class MainActivity extends Activity {
     @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);
         // An existing real-account activity cannot be switched into screenshot mode.
         if(preview){previewMedia=intent.getBooleanExtra("preview_media",false);setPreviewScreen(intent.getStringExtra("preview_screen"));}
+        else pendingOpenBot=openBotExtra(intent); // onResume's account load opens it.
     }
+    private static String openBotExtra(Intent intent){String id=intent==null?null:intent.getStringExtra(ReplyAlertService.OPEN_BOT);return id==null||id.length()>512?"":id;}
     @Override protected void onResume(){super.onResume();visible=true;for(BotAvatarView face:avatars)face.running(true);if(waveform!=null)waveform.running(true);if(isCall()){main.removeCallbacks(callClock);main.post(callClock);}
-        if(!preview){VoiceService.addListener(voiceListener);if(SIGN_OUT_ACTIVE.get()){screen="signout_confirm";render();main.removeCallbacks(signOutObserver);main.post(signOutObserver);return;}if(awaitingMicrophonePermission&&!pendingTalkCurrent())clearPendingTalk();rosterRetryUsed=false;if(VoiceService.snapshot().active||isCall())renderVoice();else if(screen.equals("done")||screen.equals("dropped")||screen.equals("error"))render();else if(!awaitingMicrophonePermission&&!pendingTalkGranted)loadAccount();}
+        if(!preview){VoiceService.addListener(voiceListener);EventStream.add(this,live);if(SIGN_OUT_ACTIVE.get()){screen="signout_confirm";render();main.removeCallbacks(signOutObserver);main.post(signOutObserver);return;}if(awaitingMicrophonePermission&&!pendingTalkCurrent())clearPendingTalk();rosterRetryUsed=false;
+            // A notification tap is used now or not at all: it never switches Bots on some later resume.
+            boolean loads=!(VoiceService.snapshot().active||isCall())&&!(screen.equals("done")||screen.equals("dropped")||screen.equals("error"))&&!awaitingMicrophonePermission&&!pendingTalkGranted;if(!loads)pendingOpenBot="";
+            if(VoiceService.snapshot().active||isCall())renderVoice();else if(screen.equals("done")||screen.equals("dropped")||screen.equals("error"))render();else if(loads)loadAccount();}
     }
     @Override protected void onPause(){cancelRosterRetry();if(pendingTalkGranted)clearPendingTalk();visible=false;epoch++;historyRequest++;historyLoading=false;polling=false;main.removeCallbacks(pollTick);for(BotAvatarView face:avatars)face.running(false);if(waveform!=null)waveform.running(false);main.removeCallbacks(callClock);
-        if(!preview)VoiceService.removeListener(voiceListener);super.onPause();}
+        if(!preview){VoiceService.removeListener(voiceListener);EventStream.remove(live);}openChat="";main.removeCallbacks(liveChat);main.removeCallbacks(liveRender);super.onPause();}
     @Override protected void onStop(){if(!awaitingMicrophonePermission)clearPendingTalk();super.onStop();}
     @Override protected void onDestroy(){if(android.os.Build.VERSION.SDK_INT>=33&&modernBack!=null)getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(modernBack);previewEpoch++;worker.shutdownNow();preferencesWorker.shutdownNow();rosterWorker.shutdownNow();main.removeCallbacksAndMessages(null);super.onDestroy();}
     // API30–32 fallback; API33+ uses the platform gesture dispatcher above.
@@ -117,6 +130,7 @@ public final class MainActivity extends Activity {
         if(!preview&&SIGN_OUT_ACTIVE.get())return;
         navigation++;clearPendingTalk();
         if(screen.equals("signout_confirm")){screen="settings";render();return;}
+        if(screen.equals("alerts_setup")){finishAlertsSetup(false);return;}
         if(screen.equals("settings")){leaveSettings();return;}
         if(screen.equals("history_detail")){screen="history";render();return;}
         if(screen.equals("bot_actions")){closeBotActions();return;}
@@ -146,6 +160,8 @@ public final class MainActivity extends Activity {
     private void render(){
         // Re-rendering the same screen (history refresh, sync status) keeps the reader's place.
         final int keepY=currentScroll!=null&&screen.equals(renderedScreen)&&!isCall()?currentScroll.getScrollY():0;renderedScreen=screen;bottomAction=false;
+        String chat=visible&&!preview&&screen.equals("ready")?selectedMetadata.optString("id",""):"";
+        if(!chat.equals(openChat)){openChat=chat;if(!chat.isEmpty())ReplyAlertService.dismiss(this,chat);}
         for(BotAvatarView face:avatars)face.running(false);avatars.clear();orb=null;if(waveform!=null)waveform.running(false);waveform=null;transcriptBody=null;callStatus=null;main.removeCallbacks(callClock);
         root=new FrameLayout(this);root.setBackgroundColor(Color.BLACK);setContentView(root);
         TextView top=text(preview&&!previewMedia?"UI preview":"",10,SECONDARY);top.setLetterSpacing(.08f);
@@ -182,6 +198,7 @@ public final class MainActivity extends Activity {
             case "attention":task();break;
             case "account_error":message("Needs attention",safeError,"Try again",()->recover());break;
             case "settings":settings();break;
+            case "alerts_setup":alertsSetup();break;
             case "signout_confirm":confirmSignOut();break;
             case "approval":approval();break;
             case "task":task();break;
@@ -627,7 +644,9 @@ public final class MainActivity extends Activity {
             main.post(()->{messageSending=false;
                 if(!problem.isEmpty()){safeError=problem;if(screen.equals("compose_review"))render();return;}
                 draftMessage="";safeError="";if(sent!=null&&"sent".equals(sent.optString("state")))root.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM);
-                screen="ready";scrollToEnd=true;refreshMessages(botId);watchForReply(text,sent==null?System.currentTimeMillis():sent.optLong("created",System.currentTimeMillis()));render();});
+                screen="ready";scrollToEnd=true;refreshMessages(botId);watchForReply(text,sent==null?System.currentTimeMillis():sent.optLong("created",System.currentTimeMillis()));render();
+                // Only a message that went out (or may have) can be answered.
+                if(sent!=null&&("sent".equals(sent.optString("state"))||"unknown".equals(sent.optString("state"))))alertReply(botId,sent.optString("id"));});
         });
     }
     /** The watch's own messages that the chat doesn't show yet, with their delivery state. */
@@ -653,7 +672,8 @@ public final class MainActivity extends Activity {
     private void retryMessage(String id){
         if(preview||messageSending)return;messageSending=true;render();final String botId=selectedMetadata.optString("id","");
         JSONObject job=new JSONObject();for(int i=0;i<botMessages.length();i++){JSONObject j=botMessages.optJSONObject(i);if(j!=null&&id.equals(j.optString("id")))job=j;}final JSONObject retried=job;
-        worker.execute(()->{try{account.retryMessage(id);}catch(Exception ignored){}main.post(()->{messageSending=false;refreshMessages(botId);watchForReply(retried.optString("text"),retried.optLong("created",System.currentTimeMillis()));});});
+        worker.execute(()->{JSONObject[] after={null};try{after[0]=account.retryMessage(id);}catch(Exception ignored){}main.post(()->{messageSending=false;refreshMessages(botId);watchForReply(retried.optString("text"),retried.optLong("created",System.currentTimeMillis()));
+            if(after[0]!=null&&("sent".equals(after[0].optString("state"))||"unknown".equals(after[0].optString("state"))))alertReply(botId,id);});});
     }
     private void refreshMessages(String botId){
         if(preview||botId.isEmpty())return;
@@ -667,10 +687,11 @@ public final class MainActivity extends Activity {
     private void watchForReply(String text,long created){
         if(replyWatch!=null)main.removeCallbacks(replyWatch);replyChecks=0;replyWatchText=text;replyWatchSince=created;final String botId=selectedMetadata.optString("id","");
         replyWatch=new Runnable(){public void run(){
-            if(!visible||!screen.equals("ready")||!botId.equals(selectedMetadata.optString("id"))||replyChecks>=12)return;
-            if(replyArrived()){markRead(botId,true);scrollToEnd=true;render();return;}
+            if(!visible||!screen.equals("ready")||!botId.equals(selectedMetadata.optString("id"))||replyChecks>=12||replyWatchText.isEmpty())return;
+            if(replyArrived()){replyWatchText="";markRead(botId,true);scrollToEnd=true;render();return;}
             replyChecks++;loadBotChat();refreshMessages(botId);
-            long[] steps={3000,4000,5000,8000,10000,15000,15000,20000,25000,30000,30000,30000};main.postDelayed(this,steps[Math.min(replyChecks,steps.length-1)]);
+            // With live updates the chat refreshes as the reply lands; polling is only a slow safety net.
+            long[] steps={3000,4000,5000,8000,10000,15000,15000,20000,25000,30000,30000,30000};main.postDelayed(this,EventStream.isOpen()?30000:steps[Math.min(replyChecks,steps.length-1)]);
         }};
         main.postDelayed(replyWatch,3000);
     }
@@ -680,6 +701,56 @@ public final class MainActivity extends Activity {
             if("assistant".equals(e.optString("role")))reply=true;
             else if("user".equals(e.optString("role"))&&replyWatchText.equals(e.optString("text").trim())&&e.optLong("atMs")>=replyWatchSince-120_000L)return reply;}
         return false;}
+    /** A live refresh showed the reply: end the watch now instead of at its next poll. */
+    private void checkReply(){
+        if(replyWatch==null||replyWatchText.isEmpty()||!screen.equals("ready")||!replyArrived())return;
+        main.removeCallbacks(replyWatch);replyWatchText="";markRead(selectedMetadata.optString("id",""),true);scrollToEnd=true;render();
+    }
+    /** After a send: the watch buzzes when the reply lands if you've left its chat by then. Asks once for notifications. */
+    private void alertReply(String botId,String messageId){
+        if(preview||botId.isEmpty()||messageId.isEmpty()||!ReplyAlertService.enabled(this))return;
+        if(android.os.Build.VERSION.SDK_INT>=33&&checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED){
+            if(notificationsAsked)return;notificationsAsked=true;alertBot=botId;alertName=botName;alertMessage=messageId;
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},NOTIFICATIONS);return;}
+        ReplyAlertService.watch(this,botsAccountBinding,botId,botName,messageId);
+    }
+    /** Live roster and chat events while the app is open. They only update what's shown; reads stay the source. */
+    private final EventStream.Listener live=new EventStream.Listener(){
+        public void bot(String identity,JSONObject row){if(liveCurrent(identity))liveBot(row);}
+        // Your message or the Bot's reply; tool steps and other entries don't change the chat.
+        public void entry(String identity,String botId,JSONObject entry){if(liveCurrent(identity)&&(entry.optBoolean("reply")||entry.optBoolean("user")))liveEntry(botId);}
+        public void connected(String identity,boolean again){
+            // Events from the gap are gone: read once the usual way.
+            if(!again||!liveCurrent(identity))return;if(screen.equals("ready"))liveEntry(selectedMetadata.optString("id",""));else if(screen.equals("bots"))refreshBots(true);}
+    };
+    private boolean liveCurrent(String identity){return visible&&!preview&&!identity.isEmpty()&&identity.equals(botsAccountBinding)&&!VoiceService.snapshot().active&&!isCall();}
+    private static final String[] LIVE_KEYS={"name","title","avatarShape","avatarColor","hasUnread","unreadCount","isRunning","isRunningTurn","isComposingMessage","lastMessagePreview","lastActivityAt","lastViewedAt"};
+    private void liveBot(JSONObject row){
+        String id=row.optString("id");boolean found=false,changed=false;
+        try{for(int i=0;i<bots.length();i++){JSONObject b=bots.optJSONObject(i);if(b==null||!id.equals(b.optString("id")))continue;found=true;changed|=merge(b,row);}
+            if(id.equals(selectedMetadata.optString("id")))merge(selectedMetadata,row);}catch(Exception ignored){}
+        // A Bot this watch hasn't listed yet: read the roster the usual way.
+        if(!found){if(screen.equals("bots"))refreshBots(false);return;}
+        // Its chat is on screen, so what it just wrote has been seen.
+        long now=android.os.SystemClock.elapsedRealtime();
+        if(id.equals(openChat)&&(row.optLong("unreadCount")>0||row.optBoolean("hasUnread"))&&now-liveReadAt>2000){liveReadAt=now;markRead(id,true);}
+        if(changed&&screen.equals("bots")){main.removeCallbacks(liveRender);main.postDelayed(liveRender,300);}
+    }
+    /** Copies a live row's fields; returns whether a Bot row would look different. */
+    private boolean merge(JSONObject into,JSONObject row)throws Exception {
+        String before=rowLook(into);
+        for(String key:LIVE_KEYS){Object value=row.opt(key);if(value==null)into.remove(key);else into.put(key,value);}
+        return !before.equals(rowLook(into));
+    }
+    private String rowLook(JSONObject b){return b.optString("name")+"|"+b.optString("title")+"|"+b.optString("avatarShape")+"|"+b.optString("avatarColor")+"|"+b.optLong("unreadCount")+"|"+b.optBoolean("hasUnread")+"|"+working(b)+"|"+b.optString("lastMessagePreview");}
+    private final Runnable liveRender=()->{if(visible&&screen.equals("bots"))renderBotListPreservingScroll();};
+    /** A new entry in the open chat: refresh it once the current read (if any) finishes. */
+    private void liveEntry(String botId){
+        if(!screen.equals("ready")||botId.isEmpty()||!botId.equals(selectedMetadata.optString("id")))return;
+        main.removeCallbacks(liveChat);main.postDelayed(liveChat,250);
+    }
+    private final Runnable liveChat=new Runnable(){public void run(){
+        if(!visible||!screen.equals("ready"))return;if(historyLoading){main.postDelayed(this,500);return;}loadBotChat();}};
     /** Marks the Bot's chat read on open (and when a reply arrives), as the official apps do. */
     private void markRead(String botId,boolean force){
         if(preview||botId.isEmpty())return;
@@ -881,7 +952,7 @@ public final class MainActivity extends Activity {
                     else merged=fetched;
                     historyEntries=merged;historyBinding=accepted;historyHasMore=page.optBoolean("hasMore");historyBefore=page.isNull("nextBeforeSeq")?null:page.getLong("nextBeforeSeq");
                     historyPages=older?historyPages+1:1;historyLoading=false;historyStale=page.optBoolean("stale");pendingHistory=Math.max(0,page.optInt("pendingCount"));
-                    historyError="offline".equals(page.optString("syncStatus"))?"Couldn’t refresh history.":"partial".equals(page.optString("syncStatus"))?"Some voice messages couldn’t load.":"";render();
+                    historyError="offline".equals(page.optString("syncStatus"))?"Couldn’t refresh history.":"partial".equals(page.optString("syncStatus"))?"Some voice messages couldn’t load.":"";render();if(!older)checkReply();
                     if(historyError.isEmpty()&&takeOwnHistoryRefresh(VoiceService.snapshot().active,historyStaging()))loadBotChat();
                 }catch(Exception ignored){historyFailure();}});
         }catch(Exception ignored){main.post(()->{if(historyCurrent(request,mine,route,id,binding))historyFailure();else if(request==historyRequest)historyLoading=false;});}});
@@ -902,9 +973,39 @@ public final class MainActivity extends Activity {
     }
     private void recent(){title("Chats");if(preview){label("Demo chats",12,SECONDARY);action("Voice chat ended · 1:42",()->setPreviewScreen("done"));action("Async tasks · Subagent",()->{screen="task";render();});}
         else label("Chat history isn’t synced to this watch.",14,SECONDARY);action("Back",()->goHome());}
+    /** Part of signing in: reply alerts are offered once per new sign-in, then the Bot list follows. */
+    private void alertsSetup(){
+        title("Reply alerts");label("Buzz when a Bot answers your message, even after you leave the app.",12,SECONDARY);
+        Button on=action("Turn on",()->finishAlertsSetup(true));on.setTextColor(Color.BLACK);on.setBackground(shape(WHITE,24));
+        action("Not now",()->finishAlertsSetup(false));
+        label("Change this any time in Settings.",12,SECONDARY);
+    }
+    private void finishAlertsSetup(boolean on){
+        if(preview){previewAlerts=on;setPreviewScreen("bots");return;}
+        setAlertsSetupPending(false);ReplyAlertService.setEnabled(this,on);
+        // The permission answer comes back through onResume, whose account load continues to the Bot list.
+        if(on&&!notificationsAllowed()){notificationsAsked=true;requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},NOTIFICATIONS);return;}
+        loadAccount();
+    }
+    private boolean alertsSetupPending(){if(preview)return false;try{return getSharedPreferences("grokwear_ui",MODE_PRIVATE).getBoolean("alerts_setup_pending",false);}catch(RuntimeException unavailable){return false;}}
+    private void setAlertsSetupPending(boolean pending){try{getSharedPreferences("grokwear_ui",MODE_PRIVATE).edit().putBoolean("alerts_setup_pending",pending).apply();}catch(RuntimeException ignored){}}
+    /** Reply alerts are on when the switch is and the watch lets Grok Wear show notifications. */
+    private boolean replyAlerts(){if(preview)return previewAlerts;return ReplyAlertService.enabled(this)&&notificationsAllowed();}
+    private boolean notificationsAllowed(){return android.os.Build.VERSION.SDK_INT<33||checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)==PackageManager.PERMISSION_GRANTED;}
+    private void toggleReplyAlerts(){
+        alertsBlocked=false;
+        if(preview){previewAlerts=!previewAlerts;render();return;}
+        if(replyAlerts()){ReplyAlertService.setEnabled(this,false);ReplyAlertService.stopAll(this);render();return;} // Waits in progress end too.
+        ReplyAlertService.setEnabled(this,true);
+        if(!notificationsAllowed()){notificationsAsked=true;requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},NOTIFICATIONS);return;}
+        render();
+    }
     private void openSettings(){settingsReturnScreen=screen.equals("ready")||screen.equals("done")?"ready":"bots";screen="settings";render();}
     private void leaveSettings(){screen=settingsReturnScreen.equals("ready")?"ready":"bots";render();}
-    private void settings(){title("Settings");label("Unofficial Grok client",12,SECONDARY);label("Not affiliated with or endorsed by xAI or Cursor.",12,SECONDARY);gap(4);label("5-minute calls · tasks go to your Bot",12,SECONDARY);label("Calls share this Bot’s main chat.",12,SECONDARY);
+    private void settings(){title("Settings");boolean alerts=replyAlerts();
+        Button toggle=action("Reply alerts: "+(alerts?"On":"Off"),()->toggleReplyAlerts());toggle.setContentDescription("Reply alerts, "+(alerts?"on":"off")+". Double-tap to turn "+(alerts?"off":"on"));
+        label(alertsBlocked?"Allow notifications for Grok Wear in your watch’s settings, then try again.":"Buzz when a Bot answers your message.",12,SECONDARY);gap(8);
+        label("Unofficial Grok client",12,SECONDARY);label("Not affiliated with or endorsed by xAI or Cursor.",12,SECONDARY);gap(4);label("5-minute calls · tasks go to your Bot",12,SECONDARY);label("Calls share this Bot’s main chat.",12,SECONDARY);
         action("Back",()->leaveSettings());gap(24);
         action("Sign out…",()->{screen="signout_confirm";render();});
     }
@@ -920,10 +1021,11 @@ public final class MainActivity extends Activity {
         signOutFailed=false;epoch++;polling=false;main.removeCallbacks(pollTick);clearBotCache();screen="signout_confirm";render();
         final BotAccount signingOutAccount=account;
         // Only local encrypted writes: do not queue behind HTTP, or cancel on Activity rotation.
+        ReplyAlertService.forget(getApplicationContext());
         new Thread(()->{try{VoiceService.stop(getApplicationContext());signingOutAccount.unlink();}catch(Exception failure){signOutFailed=true;}finally{SIGN_OUT_ACTIVE.set(false);main.post(()->{if(visible&&!isDestroyed())finishSignOut();});}},"grok-local-signout").start();
     }
     private void finishSignOut(){
-        main.removeCallbacks(signOutObserver);epoch++;clearBotCache();
+        main.removeCallbacks(signOutObserver);epoch++;clearBotCache();EventStream.restart();
         if(signOutFailed){safeError="Sign-out couldn’t finish. Check your account state before trying again.";screen="account_error";render();}
         else{screen="welcome";render();loadAccount();}
     }
@@ -953,6 +1055,12 @@ public final class MainActivity extends Activity {
         }else main.postDelayed(finishGrantedTalk,100);
     }
     @Override public void onRequestPermissionsResult(int request,String[] permissions,int[] results){super.onRequestPermissionsResult(request,permissions,results);
+        if(request==NOTIFICATIONS&&!preview){
+            boolean allowed=false;for(int i=0;i<Math.min(permissions.length,results.length);i++)if(Manifest.permission.POST_NOTIFICATIONS.equals(permissions[i])&&results[i]==PackageManager.PERMISSION_GRANTED)allowed=true;
+            // No means no alerts: the Settings switch shows Off until it's turned on again.
+            if(!allowed){ReplyAlertService.setEnabled(this,false);alertsBlocked=screen.equals("settings");}
+            else if(!alertBot.isEmpty())ReplyAlertService.watch(this,botsAccountBinding,alertBot,alertName,alertMessage);
+            alertBot="";alertName="";alertMessage="";if(screen.equals("settings"))render();return;}
         if(request!=17||preview)return;
         boolean granted=false;for(int i=0;i<Math.min(permissions.length,results.length);i++)if(Manifest.permission.RECORD_AUDIO.equals(permissions[i])&&results[i]==PackageManager.PERMISSION_GRANTED)granted=true;
         if(!awaitingMicrophonePermission||!pendingTalkCurrent()){clearPendingTalk();return;}
@@ -997,6 +1105,7 @@ public final class MainActivity extends Activity {
         if(status.equals("ready")){
             String binding=state.optString("account_key","")+"/"+state.optString("auth_generation","");
             if(!binding.equals(botsAccountBinding)){clearBotCache();botsAccountBinding=binding;}
+            EventStream.expect(binding);if(visible)EventStream.add(this,live); // A new sign-in gets a stream of its own.
             task(()->{
                 JSONObject bot;try{bot=account.selectedBot();}catch(Exception interruptedBinding){account.pollLogin();bot=account.selectedBot();}
                 // Both reads are local. Never wait for roster HTTP before restoring saved rows.
@@ -1010,6 +1119,12 @@ public final class MainActivity extends Activity {
                 }
                 JSONObject bot=value.getJSONObject("bot");acceptAccountBot(bot);
                 account.recoverPendingInBackground(binding,bot.optString("id"));
+                // A new sign-in asks about reply alerts once, before the Bot list.
+                if(alertsSetupPending()&&!VoiceService.snapshot().active){screen="alerts_setup";render();return;}
+                // From a reply notification: that Bot's chat, switching Bots if needed.
+                String open=pendingOpenBot;pendingOpenBot="";
+                if(!open.isEmpty()&&!VoiceService.snapshot().active&&!isCall()){
+                    if(open.equals(bot.optString("id"))){screen="ready";render();loadBotChat();}else{screen="bots";render();chooseBot(open);}return;}
                 if(bot.optString("id","").isEmpty()||screen.equals("bots"))openBotPicker();
                 else if(isHistory()){if(screen.equals("history_detail"))render();else loadHistory(false);}else if(screen.equals("settings")||screen.equals("signout_confirm")||screen.equals("reader")||screen.startsWith("compose_"))render();else if(screen.equals("ready")){render();loadBotChat();}else openBotPicker();
             });
@@ -1091,5 +1206,5 @@ public final class MainActivity extends Activity {
     private void beginLogin(){if(preview){setPreviewScreen("qr");return;}clearBotCache();epoch++;polling=false;main.removeCallbacks(pollTick);task(()->account.beginLogin(),value->{loginAttempt=value.optString("login_attempt","");screen="qr";render();schedulePoll();});}
     private void cancelLogin(){if(preview){setPreviewScreen("welcome");return;}final String attempt=loginAttempt;if(attempt.isEmpty())return;epoch++;polling=false;main.removeCallbacks(pollTick);task(()->{account.cancelLogin(attempt);return new JSONObject();},value->{screen="welcome";render();});}
     private void schedulePoll(){if(!visible||preview||!screen.equals("qr"))return;polling=true;main.removeCallbacks(pollTick);main.postDelayed(pollTick,3000);}
-    private void pollLogin(){if(preview||!visible||!polling||!screen.equals("qr"))return;task(()->account.pollLogin(),value->{if("waiting".equals(value.optString("status")))schedulePoll();else{polling=false;loadAccount();}});}
+    private void pollLogin(){if(preview||!visible||!polling||!screen.equals("qr"))return;task(()->account.pollLogin(),value->{if("waiting".equals(value.optString("status")))schedulePoll();else{polling=false;if("ready".equals(value.optString("status")))setAlertsSetupPending(true);loadAccount();}});}
 }

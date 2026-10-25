@@ -65,6 +65,7 @@ final class BotAccount {
     JSONObject confirmMessage(String id) throws Exception {bound();return core.poll(id);}
     JSONObject retryMessage(String id) throws Exception {bound();return core.retry(id);}
     JSONArray messages(String botId) throws Exception {bound();return core.messages(botId);}
+    JSONObject replyAfter(String messageId) throws Exception {bound();JSONObject reply=core.replyAfter(messageId);bound();return reply;}
     void markRead(String botId) throws Exception {bound();core.markRead(botId);}
     /** Disk-only account-scoped roster; never renews credentials or contacts Grok. */
     JSONObject cachedRoster() throws Exception {
@@ -276,6 +277,50 @@ final class BotAccount {
         }catch(GrokCore.Failure safe){throw safe;}
         catch(Exception ignored){throw new GrokCore.Failure(INTERRUPTED,true);}
         finally{java.util.Arrays.fill(bytes,(byte)0);}
+    }
+    /** Receives the live event stream: the call once made, the account once open, then each frame's data until it returns false. */
+    static final String SIGNED_OUT="signed_out";
+    interface EventSink {
+        void opened(okhttp3.Call call);
+        void connected(String identity);
+        boolean frame(String data) throws Exception;
+    }
+    // The stream stays open; the gateway sends a keep-alive about every 15 s, so a longer silence is a dead link.
+    // Each attempt dials fresh: a pooled connection that died with the last network would hang until that timeout.
+    private static final OkHttpClient EVENTS=HTTP.newBuilder().readTimeout(45,TimeUnit.SECONDS).callTimeout(0,TimeUnit.SECONDS)
+        .connectionPool(new okhttp3.ConnectionPool(0,1,TimeUnit.SECONDS)).build();
+    /**
+     * Reads the gateway's live event stream with the same credentials as its /api calls, as Grok Bot Android
+     * 1.17.0 does, until it ends, the sink stops or the call is cancelled. Blocking.
+     */
+    void events(String channels,EventSink sink) throws Exception {
+        JSONObject state=auth.state();
+        // Only a missing sign-in stops the stream. "connecting" (a config fetch in flight, or one a killed process
+        // left marked) is still signed in: currentConfig() below fetches the config or fails and the stream retries.
+        if(!state.optBoolean("linked"))throw new GrokCore.Failure("Not signed in.",true,SIGNED_OUT);
+        String identity=state.optString("account_key","")+"/"+state.optString("auth_generation","");
+        JSONObject config=GrokCore.validateConfig(auth.currentConfig());
+        Request.Builder request=new Request.Builder().get()
+            .url(config.getString("gatewayUrl")+"/events?channels="+java.net.URLEncoder.encode(channels,"UTF-8")+"&surface=mobile")
+            .header("Accept","text/event-stream").header("Accept-Encoding","identity").header("Authorization","Bearer "+config.getString("gatewayToken"));
+        JSONObject headers=config.getJSONObject("headers");Iterator<String> keys=headers.keys();
+        while(keys.hasNext()){String key=keys.next();request.header(key,headers.getString(key));}
+        okhttp3.Call call=EVENTS.newCall(request.build());sink.opened(call);
+        try(Response response=call.execute()){
+            if(response.code()!=200||response.body()==null){
+                // Like the gateway's /api calls: a moved gateway gets a fresh config on the next attempt.
+                if(response.code()==401||response.code()==404||response.code()==417)auth.forgetConfig(config.getString("gatewayToken"));
+                throw new GrokCore.Failure("Live updates refused (HTTP "+response.code()+").",true,"",response.code());
+            }
+            sink.connected(identity);
+            okio.BufferedSource source=response.body().source();BotEvents.Frames frames=new BotEvents.Frames();
+            while(true){
+                String line;
+                // A line longer than any frame is a broken stream; end it and let the caller reconnect.
+                try{line=source.readUtf8LineStrict(BotEvents.MAX_FRAME);}catch(java.io.EOFException ended){return;}
+                String data=frames.line(line);if(data!=null&&!sink.frame(data))return;
+            }
+        }
     }
     private static JSONObject gateway(JSONObject config,String method,JSONObject body) throws Exception {
         if(!java.util.Arrays.asList("listAgents","setVoiceCallPresence","sendPrompt","getAgentTranscriptTail","setAgentUnread").contains(method))throw new GrokCore.Failure("This Grok operation is not enabled.",true);
