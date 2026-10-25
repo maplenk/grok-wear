@@ -32,6 +32,9 @@ final class GrokAuthCore {
     // Only live, nonrotating bootstrap requests may be joined. Rotation uncertainty
     // remains durable even when there is no corresponding request in this process.
     private static final Map<String,BootstrapFlight> BOOTSTRAPS=new HashMap<>();
+    // Token refreshes in flight in this process. Other callers wait for one instead of failing; a refresh
+    // without a live owner (the process died mid-request) still blocks, since its token may be spent.
+    private static final Map<String,BootstrapFlight> REFRESHES=new HashMap<>();
     private static final class BootstrapFlight {
         final Thread owner=Thread.currentThread();
         boolean finished,succeeded;
@@ -179,14 +182,19 @@ final class GrokAuthCore {
     }
 
     private void renewIfDue() throws Exception {
-        JSONObject request;String epoch,id,subject;long team;
+        JSONObject request;String epoch,id,subject;long team;BootstrapFlight flight;
         synchronized(LOCK) {
             JSONObject root=pendingRoot();JSONObject tokens=needTokens(root);
             if(tokens.getLong("expires_at_ms")-clock.now()>REFRESH_LEAD_MS)return;
             request=new JSONObject().put("refreshToken",tokens.getString("refresh"));
             subject=tokens.getString("subject");team=tokens.optLong("team",0);
             epoch=root.getString("epoch");id=mark(root,REFRESH);
+            flight=new BootstrapFlight();REFRESHES.put(id,flight);
         }
+        try{renew(request,epoch,id,subject,team);flight.succeeded=true;}
+        finally{synchronized(LOCK){flight.finished=true;REFRESHES.remove(id);LOCK.notifyAll();}}
+    }
+    private void renew(JSONObject request,String epoch,String id,String subject,long team) throws Exception {
         Reply response=invoke(REFRESH,request);
         synchronized(LOCK) {
             JSONObject root=active(epoch,id);
@@ -244,7 +252,9 @@ final class GrokAuthCore {
     private JSONObject stateOf(JSONObject root) throws Exception {
         JSONObject tokens=root.optJSONObject("tokens"),login=root.optJSONObject("login"),operation=root.optJSONObject("operation");
         String kind=operation==null?"":operation.optString("kind");
-        String status=REFRESH.equals(kind)?"renewal_uncertain":POLL.equals(kind)?"login_uncertain":BOOTSTRAP.equals(kind)?"connecting":
+        // A renewal another thread of this process is running is routine, not uncertain.
+        boolean renewing=REFRESH.equals(kind)&&REFRESHES.containsKey(operation.optString("id"));
+        String status=renewing?(tokens!=null?"ready":"unlinked"):REFRESH.equals(kind)?"renewal_uncertain":POLL.equals(kind)?"login_uncertain":BOOTSTRAP.equals(kind)?"connecting":
                 login!=null&&!expired(login)?"waiting":tokens!=null?"ready":"unlinked";
         JSONObject view=new JSONObject().put("status",status).put("linked",tokens!=null)
                 .put("refresh_pending",REFRESH.equals(kind)).put("waiting",status.equals("waiting"));
@@ -274,6 +284,18 @@ final class GrokAuthCore {
     private JSONObject pendingRoot() throws Exception {
         JSONObject root=store.read(),op=root.optJSONObject("operation");
         if(!root.has("operation"))return root;
+        BootstrapFlight renewal=op==null||!REFRESH.equals(op.optString("kind"))?null:REFRESHES.get(op.optString("id"));
+        if(renewal!=null&&renewal.owner!=Thread.currentThread()) {
+            // Another caller in this process is renewing: wait for its result rather than refuse.
+            long deadline=System.nanoTime()+30_000_000_000L;
+            while(!renewal.finished) {
+                long remaining=deadline-System.nanoTime();
+                if(remaining<=0)throw failure("Grok is still renewing this sign-in. Try again shortly. No message was sent.");
+                try {LOCK.wait(Math.max(1,remaining/1_000_000L));}
+                catch(InterruptedException interrupted) {Thread.currentThread().interrupt();throw failure("Grok is still renewing this sign-in. Try again shortly. No message was sent.");}
+            }
+            return pendingRoot(); // Renewed, or the marker stays and the next read refuses as before.
+        }
         if(op==null||!BOOTSTRAP.equals(op.optString("kind")))
             throw failure("Grok sign-in has an unfinished request. Relink before continuing; it will not be retried.");
         BootstrapFlight flight=BOOTSTRAPS.get(op.optString("id"));

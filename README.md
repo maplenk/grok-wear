@@ -29,6 +29,8 @@ Talk to any of your Grok Bots from your Wear OS watch. Hands-free, real-time voi
 - **Follow-up in chat.** When you hang up, the Bot gets the same end-of-call note the official apps send, plus anything you asked for on the call. It can then finish the job in its chat on your phone or desktop.
 - **Tasks during calls.** Like the official apps, the Bot can look things up and hand tasks to its main agent while you talk ("check my inbox"); results follow in its chat. Approvals still happen on your phone or desktop.
 - **Text messages.** Tap Message on a Bot's page, then dictate, type or draw. You review the text before it goes, and the chat shows Sending…, then Sent, then the Bot's reply.
+- **Live updates.** While the app is open, new messages, unread counts and "Working…" appear as they happen, from the same live feed the official apps use.
+- **Reply alerts.** After sending a message you can leave the app: the watch buzzes when the Bot replies, and tapping the alert opens that chat. You choose whether to turn them on right after signing in, and can switch them on or off any time in Settings.
 
 ## Status and limits
 
@@ -36,6 +38,7 @@ This is an experimental client. It talks to Grok Bot's **private, undocumented c
 
 - Calls end after five minutes. A dropped connection is redialled automatically for up to about two minutes.
 - The watch needs its own internet connection (Wi-Fi or LTE).
+- Reply alerts cover messages sent from the watch, for up to ten minutes after sending. Grok Bot's own push notifications go to its phone app only; Wear OS can mirror those to the watch, but tapping them opens the phone.
 
 ## Build from source
 

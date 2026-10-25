@@ -255,6 +255,42 @@ public class GrokAuthCoreTest {
             }else {assertNull(leaderError.get());assertNull(followerError.get());assertTrue(f.memory.value.has("config"));}
         }
     }
+    @Test public void simultaneousRenewalIsSharedAndNeverReplayed()throws Exception {
+        for(boolean failLeader:new boolean[]{false,true}) {
+            Fixture f=new Fixture();f.signIn(NOW+1000);
+            java.util.concurrent.CountDownLatch entered=new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.CountDownLatch release=new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.atomic.AtomicInteger refreshes=new java.util.concurrent.atomic.AtomicInteger();
+            GrokAuthCore leader=new GrokAuthCore(f.memory,(op,input)->{
+                if(!op.equals(GrokAuthCore.REFRESH))throw new AssertionError(op);
+                refreshes.incrementAndGet();entered.countDown();assertTrue(release.await(5,java.util.concurrent.TimeUnit.SECONDS));
+                if(failLeader)throw new java.io.IOException();return f.refresh;
+            },()->f.now);
+            GrokAuthCore follower=new GrokAuthCore(f.memory,(op,input)->{throw new AssertionError("Must not replay");},()->f.now);
+            java.util.concurrent.atomic.AtomicReference<Throwable> leaderError=new java.util.concurrent.atomic.AtomicReference<>();
+            java.util.concurrent.atomic.AtomicReference<Throwable> followerError=new java.util.concurrent.atomic.AtomicReference<>();
+            Thread first=new Thread(()->{try{leader.backendContext();}catch(Throwable e){leaderError.set(e);}});
+            Thread second=new Thread(()->{try{follower.backendContext();}catch(Throwable e){followerError.set(e);}});
+            first.start();assertTrue(entered.await(5,java.util.concurrent.TimeUnit.SECONDS));
+            // A renewal this process is running is routine: the app keeps showing the account, not an error.
+            assertEquals("ready",f.core.state().getString("status"));assertTrue(f.core.state().getBoolean("refresh_pending"));
+            second.start();
+            try {
+                long deadline=System.nanoTime()+5_000_000_000L;
+                while(second.getState()!=Thread.State.TIMED_WAITING&&System.nanoTime()<deadline)Thread.yield();
+                assertEquals(Thread.State.TIMED_WAITING,second.getState());
+            }finally{release.countDown();}
+            first.join(5000);second.join(5000);assertFalse(first.isAlive());assertFalse(second.isAlive());
+            assertEquals(1,refreshes.get());
+            if(failLeader) {
+                assertNotNull(leaderError.get());assertTrue(followerError.get() instanceof GrokCore.Failure);
+                assertEquals("an uncertain renewal still blocks","renewal_uncertain",f.core.state().getString("status"));
+            }else {
+                assertNull(leaderError.get());assertNull(followerError.get());
+                assertEquals("rotated-secret",f.memory.value.getJSONObject("tokens").getString("refresh"));assertEquals("ready",f.core.state().getString("status"));
+            }
+        }
+    }
     @Test public void bootstrapUsesAccessTokenAndMapsNetworkRouting()throws Exception {
         Fixture f=new Fixture();f.signIn(NOW+3_600_000);JSONObject config=f.core.currentConfig();
         assertEquals("synthetic-route",config.getJSONObject("headers").getString("x-anyrun-network-token"));

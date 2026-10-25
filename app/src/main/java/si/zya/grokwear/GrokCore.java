@@ -143,55 +143,10 @@ final class GrokCore {
         JSONArray safe = new JSONArray();
         int photoBudget = 262144;
         for (int i = 0; i < Math.min(200, bots.length()); i++) {
-            JSONObject b = bots.optJSONObject(i);
-            if (b == null || b.optBoolean("isGroup", false)) continue;
-            JSONArray members=b.optJSONArray("memberIds");if(members==null)members=b.optJSONArray("memberAgentIds");
-            if(!b.has("isGroup")&&members!=null&&members.length()>0)continue;
-            String id = text(b, "id"); if (id.isEmpty()) id = text(b, "agentId");
-            if (!id.isEmpty() && id.length() <= 512 && text(b,"name").length()<=512) {
-                JSONObject candidate=new JSONObject().put("id", id)
-                    .put("name", text(b, "name").isEmpty() ? "Unnamed Bot" : text(b, "name"));
-                // Optional, bounded design identifiers from the verified listAgents schema.
-                // Never load account-supplied paths, fonts or arbitrary color strings.
-                String avatarShape=text(b,"avatarShape"),avatarColor=text(b,"avatarColor");
-                if(AvatarPolicy.validShape(avatarShape))candidate.put("avatarShape",avatarShape);
-                if(AvatarPolicy.validColor(avatarColor))candidate.put("avatarColor",avatarColor);
-                // Native entity metadata is optional: absence never implies read/idle status.
-                for(String key:new String[]{"hasUnread","isRunning","isRunningTurn","isComposingMessage"})
-                    if(b.opt(key) instanceof Boolean)candidate.put(key,b.opt(key));
-                for(String key:new String[]{"unreadCount","lastActivityAt","lastViewedAt"}) {
-                    Object value=b.opt(key);
-                    if(value instanceof Number){double n=((Number)value).doubleValue();
-                        if(Double.isFinite(n)&&n>=0&&n<=9007199254740991d&&n==Math.floor(n))candidate.put(key,((Number)value).longValue());}
-                }
-                String preview=text(b,"lastMessagePreview");
-                if(!preview.isEmpty()&&preview.length()<=4096)
-                    candidate.put("lastMessagePreview",preview.replaceAll("[\\s\\p{Cc}]+"," ").trim());
-                // Inline raster data is already part of native entities. No URL/protocol fetching.
-                String photo=text(b,"avatarDataUrl");
-                if(photo.length()<=65536&&photo.length()<=photoBudget&&photo.matches("data:image/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}")){
-                    candidate.put("avatarDataUrl",photo);photoBudget-=photo.length();
-                }
-                // Native roster mapper defaults absent ownership to owner; only explicit false
-                // selects viewerSessionId. Malformed supplied ownership is never treated as owner.
-                Object ownership=b.opt("viewerIsOwner");
-                if(ownership==null||ownership==JSONObject.NULL)candidate.put("viewerIsOwner",true);
-                else if(ownership instanceof Boolean)candidate.put("viewerIsOwner",ownership);
-                else candidate.put("viewerIsOwner",false).put("viewerMetadataInvalid",true);
-                // Which harness runs the Bot decides the end-of-call handoff (see CallHandoff).
-                String harness=text(b,"harness");
-                if(harness.matches("[a-z][a-z0-9_-]{0,31}"))candidate.put("harness",harness);
-                // The Bot's role line ("platform ops"), shown when there is no message preview.
-                String title=text(b,"title").replaceAll("\\s+"," ").trim();if(!title.isEmpty()&&title.length()<=80&&safeSession(title))candidate.put("title",title);
-                // The Bot's own voice, speed and language, which the official apps send in session.update.
-                String voiceId=text(b,"voiceId");if(voiceId.matches("[A-Za-z0-9_.-]{1,64}"))candidate.put("voiceId",voiceId);
-                double speed=voiceSpeed(b.opt("voiceSpeed"));if(speed>0)candidate.put("voiceSpeed",speed);
-                String language=text(b,"voiceLanguage");if(language.matches("[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?")&&!language.equalsIgnoreCase("auto"))candidate.put("voiceLanguage",language);
-                Object session=b.opt("viewerSessionId");
-                if(session instanceof String&&safeSession((String)session))candidate.put("viewerSessionId",session);
-                else if(session!=null&&session!=JSONObject.NULL)candidate.put("viewerMetadataInvalid",true);
-                safe.put(candidate);
-            }
+            JSONObject candidate = rosterRow(bots.optJSONObject(i), photoBudget);
+            if (candidate == null) continue;
+            photoBudget -= candidate.optString("avatarDataUrl").length();
+            safe.put(candidate);
         }
         synchronized(this){synchronized(ACCOUNT_STATE_LOCK){
             JSONObject current=linked();
@@ -208,6 +163,58 @@ final class GrokCore {
             store.write(current);
         }}
         return safe;
+    }
+    /**
+     * One listAgents row (or a live agent-upserted event's agent) reduced to the fields the watch uses, or
+     * null for groups and malformed rows. A photo is kept only within the remaining budget.
+     */
+    static JSONObject rosterRow(JSONObject b, int photoBudget) throws Exception {
+        if (b == null || b.optBoolean("isGroup", false)) return null;
+        JSONArray members=b.optJSONArray("memberIds");if(members==null)members=b.optJSONArray("memberAgentIds");
+        if(!b.has("isGroup")&&members!=null&&members.length()>0)return null;
+        String id = text(b, "id"); if (id.isEmpty()) id = text(b, "agentId");
+        if (id.isEmpty() || id.length() > 512 || text(b,"name").length() > 512) return null;
+        JSONObject candidate=new JSONObject().put("id", id)
+            .put("name", text(b, "name").isEmpty() ? "Unnamed Bot" : text(b, "name"));
+        // Optional, bounded design identifiers from the verified listAgents schema.
+        // Never load account-supplied paths, fonts or arbitrary color strings.
+        String avatarShape=text(b,"avatarShape"),avatarColor=text(b,"avatarColor");
+        if(AvatarPolicy.validShape(avatarShape))candidate.put("avatarShape",avatarShape);
+        if(AvatarPolicy.validColor(avatarColor))candidate.put("avatarColor",avatarColor);
+        // Native entity metadata is optional: absence never implies read/idle status.
+        for(String key:new String[]{"hasUnread","isRunning","isRunningTurn","isComposingMessage"})
+            if(b.opt(key) instanceof Boolean)candidate.put(key,b.opt(key));
+        for(String key:new String[]{"unreadCount","lastActivityAt","lastViewedAt"}) {
+            Object value=b.opt(key);
+            if(value instanceof Number){double n=((Number)value).doubleValue();
+                if(Double.isFinite(n)&&n>=0&&n<=9007199254740991d&&n==Math.floor(n))candidate.put(key,((Number)value).longValue());}
+        }
+        String preview=text(b,"lastMessagePreview");
+        if(!preview.isEmpty()&&preview.length()<=4096)
+            candidate.put("lastMessagePreview",preview.replaceAll("[\\s\\p{Cc}]+"," ").trim());
+        // Inline raster data is already part of native entities. No URL/protocol fetching.
+        String photo=text(b,"avatarDataUrl");
+        if(photo.length()<=65536&&photo.length()<=photoBudget&&photo.matches("data:image/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}"))
+            candidate.put("avatarDataUrl",photo);
+        // Native roster mapper defaults absent ownership to owner; only explicit false
+        // selects viewerSessionId. Malformed supplied ownership is never treated as owner.
+        Object ownership=b.opt("viewerIsOwner");
+        if(ownership==null||ownership==JSONObject.NULL)candidate.put("viewerIsOwner",true);
+        else if(ownership instanceof Boolean)candidate.put("viewerIsOwner",ownership);
+        else candidate.put("viewerIsOwner",false).put("viewerMetadataInvalid",true);
+        // Which harness runs the Bot decides the end-of-call handoff (see CallHandoff).
+        String harness=text(b,"harness");
+        if(harness.matches("[a-z][a-z0-9_-]{0,31}"))candidate.put("harness",harness);
+        // The Bot's role line ("platform ops"), shown when there is no message preview.
+        String title=text(b,"title").replaceAll("\\s+"," ").trim();if(!title.isEmpty()&&title.length()<=80&&safeSession(title))candidate.put("title",title);
+        // The Bot's own voice, speed and language, which the official apps send in session.update.
+        String voiceId=text(b,"voiceId");if(voiceId.matches("[A-Za-z0-9_.-]{1,64}"))candidate.put("voiceId",voiceId);
+        double speed=voiceSpeed(b.opt("voiceSpeed"));if(speed>0)candidate.put("voiceSpeed",speed);
+        String language=text(b,"voiceLanguage");if(language.matches("[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?")&&!language.equalsIgnoreCase("auto"))candidate.put("voiceLanguage",language);
+        Object session=b.opt("viewerSessionId");
+        if(session instanceof String&&safeSession((String)session))candidate.put("viewerSessionId",session);
+        else if(session!=null&&session!=JSONObject.NULL)candidate.put("viewerMetadataInvalid",true);
+        return candidate;
     }
     /** Local-only view; candidates from older app versions are already a valid saved roster. */
     synchronized JSONObject cachedRoster(String account,String generation)throws Exception {
@@ -419,6 +426,24 @@ final class GrokCore {
     static String entryText(JSONObject e) {
         for(String k:new String[]{"text","prompt","content"}) if(!text(e,k).isEmpty())return text(e,k);
         return text(e.optJSONObject("message"),"content");
+    }
+    /**
+     * The Bot's first message after this watch message in its chat, or null. A reply alert reads it when it
+     * starts and after a gap in the live stream. Order, not clocks, as on screen. Never sends.
+     */
+    JSONObject replyAfter(String id) throws Exception {
+        JSONObject root,job;synchronized(this){root=linked();job=copy(find(root,id));}
+        JSONObject body=new JSONObject().put("id",job.getString("botId")).put("limit",50);
+        if(job.has("sessionId"))body.put("sessionId",job.getString("sessionId"));
+        return replyAfter(post(root,"getAgentTranscriptTail",body),job);
+    }
+    static JSONObject replyAfter(JSONObject tail,JSONObject job) throws Exception {
+        JSONArray entries=tail.optJSONArray("entries");if(entries==null||entries.length()>200)return null;
+        boolean after=false;
+        for(int i=0;i<entries.length();i++){JSONObject e=entries.optJSONObject(i);if(e==null)continue;
+            if(!after){after=job.getString("nonce").equals(text(e,"clientNonce"));continue;}
+            JSONObject entry=BotEvents.entry(e);if(entry.optBoolean("reply"))return entry;}
+        return null;
     }
     synchronized JSONObject job(String id) throws Exception { return copy(find(linked(),id)); }
     /** This Bot's messages from the watch, oldest first. */
