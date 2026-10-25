@@ -59,7 +59,8 @@ final class BotEvents {
         if(!hidden&&kind.equals("message")){user=role.equals("user");if(role.equals("assistant")){reply=true;text=GrokCore.entryText(e);}}
         else if(!hidden&&kind.equals("send-message")){JSONObject message=e.optJSONObject("message");
             if(message!=null&&"text".equals(message.optString("type"))&&message.optString("channel").isEmpty()){reply=true;text=GrokCore.text(message,"content");}}
-        text=text.replaceAll("[\\s\\p{Cc}]+"," ").trim();if(text.length()>4096)text=text.substring(0,4096);
+        // Shown as the chat shows it: **bold** and other markdown marks never reach a notification.
+        text=MessageText.plain(text).replaceAll("[\\s\\p{Cc}]+"," ").trim();if(text.length()>4096)text=text.substring(0,4096);
         return new JSONObject().put("reply",reply).put("user",user).put("text",reply?text:"");
     }
     private static boolean present(JSONObject e,String key){return e.opt(key)!=null&&e.opt(key)!=JSONObject.NULL;}

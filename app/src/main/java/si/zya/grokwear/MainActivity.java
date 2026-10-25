@@ -27,6 +27,8 @@ import java.util.concurrent.Executors;
 public final class MainActivity extends Activity {
     private static final int WHITE=0xffffffff,SECONDARY=0xff8d8d93,SURFACE=0xff1e1e1e,BLUE=0xff006ceb,GLASS=0xff2c2c2e,CARD=0xff202020,RED=0xffe5484d,GREEN=0xff30d158,CARD_ROW=0xff1c1c1e;
     private final Handler main=new Handler(Looper.getMainLooper());
+    // Debug preview only: a demo reply alert outlives the activity, as ReplyAlertService does for real sends.
+    private static final Handler PREVIEW_ALERT=new Handler(Looper.getMainLooper());
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
     private final ExecutorService preferencesWorker=Executors.newSingleThreadExecutor();
     private final ExecutorService rosterWorker=Executors.newSingleThreadExecutor();
@@ -104,11 +106,21 @@ public final class MainActivity extends Activity {
             if(state==null&&(getIntent().getFlags()&Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY)==0)pendingOpenBot=openBotExtra(getIntent());}
         side=(int)(getResources().getDisplayMetrics().widthPixels/getResources().getDisplayMetrics().density);
         if(android.os.Build.VERSION.SDK_INT>=33){modernBack=this::handleBack;getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,modernBack);}
-        if(preview)setPreviewScreen(getIntent().getStringExtra("preview_screen"));else render();
+        if(preview&&!openBotExtra(getIntent()).isEmpty())openPreviewReply(getIntent().getStringExtra("preview_bot"));
+        else if(preview)setPreviewScreen(getIntent().getStringExtra("preview_screen"));else render();
+    }
+    /** A demo reply alert was tapped: that Bot's chat with the message and the reply, as a real alert opens it. */
+    private void openPreviewReply(String name){
+        if(name==null||name.isEmpty()){setPreviewScreen(null);return;}
+        setPreviewScreen("home_pinned");choosePreview(name);long now=System.currentTimeMillis();
+        try{historyEntries.put(new JSONObject().put("id","demo-sent").put("role","user").put("text",previewDraft(name)).put("atMs",now-8000));
+            historyEntries.put(new JSONObject().put("id","demo-reply").put("role","assistant").put("text",previewReply(name)).put("atMs",now-4000));}catch(Exception ignored){}
+        scrollToEnd=true;render();
     }
     @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);
         // An existing real-account activity cannot be switched into screenshot mode.
-        if(preview){previewMedia=intent.getBooleanExtra("preview_media",false);setPreviewScreen(intent.getStringExtra("preview_screen"));}
+        if(preview&&!openBotExtra(intent).isEmpty())openPreviewReply(intent.getStringExtra("preview_bot"));
+        else if(preview){previewMedia=intent.getBooleanExtra("preview_media",false);setPreviewScreen(intent.getStringExtra("preview_screen"));}
         else pendingOpenBot=openBotExtra(intent); // onResume's account load opens it.
     }
     private static String openBotExtra(Intent intent){String id=intent==null?null:intent.getStringExtra(ReplyAlertService.OPEN_BOT);return id==null||id.length()>512?"":id;}
@@ -137,6 +149,8 @@ public final class MainActivity extends Activity {
         if(screen.equals("reader")){closeReader();return;}
         if(screen.equals("compose_edit")){screen=draftMessage.isEmpty()?"ready":"compose_review";render();return;}
         if(screen.equals("compose_review")){if(!messageSending){draftMessage="";screen="ready";render();}return;}
+        // Media captures leave from the Bot list as the real app does.
+        if(preview&&previewMedia&&screen.equals("bots")){finish();return;}
         if(preview){previewEpoch++;simulated=false;if(isCall()){screen="ready";render();}else if(screen.equals("ready")){screen="bots";render();}else if(!screen.equals("welcome")){screen="ready";render();}else finish();return;}
         if(screen.equals("qr")){cancelLogin();return;}
         if(VoiceService.snapshot().active){moveTaskToBack(true);return;}
@@ -632,6 +646,10 @@ public final class MainActivity extends Activity {
             main.postDelayed(()->{if(mine!=previewEpoch)return;try{historyEntries.put(new JSONObject().put("id","demo-sent").put("role","user").put("text",text).put("atMs",created));
                 historyEntries.put(new JSONObject().put("id","demo-reply").put("role","assistant").put("text",previewReply(bot)).put("atMs",System.currentTimeMillis()));}catch(Exception ignored){}
                 botMessages=new JSONArray();scrollToEnd=true;render();},4200);
+            // Left the app by then (even swiped out of it): the same reply alert a real send gets, for its demo Bot.
+            if(previewMedia){final android.content.Context app=getApplicationContext();final String id=previewBot(bot,"",false).optString("id");
+                PREVIEW_ALERT.postDelayed(()->{if(!visible)ReplyAlertService.notifyReply(app,id,bot,previewReply(bot),
+                    new Intent(app,MainActivity.class).putExtra("ui_preview",true).putExtra("preview_media",true).putExtra("preview_bot",bot));},4200);}
             return;}
         final String botId=selectedMetadata.optString("id","");if(botId.isEmpty())return;
         messageSending=true;safeError="";render();final int mine=epoch;

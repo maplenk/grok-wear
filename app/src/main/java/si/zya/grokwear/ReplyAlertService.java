@@ -25,7 +25,8 @@ import java.util.concurrent.Executors;
  */
 public final class ReplyAlertService extends Service {
     private static final String WATCH="si.zya.grokwear.WATCH_REPLY";
-    private static final String WAITING="reply_wait",REPLIES="replies";
+    // 0.5.0's "replies" channel had vibration off, and a channel can't be changed once made: this one replaces it.
+    private static final String WAITING="reply_wait",REPLIES="bot_replies",OLD_REPLIES="replies";
     private static final int NOTIFICATION=7,REPLY=8;
     static final String OPEN_BOT="open_bot";
     /** The Settings switch. On unless turned off; Android's notification permission is asked for separately. */
@@ -50,6 +51,22 @@ public final class ReplyAlertService extends Service {
         NotificationManager manager=context.getSystemService(NotificationManager.class);if(manager!=null)manager.cancel(tag(botId),REPLY);
     }
     private static String tag(String botId){return "reply:"+botId;}
+    /** Posts a Bot's reply; tapping it starts open (MainActivity) for that Bot. Also used by the debug preview. */
+    static void notifyReply(Context context,String botId,String name,String text,Intent open){
+        NotificationManager manager=context.getSystemService(NotificationManager.class);if(manager==null)return;
+        // A watch buzzes rather than rings, so the channel asks for vibration outright.
+        NotificationChannel channel=new NotificationChannel(REPLIES,"Bot replies",NotificationManager.IMPORTANCE_HIGH);channel.enableVibration(true);
+        manager.createNotificationChannel(channel);manager.deleteNotificationChannel(OLD_REPLIES);
+        text=MessageText.plain(text);if(text.isEmpty())text="New message";
+        PendingIntent tap=PendingIntent.getActivity(context,botId.hashCode(),open.setAction("open:"+botId).putExtra(OPEN_BOT,botId)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_SINGLE_TOP),PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);
+        // The lock screen shows that a reply came, not what it says.
+        Notification hidden=new NotificationCompat.Builder(context,REPLIES).setSmallIcon(R.drawable.ic_reply_status).setContentTitle("Grok Wear").setContentText("New reply").build();
+        manager.notify(tag(botId),REPLY,new NotificationCompat.Builder(context,REPLIES).setSmallIcon(R.drawable.ic_reply_status)
+            .setContentTitle(name).setContentText(text).setStyle(new NotificationCompat.BigTextStyle().bigText(text))
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE).setPriority(NotificationCompat.PRIORITY_HIGH).setDefaults(Notification.DEFAULT_ALL)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(hidden).setContentIntent(tap).setAutoCancel(true).build());
+    }
 
     private final Handler main=new Handler(Looper.getMainLooper());
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
@@ -116,17 +133,7 @@ public final class ReplyAlertService extends Service {
         String botId=alert.optString("bot");
         // That chat is on screen: the app already shows the reply. Alerts turned off since: say nothing.
         if(botId.equals(MainActivity.openChat)||!enabled(this))return;
-        NotificationManager manager=getSystemService(NotificationManager.class);if(manager==null)return;
-        manager.createNotificationChannel(new NotificationChannel(REPLIES,"Bot replies",NotificationManager.IMPORTANCE_HIGH));
-        String name=alert.optString("name"),text=alert.optString("text");if(text.isEmpty())text="New message";
-        PendingIntent open=PendingIntent.getActivity(this,botId.hashCode(),new Intent(this,MainActivity.class).setAction("open:"+botId).putExtra(OPEN_BOT,botId)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_SINGLE_TOP),PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);
-        // The lock screen shows that a reply came, not what it says.
-        Notification hidden=new NotificationCompat.Builder(this,REPLIES).setSmallIcon(R.drawable.ic_reply_status).setContentTitle("Grok Wear").setContentText("New reply").build();
-        manager.notify(tag(botId),REPLY,new NotificationCompat.Builder(this,REPLIES).setSmallIcon(R.drawable.ic_reply_status)
-            .setContentTitle(name).setContentText(text).setStyle(new NotificationCompat.BigTextStyle().bigText(text))
-            .setCategory(NotificationCompat.CATEGORY_MESSAGE).setPriority(NotificationCompat.PRIORITY_HIGH).setDefaults(Notification.DEFAULT_ALL)
-            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(hidden).setContentIntent(open).setAutoCancel(true).build());
+        notifyReply(this,botId,alert.optString("name"),alert.optString("text"),new Intent(this,MainActivity.class));
     }
     private Notification waitingNotification(String name){
         NotificationManager manager=getSystemService(NotificationManager.class);

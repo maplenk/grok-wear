@@ -54,6 +54,7 @@ public class BotEventsTest {
         BotEvents.Event event=BotEvents.parse(appended("bot-1",reply("Synthetic\nreply")));
         assertEquals("entry",event.kind);assertEquals("bot-1",event.botId);
         assertTrue(event.value.getBoolean("reply"));assertEquals("Synthetic reply",event.value.getString("text"));
+        assertEquals("markdown reads as the chat shows it","Cheapest: Thu Oct 29, fare drop",BotEvents.parse(appended("bot-1",reply("Cheapest: **Thu Oct 29**, `fare` drop"))).value.getString("text"));
         JSONObject own=BotEvents.parse(appended("bot-1",mine())).value;
         assertFalse(own.getBoolean("reply"));assertTrue(own.getBoolean("user"));assertEquals("your own text is never kept","",own.getString("text"));
         JSONObject streaming=BotEvents.parse(appended("bot-1",new JSONObject().put("kind","message").put("role","assistant").put("content","Partial").put("isStreaming",true))).value;
