@@ -76,7 +76,7 @@ public final class MainActivity extends Activity {
     private boolean pendingAssist,previewButton;private int assistNavigation;private long assistUntil;
     // pickToCall: the assistant button with no main or open Bot, so the next Bot tapped is called.
     // preferencesKnown: the account's main Bot and pins arrived, so "no main Bot" is a fact, not a gap.
-    private boolean pickToCall,preferencesKnown;private long rosterStartedElapsed;private TextView loadingLine;private String reportReturnScreen="settings";
+    private boolean pickToCall,preferencesKnown;private long rosterStartedElapsed;private TextView loadingLine;private String reportReturnScreen="settings",reportWhere="";
     private final Runnable loadingTick=()->tickLoading();
     private final Runnable assistTalk=()->continueAssist();
     private FrameLayout root;
@@ -345,7 +345,7 @@ public final class MainActivity extends Activity {
         else{java.util.HashSet<String> shown=new java.util.HashSet<>();for(JSONObject bot:pinned)shown.add(bot.optString("id"));
             for(JSONObject bot:orderedBots()){if(primary!=null&&primary.optString("id").equals(bot.optString("id")))continue;if(shown.contains(bot.optString("id")))continue;String name=bot.optString("name","Unnamed Bot");botChip(name,BLUE,()->primaryAction(bot,pickToCall),bot);}}
         if(!botListError.isEmpty())label(botListError,12,SECONDARY);if(botsCached||!botsLoading){if(bots.length()==0&&botListError.isEmpty())label("No Bots found",14,SECONDARY);action(botsCached?"Refresh":"Try again",()->loadBots());}
-        if(!preview&&!botListError.isEmpty())action("Details",()->{screen="bot_details";render();});
+        if(!preview&&!botListError.isEmpty()){action("Report a problem",()->openReport("Bot list: "+botListError,"bots"));action("Details",()->{screen="bot_details";render();});}
         action("Settings",()->openSettings());
     }
     private void botChip(String name,int accent,Runnable action){botChip(name,accent,action,null);}
@@ -920,7 +920,10 @@ public final class MainActivity extends Activity {
     private void showCaption(){String full=caption;if(full.isEmpty())return;ScrollView scroll=new ScrollView(this);TextView t=text(MessageText.plain(full),14,"You".equalsIgnoreCase(speaker)?SECONDARY:WHITE);t.setPadding(dp(18),dp(12),dp(18),dp(12));scroll.addView(t);new android.app.AlertDialog.Builder(this).setTitle(speaker.isEmpty()?"Caption":speaker).setView(scroll).setPositiveButton("Close",(d,w)->{}).show();}
     private void message(String heading,String detail,String action,Runnable run){
         if(java.util.Set.of("error","dropped","offline").contains(screen)){BotAvatarView face=new BotAvatarView(this);applyAvatar(face,botName,selectedMetadata);face.state(screen.equals("error")?"error":"dropped",BLUE,0);face.running(visible);avatars.add(face);body.addView(face,new LinearLayout.LayoutParams(dp(40),dp(40)));}
-        title(heading);label(detail,14,SECONDARY);gap(9);this.action("Back",()->goHome());edgeAction(action,run);}
+        title(heading);label(detail,14,SECONDARY);gap(9);
+        // A call that broke or a sign-in problem: reported from here, named in the issue, and Back returns here.
+        String here=screen;if(java.util.Set.of("error","dropped","account_error").contains(here))this.action("Report a problem",()->openReport(heading+": "+detail,here));
+        this.action("Back",()->goHome());edgeAction(action,run);}
     /** Primary action pinned above the bottom edge, like Talk: it can never scroll off a round screen. */
     private void edgeAction(String value,Runnable run){
         bottomAction=true;FrameLayout.LayoutParams sp=(FrameLayout.LayoutParams)currentScroll.getLayoutParams();sp.bottomMargin=dp(67);currentScroll.setLayoutParams(sp);
@@ -1097,6 +1100,8 @@ public final class MainActivity extends Activity {
         if(preview){previewButton=!previewButton;render();return;}
         try{startActivity(AssistantRole.settings(this));}catch(RuntimeException unavailable){render();}
     }
+    /** Report a problem from where it happened: the issue names the place, and Back returns there. */
+    private void openReport(String where,String returnTo){reportWhere=where;reportReturnScreen=returnTo;screen="report";render();}
     /** After 5 s the wait and the network show, so a stuck list says how long and over what. */
     private String loadingText(){
         long seconds=(android.os.SystemClock.elapsedRealtime()-rosterStartedElapsed)/1000;
@@ -1121,7 +1126,7 @@ public final class MainActivity extends Activity {
             label(split<0?line:line.substring(0,split),11,WHITE);if(split>=0)label(line.substring(split+2),11,SECONDARY);gap(4);shown++;}
         if(shown==0)label("Nothing yet",11,SECONDARY);
         action("Try again",()->{screen="bots";render();loadBots();});
-        action("Report a problem",()->{reportReturnScreen="bot_details";screen="report";render();});
+        action("Report a problem",()->openReport("Bot list: "+botListError,"bot_details"));
         action("Back",()->{screen="bots";render();});
     }
     private static String ago(long whenMs){
@@ -1137,7 +1142,7 @@ public final class MainActivity extends Activity {
         android.util.DisplayMetrics screenSize=getResources().getDisplayMetrics();int tall=screenSize.heightPixels;
         TextView scan=label("Scan with your phone",12,WHITE);scan.measure(0,0);
         ImageView code=new ImageView(this);code.setContentDescription("QR code for a new GitHub issue");
-        int size=drawDenseQr(code,ProblemReport.url(this),(int)(Math.min(tall,screenSize.widthPixels)*.70f));
+        int size=drawDenseQr(code,ProblemReport.url(this,reportWhere),(int)(Math.min(tall,screenSize.widthPixels)*.70f));
         // The scroll view starts 23 dp down and the body adds 3 dp.
         LinearLayout.LayoutParams at=new LinearLayout.LayoutParams(size,size);at.topMargin=Math.max(0,(tall-size)/2-dp(26)-scan.getMeasuredHeight());at.bottomMargin=Math.max(dp(8),(tall-size)/2-dp(23));
         body.addView(code,at);
@@ -1170,7 +1175,7 @@ public final class MainActivity extends Activity {
         Button hold=action("Assistant button: "+(button?"On":"Off"),()->toggleButton());hold.setContentDescription("Assistant button, "+(button?"on":"off")+". Double-tap to open the watch’s assistant settings");
         String target=assistTarget(preview?null:primaryBot());
         label(button?"Hold the watch’s assistant button to call "+target+". To turn this off, choose another assistant.":"Hold the watch’s assistant button to call "+target+" (on a Galaxy Watch, the Home key). No extra battery.",12,SECONDARY);gap(8);
-        action("Report a problem",()->{reportReturnScreen="settings";screen="report";render();});gap(8);
+        action("Report a problem",()->openReport("","settings"));gap(8);
         label("Unofficial Grok client",12,SECONDARY);label("Not affiliated with or endorsed by xAI or Cursor.",12,SECONDARY);gap(4);label("5-minute calls · tasks go to your Bot",12,SECONDARY);label("Calls share this Bot’s main chat.",12,SECONDARY);
         action("Back",()->leaveSettings());gap(24);
         action("Sign out…",()->{screen="signout_confirm";render();});

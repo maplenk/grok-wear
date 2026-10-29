@@ -32,7 +32,7 @@ Talk to any of your Grok Bots from your Wear OS watch. Hands-free, real-time voi
 - **Live updates.** While the app is open, new messages, unread counts and "Working…" appear as they happen, from the same live feed the official apps use.
 - **Reply alerts.** After sending a message you can leave the app: the watch buzzes when the Bot replies, and tapping the alert opens that chat. You choose whether to turn them on right after signing in, and can switch them on or off any time in Settings.
 - **Assistant button.** Hold the watch's assistant button (on a Galaxy Watch, the Home key) to call your main Bot, as the official app's assistant does on phones. It costs no battery and keeps no microphone open. You're offered it right after signing in, and it's in Settings; turning it on makes Grok Wear the watch's digital assistant in place of the current one.
-- **Report a problem.** Settings › Report a problem shows a QR code. Scan it with your phone to open a new GitHub issue with your watch model, the app version and a short log of recent Bot list loads and calls filled in.
+- **Report a problem.** A stuck Bot list, a call that stopped or dropped, and a sign-in problem each have a Report a problem button, also in Settings. It shows a QR code. Scan it with your phone to open a new GitHub issue with your watch model, the app version and a short log of recent Bot list loads and calls filled in.
 - **When the Bot list is slow or stuck,** it shows how long it has been loading and over which network, and a failure says why. Details shows the recent attempts, with Report a problem one tap away. Nothing is sent from the watch.
 
 ## Status and limits

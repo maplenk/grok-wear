@@ -73,14 +73,16 @@ final class ProblemReport {
     }
     /** Seconds with one decimal, for the log. */
     static String seconds(long ms){return String.format(Locale.ROOT,"%.1f s",ms/1000.0);}
-    static String url(Context context){
+    /** where: the screen and message the report was made from, such as "Bot list: Bots aren’t available yet (HTTP 503)…", or "". */
+    static String url(Context context,String where){
         return url(Build.MANUFACTURER+" "+Build.MODEL,Build.VERSION.RELEASE+" (API "+Build.VERSION.SDK_INT+")",
-            BuildConfig.VERSION_NAME+" ("+BuildConfig.VERSION_CODE+")",AssistantRole.held(context),network(context),log(context));
+            BuildConfig.VERSION_NAME+" ("+BuildConfig.VERSION_CODE+")",AssistantRole.held(context),network(context),where,log(context));
     }
-    /** The details, then the newest log lines that keep the link within LINK_BUDGET. */
-    static String url(String watch,String android,String version,boolean button,String network,String log){
-        String head="Watch: "+clean(watch)+"\nAndroid: "+clean(android)+"\nGrok Wear: "+clean(version)+"\nAssistant button: "+(button?"on":"off")
-            +"\nNetwork: "+clean(network)+"\nLog (UTC, newest first):\n",tail="\nWhat happened?\n",title=encode("Problem on "+clean(watch));
+    /** The details, then the newest log lines that keep the link within LINK_BUDGET. The title names where it happened. */
+    static String url(String watch,String android,String version,boolean button,String network,String where,String log){
+        String place=where.isEmpty()?"":clean(where.split(":",2)[0]);
+        String head=(where.isEmpty()?"":"Where: "+clean(where)+"\n")+"Watch: "+clean(watch)+"\nAndroid: "+clean(android)+"\nGrok Wear: "+clean(version)+"\nAssistant button: "+(button?"on":"off")
+            +"\nNetwork: "+clean(network)+"\nLog (UTC, newest first):\n",tail="\nWhat happened?\n",title=encode((place.isEmpty()?"Problem":place+" problem")+" on "+clean(watch));
         StringBuilder lines=new StringBuilder();
         // " · " reads well on the watch but takes 8 characters in a link; " - " takes 3.
         for(String line:log.split("\n")){if(line.isEmpty())continue;
