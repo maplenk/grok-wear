@@ -2,35 +2,44 @@ package si.zya.grokwear;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.net.ConnectivityManager;
+import android.net.NetworkCapabilities;
 import android.os.Build;
-import java.net.URLEncoder;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 import java.util.TimeZone;
 
 /**
- * "Report a problem": a link to a new GitHub issue, shown as a QR code for the phone. It carries the
- * watch model, the Android and app versions and the last few errors. An error is the app's own wording,
- * a service status or an error type: never a message from the network stack (those can name the
- * account's server), account data, or anything said or shown.
+ * A short private log of what happened, for Report a problem and the Bot list's details: Bot list loads,
+ * calls and sign-in, with how long they took, the network and why they failed. A reason is the app's own
+ * wording, a service status or an error type: never a message from the network stack (those can name the
+ * account's server), account data, Bot names or anything said or shown. The report is a link to a new
+ * GitHub issue, shown as a QR code for the phone, with the watch model, the versions and as much of the
+ * log as still scans on a watch screen.
  */
 final class ProblemReport {
     private ProblemReport(){}
     static final String ISSUES="https://github.com/maplenk/grok-wear/issues/new";
-    private static final String PREFS="grokwear_ui",RECENT="recent_problems";
-    private static final int KEEP=3,LONGEST=90;
+    private static final String PREFS="grokwear_ui",LOG="recent_problems";
+    private static final int KEEP=15,LONGEST=90;
+    /** Encoded link length: past about this, a QR code at watch size gets hard for a phone to read. */
+    static final int LINK_BUDGET=900;
 
-    static void note(Context context,String where,Throwable failure){note(context,where,describe(failure));}
-    /** Keeps the newest few, with the time in UTC, across restarts: the report is often made later. */
-    static synchronized void note(Context context,String where,String why){
+    static void note(Context context,String where,Throwable failure){note(context,where,failure,"");}
+    /** A failure: where, why, and anything else worth knowing, such as the time taken and the network. */
+    static void note(Context context,String where,Throwable failure,String detail){event(context,where+": "+describe(failure)+(detail.isEmpty()?"":" · "+detail));}
+    /** Keeps the newest lines, with the time in UTC, across restarts: the report is often made later. */
+    static synchronized void event(Context context,String text){
         try{SharedPreferences prefs=context.getSharedPreferences(PREFS,Context.MODE_PRIVATE);
             SimpleDateFormat time=new SimpleDateFormat("MM-dd HH:mm",Locale.ROOT);time.setTimeZone(TimeZone.getTimeZone("UTC"));
-            prefs.edit().putString(RECENT,add(prefs.getString(RECENT,""),time.format(new Date())+"Z "+where+": "+why)).apply();}
+            prefs.edit().putString(LOG,add(prefs.getString(LOG,""),time.format(new Date())+"Z "+text)).apply();}
         catch(RuntimeException unavailable){}
     }
-    /** Signing out clears them with the rest of the account's data. */
-    static synchronized void forget(Context context){try{context.getSharedPreferences(PREFS,Context.MODE_PRIVATE).edit().remove(RECENT).apply();}catch(RuntimeException unavailable){}}
+    /** Newest first, one per line. */
+    static String log(Context context){try{return context.getSharedPreferences(PREFS,Context.MODE_PRIVATE).getString(LOG,"");}catch(RuntimeException unavailable){return "";}}
+    /** Signing out clears it with the rest of the account's data. */
+    static synchronized void forget(Context context){try{context.getSharedPreferences(PREFS,Context.MODE_PRIVATE).edit().remove(LOG).apply();}catch(RuntimeException unavailable){}}
     /** Newest first, one per line, at most KEEP. */
     static String add(String recent,String line){
         StringBuilder out=new StringBuilder(clean(line));int kept=1;
@@ -51,16 +60,47 @@ final class ProblemReport {
             return refused.getCause()!=null?refused.getCause().getClass().getSimpleName():"";}
         return failure==null?"":failure.getClass().getSimpleName();
     }
+    /** The watch's way online: its own Wi-Fi or LTE, or through the phone over Bluetooth. */
+    static String network(Context context){
+        try{ConnectivityManager manager=context.getSystemService(ConnectivityManager.class);
+            NetworkCapabilities link=manager==null||manager.getActiveNetwork()==null?null:manager.getNetworkCapabilities(manager.getActiveNetwork());
+            if(link==null)return "offline";
+            if(link.hasTransport(NetworkCapabilities.TRANSPORT_WIFI))return "Wi-Fi";
+            if(link.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH))return "via phone";
+            if(link.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR))return "LTE";
+            return "other network";}
+        catch(RuntimeException unknown){return "unknown network";}
+    }
+    /** Seconds with one decimal, for the log. */
+    static String seconds(long ms){return String.format(Locale.ROOT,"%.1f s",ms/1000.0);}
     static String url(Context context){
-        String recent="";try{recent=context.getSharedPreferences(PREFS,Context.MODE_PRIVATE).getString(RECENT,"");}catch(RuntimeException unavailable){}
         return url(Build.MANUFACTURER+" "+Build.MODEL,Build.VERSION.RELEASE+" (API "+Build.VERSION.SDK_INT+")",
-            BuildConfig.VERSION_NAME+" ("+BuildConfig.VERSION_CODE+")",AssistantRole.held(context),recent);
+            BuildConfig.VERSION_NAME+" ("+BuildConfig.VERSION_CODE+")",AssistantRole.held(context),network(context),log(context));
     }
-    /** Short, so the QR code stays easy to scan on a watch screen. */
-    static String url(String watch,String android,String version,boolean button,String recent){
-        String body="Watch: "+clean(watch)+"\nAndroid: "+clean(android)+"\nGrok Wear: "+clean(version)+"\nAssistant button: "+(button?"on":"off")
-            +"\nRecent errors (UTC):\n"+(recent.isEmpty()?"none":recent)+"\n\nWhat happened?\n";
-        return ISSUES+"?title="+encode("Problem on "+clean(watch))+"&body="+encode(body);
+    /** The details, then the newest log lines that keep the link within LINK_BUDGET. */
+    static String url(String watch,String android,String version,boolean button,String network,String log){
+        String head="Watch: "+clean(watch)+"\nAndroid: "+clean(android)+"\nGrok Wear: "+clean(version)+"\nAssistant button: "+(button?"on":"off")
+            +"\nNetwork: "+clean(network)+"\nLog (UTC, newest first):\n",tail="\nWhat happened?\n",title=encode("Problem on "+clean(watch));
+        StringBuilder lines=new StringBuilder();
+        // " · " reads well on the watch but takes 8 characters in a link; " - " takes 3.
+        for(String line:log.split("\n")){if(line.isEmpty())continue;
+            String more=lines+line.replace(" · "," - ")+"\n";
+            if(link(title,head+more+tail).length()>LINK_BUDGET)break;
+            lines.setLength(0);lines.append(more);}
+        return link(title,head+(lines.length()==0?"none\n":lines.toString())+tail);
     }
-    private static String encode(String text){try{return URLEncoder.encode(text,"UTF-8");}catch(java.io.UnsupportedEncodingException impossible){return "";}}
+    private static String link(String title,String body){return ISSUES+"?title="+title+"&body="+encode(body);}
+    /**
+     * Form encoding that leaves the characters a query may carry as they are (RFC 3986): every escape
+     * adds two characters, and each one makes the QR code denser.
+     */
+    static String encode(String text){
+        StringBuilder out=new StringBuilder();
+        for(byte b:text.getBytes(java.nio.charset.StandardCharsets.UTF_8)){int c=b&0xff;
+            if(c==' ')out.append('+');
+            else if(c>='a'&&c<='z'||c>='A'&&c<='Z'||c>='0'&&c<='9'||"-._~:/(),;@!*'".indexOf(c)>=0)out.append((char)c);
+            else out.append('%').append(HEX.charAt(c>>4)).append(HEX.charAt(c&15));}
+        return out.toString();
+    }
+    private static final String HEX="0123456789ABCDEF";
 }

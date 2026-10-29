@@ -74,6 +74,10 @@ public final class MainActivity extends Activity {
     private static final int NOTIFICATIONS=18;
     // The assistant button: a call with the main Bot once the account has loaded, and its Settings switch.
     private boolean pendingAssist,previewButton;private int assistNavigation;private long assistUntil;
+    // pickToCall: the assistant button with no main or open Bot, so the next Bot tapped is called.
+    // preferencesKnown: the account's main Bot and pins arrived, so "no main Bot" is a fact, not a gap.
+    private boolean pickToCall,preferencesKnown;private long rosterStartedElapsed;private TextView loadingLine;private String reportReturnScreen="settings";
+    private final Runnable loadingTick=()->tickLoading();
     private final Runnable assistTalk=()->continueAssist();
     private FrameLayout root;
     private LinearLayout body;
@@ -139,7 +143,7 @@ public final class MainActivity extends Activity {
     private void assist(JSONObject current){
         if(VoiceService.snapshot().active||isCall()){renderVoice();return;}
         JSONObject primary=primaryBot();String id=primary!=null?primary.optString("id",""):current.optString("id","");
-        if(id.isEmpty()){openBotPicker();return;}
+        if(id.isEmpty()){openBotPicker();pickToCall=true;render();return;}
         // Debug builds: emulator tests check the launch without calling a real Bot.
         if(BuildConfig.DEBUG&&getSharedPreferences("grokwear_ui",MODE_PRIVATE).getBoolean("assist_dry_run",false)){
             android.util.Log.i("GrokWearAssist","assist_dry_run main="+(primary!=null)+" switch="+!id.equals(current.optString("id","")));
@@ -167,7 +171,7 @@ public final class MainActivity extends Activity {
             boolean loads=!(VoiceService.snapshot().active||isCall())&&!(screen.equals("done")||screen.equals("dropped")||screen.equals("error"))&&!awaitingMicrophonePermission&&!pendingTalkGranted;if(!loads)pendingOpenBot="";
             if(VoiceService.snapshot().active||isCall())renderVoice();else if(screen.equals("done")||screen.equals("dropped")||screen.equals("error"))render();else if(loads)loadAccount();}
     }
-    @Override protected void onPause(){cancelRosterRetry();if(pendingTalkGranted)clearPendingTalk();visible=false;epoch++;historyRequest++;historyLoading=false;polling=false;main.removeCallbacks(pollTick);for(BotAvatarView face:avatars)face.running(false);if(waveform!=null)waveform.running(false);main.removeCallbacks(callClock);
+    @Override protected void onPause(){cancelRosterRetry();main.removeCallbacks(loadingTick);if(pendingTalkGranted)clearPendingTalk();visible=false;epoch++;historyRequest++;historyLoading=false;polling=false;main.removeCallbacks(pollTick);for(BotAvatarView face:avatars)face.running(false);if(waveform!=null)waveform.running(false);main.removeCallbacks(callClock);
         if(!preview){VoiceService.removeListener(voiceListener);EventStream.remove(live);}openChat="";main.removeCallbacks(liveChat);main.removeCallbacks(liveRender);super.onPause();}
     @Override protected void onStop(){if(!awaitingMicrophonePermission)clearPendingTalk();super.onStop();}
     @Override protected void onDestroy(){if(android.os.Build.VERSION.SDK_INT>=33&&modernBack!=null)getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(modernBack);previewEpoch++;worker.shutdownNow();preferencesWorker.shutdownNow();rosterWorker.shutdownNow();main.removeCallbacksAndMessages(null);super.onDestroy();}
@@ -181,7 +185,8 @@ public final class MainActivity extends Activity {
         if(screen.equals("signout_confirm")){screen="settings";render();return;}
         if(screen.equals("alerts_setup")){finishAlertsSetup(false);return;}
         if(screen.equals("button_setup")){finishButtonSetup(false);return;}
-        if(screen.equals("report")){screen="settings";render();return;}
+        if(screen.equals("report")){screen=reportReturnScreen;render();return;}
+        if(screen.equals("bot_details")){screen="bots";render();return;}
         if(screen.equals("settings")){leaveSettings();return;}
         if(screen.equals("history_detail")){screen="history";render();return;}
         if(screen.equals("bot_actions")){closeBotActions();return;}
@@ -213,6 +218,7 @@ public final class MainActivity extends Activity {
     private void render(){
         // Re-rendering the same screen (history refresh, sync status) keeps the reader's place.
         final int keepY=currentScroll!=null&&screen.equals(renderedScreen)&&!isCall()?currentScroll.getScrollY():0;renderedScreen=screen;bottomAction=false;
+        if(!screen.equals("bots"))pickToCall=false;loadingLine=null;
         String chat=visible&&!preview&&screen.equals("ready")?selectedMetadata.optString("id",""):"";
         if(!chat.equals(openChat)){openChat=chat;if(!chat.isEmpty())ReplyAlertService.dismiss(this,chat);}
         for(BotAvatarView face:avatars)face.running(false);avatars.clear();orb=null;if(waveform!=null)waveform.running(false);waveform=null;transcriptBody=null;callStatus=null;main.removeCallbacks(callClock);
@@ -254,6 +260,7 @@ public final class MainActivity extends Activity {
             case "alerts_setup":alertsSetup();break;
             case "button_setup":buttonSetup();break;
             case "report":report();break;
+            case "bot_details":botDetails();break;
             case "signout_confirm":confirmSignOut();break;
             case "approval":approval();break;
             case "task":task();break;
@@ -327,14 +334,19 @@ public final class MainActivity extends Activity {
             if(!pinned.isEmpty())pinnedGrid(pinned);
             // Every other Bot pinned: no empty "Bots" header.
             if(pinned.isEmpty()||bots.length()-1>pinned.size())label("Bots",17,WHITE);
-        }else{TextView title=label("Bots",17,WHITE);title.setTypeface(Typeface.create(Typeface.DEFAULT,600,false));gap(8);if(!pinned.isEmpty())pinnedGrid(pinned);}
+        }else{TextView title=label("Bots",17,WHITE);title.setTypeface(Typeface.create(Typeface.DEFAULT,600,false));
+            if(pickToCall)label("Choose a Bot to call",12,WHITE);
+            else if(!preview&&preferencesKnown&&bots.length()>0)label("No main Bot. Choose one in the Grok Bot app on your phone.",12,SECONDARY);
+            gap(8);if(!pinned.isEmpty())pinnedGrid(pinned);}
         addBotScrollIndicator();
         if(preview&&bots.length()<2){if(primary==null)botChip("Main Bot",BLUE,()->choosePreview("Main Bot"),previewBot("Main Bot","Latest reply from your Bot",true));botChip("Research Bot",BLUE,()->choosePreview("Research Bot"),previewBot("Research Bot","Your task update is ready",false));action("Settings",()->openSettings());return;}
-        if(botsLoading&&!botsCached)label("Loading Bots…",12,SECONDARY);if(botSelectionPending)label("Switching Bot…",12,SECONDARY);
+        if(botsLoading&&!botsCached){loadingLine=label(loadingText(),12,SECONDARY);main.removeCallbacks(loadingTick);main.postDelayed(loadingTick,1000);}if(botSelectionPending)label("Switching Bot…",12,SECONDARY);
         if(bots.length()==0&&!botsCached&&!selectedMetadata.optString("id","").isEmpty())botChip(botName,BLUE,()->chooseBot(selectedMetadata.optString("id")),selectedMetadata);
         else{java.util.HashSet<String> shown=new java.util.HashSet<>();for(JSONObject bot:pinned)shown.add(bot.optString("id"));
-            for(JSONObject bot:orderedBots()){if(primary!=null&&primary.optString("id").equals(bot.optString("id")))continue;if(shown.contains(bot.optString("id")))continue;String name=bot.optString("name","Unnamed Bot");botChip(name,BLUE,()->primaryAction(bot,false),bot);}}
-        if(!botListError.isEmpty())label(botListError,12,SECONDARY);if(botsCached||!botsLoading){if(bots.length()==0&&botListError.isEmpty())label("No Bots found",14,SECONDARY);action(botsCached?"Refresh":"Try again",()->loadBots());}action("Settings",()->openSettings());
+            for(JSONObject bot:orderedBots()){if(primary!=null&&primary.optString("id").equals(bot.optString("id")))continue;if(shown.contains(bot.optString("id")))continue;String name=bot.optString("name","Unnamed Bot");botChip(name,BLUE,()->primaryAction(bot,pickToCall),bot);}}
+        if(!botListError.isEmpty())label(botListError,12,SECONDARY);if(botsCached||!botsLoading){if(bots.length()==0&&botListError.isEmpty())label("No Bots found",14,SECONDARY);action(botsCached?"Refresh":"Try again",()->loadBots());}
+        if(!preview&&!botListError.isEmpty())action("Details",()->{screen="bot_details";render();});
+        action("Settings",()->openSettings());
     }
     private void botChip(String name,int accent,Runnable action){botChip(name,accent,action,null);}
     private void botChip(String name,int accent,Runnable action,JSONObject metadata){
@@ -403,7 +415,7 @@ public final class MainActivity extends Activity {
         if(unread){View badge=unreadBadge(count);FrameLayout.LayoutParams at=new FrameLayout.LayoutParams(count>0?-2:dp(12),dp(count>0?18:12),Gravity.TOP|Gravity.LEFT);at.leftMargin=dp(count>0?44:47);at.topMargin=dp(count>0?2:6);tile.addView(badge,at);}
         TextView label=text(name,12,WHITE);label.setSingleLine(true);label.setEllipsize(android.text.TextUtils.TruncateAt.END);FrameLayout.LayoutParams lp=new FrameLayout.LayoutParams(-1,dp(16),Gravity.TOP);lp.topMargin=dp(54);tile.addView(label,lp);
         tile.setContentDescription(name+", pinned"+(working?", working":"")+(count>0?", "+count+" unread":unread?", unread":"")+(selected?", selected":""));
-        tile.setOnClickListener(v->{navigation++;primaryAction(bot,false);});tile.setOnLongClickListener(v->{openBotActions(bot);return true;});
+        tile.setOnClickListener(v->{boolean call=pickToCall;navigation++;primaryAction(bot,call);});tile.setOnLongClickListener(v->{openBotActions(bot);return true;});
         if(id.equals(justPinnedId)){justPinnedId="";tile.setScaleX(.6f);tile.setScaleY(.6f);tile.setAlpha(0);tile.animate().scaleX(1).scaleY(1).alpha(1).setDuration(260).setInterpolator(new android.view.animation.OvershootInterpolator()).start();}
         return tile;
     }
@@ -1062,7 +1074,7 @@ public final class MainActivity extends Activity {
     /** Part of signing in, after reply alerts: offered once. Turning it on opens the watch's Digital assistant page. */
     private void buttonSetup(){
         title("Assistant button");JSONObject primary=preview?null:primaryBot();
-        label("Hold the watch’s assistant button to call "+(primary==null?"your main Bot":primary.optString("name","your main Bot"))+". On a Galaxy Watch, hold the Home key.",12,SECONDARY);
+        label("Hold the watch’s assistant button to call "+assistTarget(primary)+". On a Galaxy Watch, hold the Home key.",12,SECONDARY);
         Button on=action("Turn on",()->finishButtonSetup(true));on.setTextColor(Color.BLACK);on.setBackground(shape(WHITE,24));
         action("Not now",()->finishButtonSetup(false));
         label("Grok Wear becomes the watch’s assistant in place of the current one. Change this any time in Settings.",12,SECONDARY);
@@ -1074,20 +1086,80 @@ public final class MainActivity extends Activity {
         if(on&&!AssistantRole.held(this))try{startActivity(AssistantRole.settings(this));return;}catch(RuntimeException unavailable){}
         loadAccount();
     }
+    /** Whom the button calls: the main Bot, or with none, the Bot open on the watch (assist). */
+    private String assistTarget(JSONObject primary){
+        if(primary!=null)return primary.optString("name","your main Bot");
+        return !preview&&preferencesKnown?"the Bot you last opened, as you have no main Bot":"your main Bot";
+    }
     /** On while Grok Wear is the watch's assistant. Apps can't take or give up that role, so both ways open the system page. */
     private boolean buttonOn(){return preview?previewButton:AssistantRole.held(this);}
     private void toggleButton(){
         if(preview){previewButton=!previewButton;render();return;}
         try{startActivity(AssistantRole.settings(this));}catch(RuntimeException unavailable){render();}
     }
-    /** A GitHub issue opened on the phone, as the watch has no browser. Nothing is sent from the watch. */
+    /** After 5 s the wait and the network show, so a stuck list says how long and over what. */
+    private String loadingText(){
+        long seconds=(android.os.SystemClock.elapsedRealtime()-rosterStartedElapsed)/1000;
+        if(seconds<5)return "Loading Bots…";
+        String line="Loading Bots… "+seconds+" s · "+ProblemReport.network(this);
+        // Sign-in renewal and the Bot list can each take up to 30 s.
+        return seconds<20?line:line+"\nA slow connection can take up to a minute.";
+    }
+    private void tickLoading(){
+        if(!visible||loadingLine==null||!screen.equals("bots")||!botsLoading||botsCached)return;
+        loadingLine.setText(loadingText());main.postDelayed(loadingTick,1000);
+    }
+    /** What the Bot list last did and why it failed, with the same log Report a problem sends. */
+    private void botDetails(){
+        title("Bot list details");
+        label(botListError.isEmpty()?(botsLoading?"Loading…":"Loaded"):botListError,13,WHITE);
+        label("Network: "+ProblemReport.network(this),12,SECONDARY);
+        label("Last loaded: "+(botsFetchedAtMs>0?ago(botsFetchedAtMs):"not yet on this watch"),12,SECONDARY);gap(6);
+        label("Recent (UTC)",13,WHITE);int shown=0;
+        // Each entry: when and what in white, then how it went.
+        for(String line:ProblemReport.log(this).split("\n"))if(!line.isEmpty()&&shown<8){int split=line.indexOf(": ");
+            label(split<0?line:line.substring(0,split),11,WHITE);if(split>=0)label(line.substring(split+2),11,SECONDARY);gap(4);shown++;}
+        if(shown==0)label("Nothing yet",11,SECONDARY);
+        action("Try again",()->{screen="bots";render();loadBots();});
+        action("Report a problem",()->{reportReturnScreen="bot_details";screen="report";render();});
+        action("Back",()->{screen="bots";render();});
+    }
+    private static String ago(long whenMs){
+        long minutes=Math.max(0,System.currentTimeMillis()-whenMs)/60000;
+        return minutes<1?"just now":minutes<60?minutes+" min ago":minutes<1440?minutes/60+" h ago":minutes/1440+" days ago";
+    }
+    /**
+     * A GitHub issue opened on the phone, as the watch has no browser. Nothing is sent from the watch.
+     * The code fills the first screen, centred in the round display's largest square: one partly
+     * under the fold doesn't scan. The explanation is below it.
+     */
     private void report(){
+        android.util.DisplayMetrics screenSize=getResources().getDisplayMetrics();int tall=screenSize.heightPixels;
+        TextView scan=label("Scan with your phone",12,WHITE);scan.measure(0,0);
+        ImageView code=new ImageView(this);code.setContentDescription("QR code for a new GitHub issue");
+        int size=drawDenseQr(code,ProblemReport.url(this),(int)(Math.min(tall,screenSize.widthPixels)*.70f));
+        // The scroll view starts 23 dp down and the body adds 3 dp.
+        LinearLayout.LayoutParams at=new LinearLayout.LayoutParams(size,size);at.topMargin=Math.max(0,(tall-size)/2-dp(26)-scan.getMeasuredHeight());at.bottomMargin=Math.max(dp(8),(tall-size)/2-dp(23));
+        body.addView(code,at);
         title("Report a problem");
-        ImageView code=new ImageView(this);code.setContentDescription("QR code for a new GitHub issue");drawQr(code,ProblemReport.url(this));
-        int size=dp(Math.min(150,side*.66f));body.addView(code,new LinearLayout.LayoutParams(size,size));gap(3);
-        label("Scan with your phone, then say what happened.",12,SECONDARY);
-        label("The issue is public. It includes your watch model, the app version and recent errors, nothing from your account.",12,SECONDARY);
-        action("Back",()->{screen="settings";render();});
+        label("Scan the code with your phone to open a new GitHub issue, then say what happened.",12,SECONDARY);
+        label("The issue is public. It includes your watch model, the app version and a short log of recent loads and calls: times, networks and errors, nothing from your chats or account.",12,SECONDARY);
+        action("Back",()->{screen=reportReturnScreen;render();});
+    }
+    /**
+     * A long link's code, drawn one pixel per module and scaled by a whole number without smoothing, so
+     * every module is the same sharp size for a phone camera. Returns the size to show it at.
+     */
+    private int drawDenseQr(ImageView image,String data,int most){
+        try{java.util.Map<com.google.zxing.EncodeHintType,Object> hints=new java.util.EnumMap<>(com.google.zxing.EncodeHintType.class);
+            hints.put(com.google.zxing.EncodeHintType.MARGIN,2);hints.put(com.google.zxing.EncodeHintType.ERROR_CORRECTION,com.google.zxing.qrcode.decoder.ErrorCorrectionLevel.L);
+            BitMatrix bits=new MultiFormatWriter().encode(data,BarcodeFormat.QR_CODE,0,0,hints);int modules=bits.getWidth();
+            Bitmap bitmap=Bitmap.createBitmap(modules,modules,Bitmap.Config.ARGB_8888);
+            for(int y=0;y<modules;y++)for(int x=0;x<modules;x++)bitmap.setPixel(x,y,bits.get(x,y)?Color.BLACK:Color.WHITE);
+            android.graphics.drawable.BitmapDrawable sharp=new android.graphics.drawable.BitmapDrawable(getResources(),bitmap);sharp.setFilterBitmap(false);
+            image.setImageDrawable(sharp);image.setScaleType(ImageView.ScaleType.FIT_XY);
+            return Math.max(1,most/modules)*modules;}
+        catch(Exception unavailable){image.setContentDescription("QR code unavailable");return most;}
     }
     private void openSettings(){settingsReturnScreen=screen.equals("ready")||screen.equals("done")?"ready":"bots";screen="settings";render();}
     private void leaveSettings(){screen=settingsReturnScreen.equals("ready")?"ready":"bots";render();}
@@ -1096,8 +1168,9 @@ public final class MainActivity extends Activity {
         label(alertsBlocked?"Allow notifications for Grok Wear in your watch’s settings, then try again.":"Buzz when a Bot answers your message.",12,SECONDARY);gap(8);
         boolean button=buttonOn();
         Button hold=action("Assistant button: "+(button?"On":"Off"),()->toggleButton());hold.setContentDescription("Assistant button, "+(button?"on":"off")+". Double-tap to open the watch’s assistant settings");
-        label(button?"Hold the watch’s assistant button to call your main Bot. To turn this off, choose another assistant.":"Hold the watch’s assistant button to call your main Bot (on a Galaxy Watch, the Home key). No extra battery.",12,SECONDARY);gap(8);
-        action("Report a problem",()->{screen="report";render();});gap(8);
+        String target=assistTarget(preview?null:primaryBot());
+        label(button?"Hold the watch’s assistant button to call "+target+". To turn this off, choose another assistant.":"Hold the watch’s assistant button to call "+target+" (on a Galaxy Watch, the Home key). No extra battery.",12,SECONDARY);gap(8);
+        action("Report a problem",()->{reportReturnScreen="settings";screen="report";render();});gap(8);
         label("Unofficial Grok client",12,SECONDARY);label("Not affiliated with or endorsed by xAI or Cursor.",12,SECONDARY);gap(4);label("5-minute calls · tasks go to your Bot",12,SECONDARY);label("Calls share this Bot’s main chat.",12,SECONDARY);
         action("Back",()->leaveSettings());gap(24);
         action("Sign out…",()->{screen="signout_confirm";render();});
@@ -1182,7 +1255,7 @@ public final class MainActivity extends Activity {
         if(VoiceService.snapshot().active){renderVoice();return false;}
         return true;
     }
-    private void clearBotCache(){cancelRosterRetry();rosterRetryUsed=false;clearPendingTalk();receiptIdentity="";receiptSync="";receiptElapsed=0;receiptRefreshPending=false;clearHistory();botRequest++;botsLoading=false;rosterFetchActive=false;activeRosterRequest=0;bots=new JSONArray();botPreferences=new JSONObject();botsCached=false;botsFetchedAtMs=0;lastBotRefreshAttemptElapsed=0;botsAccountBinding="";selectedMetadata=new JSONObject();botName="Your Bot";}
+    private void clearBotCache(){cancelRosterRetry();preferencesKnown=false;pickToCall=false;rosterRetryUsed=false;clearPendingTalk();receiptIdentity="";receiptSync="";receiptElapsed=0;receiptRefreshPending=false;clearHistory();botRequest++;botsLoading=false;rosterFetchActive=false;activeRosterRequest=0;bots=new JSONArray();botPreferences=new JSONObject();botsCached=false;botsFetchedAtMs=0;lastBotRefreshAttemptElapsed=0;botsAccountBinding="";selectedMetadata=new JSONObject();botName="Your Bot";}
     private void acceptAccountBot(JSONObject bot){
         // A resumed detail belongs to its captured account, Bot and viewer conversation.
         String session=bot.optBoolean("viewerIsOwner",true)?"":bot.optString("viewerSessionId","");
@@ -1243,12 +1316,16 @@ public final class MainActivity extends Activity {
         boolean recentlyAttempted=lastBotRefreshAttemptElapsed>0&&elapsed-lastBotRefreshAttemptElapsed<BOT_REFRESH_INTERVAL_MS;
         if(!explicit&&(fresh||recentlyAttempted)){refreshPins(false);return;}
         boolean hadError=!botListError.isEmpty();
-        cancelRosterRetry();lastBotRefreshAttemptElapsed=elapsed;rosterFetchActive=true;botsLoading=true;botListError="";
+        cancelRosterRetry();lastBotRefreshAttemptElapsed=elapsed;rosterStartedElapsed=elapsed;rosterFetchActive=true;botsLoading=true;botListError="";
+        // The log keeps first loads, recoveries and slow ones, not the minute-by-minute refreshes.
+        final boolean firstOrRecovery=!botsCached||hadError;
         if(!botsCached||hadError)renderBotListPreservingScroll();
         final int request=++botRequest;activeRosterRequest=request;final String expected=botsAccountBinding;
         rosterWorker.execute(()->{try{
             if(!expected.equals(accountIdentity(account.authState())))throw new IllegalStateException();
             JSONArray found=account.bots();JSONObject saved=account.cachedRoster();
+            long took=android.os.SystemClock.elapsedRealtime()-elapsed;
+            if(firstOrRecovery||took>=5000)ProblemReport.event(getApplicationContext(),"Bot list: "+found.length()+" Bots in "+ProblemReport.seconds(took)+" · "+ProblemReport.network(getApplicationContext()));
             if(!expected.equals(accountIdentity(account.authState())))throw new IllegalStateException();
             // bots() saves the full sanitized roster before this UI callback, even if navigation changed.
             main.post(()->{if(activeRosterRequest==request)rosterFetchActive=false;applyBotRefresh(request,expected,found);if(currentBotRefresh(request,expected))botsFetchedAtMs=saved.optLong("fetchedAtMs");});
@@ -1258,7 +1335,7 @@ public final class MainActivity extends Activity {
                 if(!expected.equals(accountIdentity(account.authState())))return;
                 main.post(()->applyBotPreferences(request,expected,prefs));
             }catch(Exception optionalUnavailable){}});
-        }catch(Exception failure){ProblemReport.note(getApplicationContext(),"Bot list",failure);String why=ProblemReport.code(failure);main.post(()->{if(activeRosterRequest==request)rosterFetchActive=false;applyBotRefreshFailure(request,expected,why);});}});
+        }catch(Exception failure){ProblemReport.note(getApplicationContext(),"Bot list",failure,"after "+ProblemReport.seconds(android.os.SystemClock.elapsedRealtime()-elapsed)+" · "+ProblemReport.network(getApplicationContext()));String why=ProblemReport.code(failure);main.post(()->{if(activeRosterRequest==request)rosterFetchActive=false;applyBotRefreshFailure(request,expected,why);});}});
     }
     private boolean currentBotRefresh(int request,String expected){return request==botRequest&&!expected.isEmpty()&&expected.equals(botsAccountBinding);}
     private void applyBotRefresh(int request,String expected,JSONArray found){
@@ -1269,7 +1346,7 @@ public final class MainActivity extends Activity {
     }
     private void applyBotPreferences(int request,String expected,JSONObject prefs){
         if(!currentBotRefresh(request,expected))return;
-        boolean changed=!botPreferences.toString().equals(prefs.toString());botPreferences=prefs;
+        boolean changed=!botPreferences.toString().equals(prefs.toString())||!preferencesKnown;botPreferences=prefs;preferencesKnown=true;
         if(changed)renderBotListPreservingScroll();
     }
     /** why: a status or error type, shown so a screenshot of a stuck list says what failed. */
