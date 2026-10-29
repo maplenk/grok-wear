@@ -125,7 +125,7 @@ public final class VoiceService extends Service {
                     callContext=prepared.history;emit();
                 }catch(Exception invalid){finish("Call stopped","Voice could not start safely. Try again.");}
             });
-        }catch(Exception failed){String reason=setupReason(failed);post(mine,()->finish("Ready",reason));}});
+        }catch(Exception failed){ProblemReport.note(this,"Call start",failed);String reason=setupReason(failed);post(mine,()->finish("Ready",reason));}});
         return START_NOT_STICKY;
     }
     private void openPreparedSession(long mine,BotAccount account,JSONObject bot,JSONObject binding,JSONObject plan,JSONObject credential,VoiceStartup pipeline){
@@ -260,7 +260,10 @@ public final class VoiceService extends Service {
         return builder.build();
     }
     private void notifyCall(){if(running)((NotificationManager)getSystemService(NOTIFICATION_SERVICE)).notify(NOTIFICATION,notification());}
-    private void finish(String finalState,String safe){if(!running&&session==null&&audio==null){if(savingRecord&&callHistoryEpoch==historyEpoch)return;state=finalState;error=safe;emit();stopSelf();return;}
+    private void finish(String finalState,String safe){
+        // For Report a problem: a call that broke, in the words shown on the watch.
+        if(running&&(finalState.equals("Call stopped")||finalState.equals("Call dropped")))ProblemReport.note(this,finalState,safe);
+        if(!running&&session==null&&audio==null){if(savingRecord&&callHistoryEpoch==historyEpoch)return;state=finalState;error=safe;emit();stopSelf();return;}
         if(liveStartedAt!=0){finishedElapsed=Math.max(0,SystemClock.elapsedRealtime()-liveStartedAt);liveStartedAt=0;}
         // Fixed categories only: no captions, Bot/account identifiers, credentials or remote messages.
         android.util.Log.i("GrokWearVoice","call_stop cause="+stopCategory(finalState,safe)+" duration_ms="+finishedElapsed

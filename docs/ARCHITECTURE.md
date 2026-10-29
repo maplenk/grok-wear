@@ -31,12 +31,14 @@ Talk:    sign-in check ─┬─ Bot voice setup (instructions + tools) ─┐
 | `VoiceService` | Foreground service that owns a call: admission, ongoing notification, network loss detection, captions and saving the transcript. |
 | `CallHandoff` | The end-of-call note and leftover request sent to the Bot after the transcript is saved. |
 | `BotEvents`, `EventStream` | The gateway's live event stream (`/events`, read as the official Android app reads it): roster changes and new chat entries. One connection while the app is open or a reply alert waits. Events only refresh what's shown; the roster and chat are still read the usual way. |
+| `AssistantRole`, `GrokAssistantService`, `GrokAssistantSessionService`, `GrokRecognitionService` | The assistant button. Once Grok Wear is chosen as the watch's digital assistant, holding the button opens a session that starts a call with the main Bot (the account's Primary Bot), switching to it first if another Bot is open. Nothing listens in the background; Android requires an assistant to name a speech recognizer, and this one refuses every request. |
+| `ProblemReport` | Settings › Report a problem: a QR code for a new GitHub issue with the watch model, versions and the last three errors (the app's own message, a status code or an error type, never a network message, which can name the account's server). |
 | `ReplyAlertService` | Foreground service that waits for the reply to a message sent from the watch, then posts a notification that opens the chat. It stays quiet if that chat is on screen. |
 | `MainActivity` and views | Round-screen UI: Home roster, Bot page with chat, call screen, sign-in and settings. |
 
 ## Call rules
 
-- A call starts only from an explicit Talk tap on an unlocked, visible watch. Opening or resuming the app never starts one.
+- A call starts only from an explicit Talk tap or the watch's assistant button, on an unlocked, visible watch. Opening or resuming the app otherwise never starts one.
 - Like the official apps, a call doesn't preload chat history. The Bot's instructions and its lookup tools give it context. Audio follows the settings on the same socket as soon as it opens; an error or close before Grok confirms the settings fails the start, and settings never confirmed end the call after 10 seconds.
 - The voice model gets the official clients' tools when the Bot's harness offers them: `recall_text_messages`, `search_conversations`, `stay_silent`, `end_the_call` and `send_task` (a task handed to the Bot's main agent). All are served by `VoiceCallHarnessTool`; anything else is refused locally. Caller lines already handed off as a task are left out of the end-of-call handoff.
 - The caller goes first. If nobody speaks within 15 seconds, the Bot gets its greeting.

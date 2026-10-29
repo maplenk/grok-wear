@@ -19,9 +19,11 @@ Signing out removes all of this from the watch. It does not delete anything from
 - **To the Bot, after a call:** for Bots that support it, the same end-of-call note the official apps send ("The call ended…"), then up to the last six things you said on the call, so the Bot can follow up in chat. It is sent once and never retried.
 - **To xAI's realtime voice service:** your microphone audio while a call is active, short-lived call credentials, and the call's instructions for the Bot. Like the official apps, those instructions include the date and time the call started and the watch's time zone (for example "Asia/Shanghai"), so the Bot can answer "what day is it". The Bot's spoken replies come back the same way.
 
+**Report a problem** sends nothing from the watch. It shows a QR code linking to a new GitHub issue that is filled in with your watch model, the Android and app versions, whether the assistant button is on, and the last three errors (when they happened, and the app's own message, a status code or an error type). Your phone opens it; nothing is posted unless you submit it, and GitHub issues are public. To keep the report useful, the watch saves those three lines locally until you sign out or uninstall.
+
 When a Bot replies after you have left the app, the watch shows a notification with the Bot's name and the start of its reply. On the lock screen it shows only "New reply". Opening that chat removes it.
 
-Microphone audio is captured only during a call you started by tapping Talk, and only while it is not muted. Audio is streamed, never written to storage, and not sent anywhere else.
+Microphone audio is captured only during a call you started, by tapping Talk or holding the watch's assistant button, and only while it is not muted. Audio is streamed, never written to storage, and not sent anywhere else.
 
 ## Permissions
 
@@ -37,4 +39,4 @@ Microphone audio is captured only during a call you started by tapping Talk, and
 
 ## Your choices
 
-Turn reply alerts off in the app's Settings, or decline them when you sign in. Mute the microphone or hang up at any time. Revoke the microphone permission in watch settings, or sign out in the app's Settings to remove all local data.
+Turn reply alerts off in the app's Settings, or decline them when you sign in. The assistant button is off unless you choose Grok Wear as the watch's digital assistant; choose another assistant to turn it off. Mute the microphone or hang up at any time. Revoke the microphone permission in watch settings, or sign out in the app's Settings to remove all local data.

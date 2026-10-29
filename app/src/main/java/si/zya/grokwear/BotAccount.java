@@ -375,7 +375,8 @@ final class BotAccount {
             }
         }catch(GrokCore.Failure safe){throw safe;}
         // A dropped or timed-out request may have reached Grok: not a refusal.
-        catch(Exception failure){throw new GrokCore.Failure("Grok connection failed. Check sign-in before trying again.",false);}
+        // The cause stays for Report a problem; only this wording is shown.
+        catch(Exception failure){GrokCore.Failure lost=new GrokCore.Failure("Grok connection failed. Check sign-in before trying again.",false);lost.initCause(failure);throw lost;}
         finally{java.util.Arrays.fill(bytes,(byte)0);}
     }
 }
