@@ -76,7 +76,7 @@ public final class MainActivity extends Activity {
     private boolean pendingAssist,previewButton;private int assistNavigation;private long assistUntil;
     // pickToCall: the assistant button with no main or open Bot, so the next Bot tapped is called.
     // preferencesKnown: the account's main Bot and pins arrived, so "no main Bot" is a fact, not a gap.
-    private boolean pickToCall,preferencesKnown;private long rosterStartedElapsed;private TextView loadingLine;private String reportReturnScreen="settings",reportWhere="";
+    private boolean pickToCall,preferencesKnown;private long rosterStartedElapsed;private TextView loadingLine;private String reportReturnScreen="settings",reportWhere="";private boolean reportByEmail=true;
     private final Runnable loadingTick=()->tickLoading();
     private final Runnable assistTalk=()->continueAssist();
     private FrameLayout root;
@@ -1101,7 +1101,7 @@ public final class MainActivity extends Activity {
         try{startActivity(AssistantRole.settings(this));}catch(RuntimeException unavailable){render();}
     }
     /** Report a problem from where it happened: the issue names the place, and Back returns there. */
-    private void openReport(String where,String returnTo){reportWhere=where;reportReturnScreen=returnTo;screen="report";render();}
+    private void openReport(String where,String returnTo){reportWhere=where;reportReturnScreen=returnTo;reportByEmail=true;screen="report";render();}
     /** After 5 s the wait and the network show, so a stuck list says how long and over what. */
     private String loadingText(){
         long seconds=(android.os.SystemClock.elapsedRealtime()-rosterStartedElapsed)/1000;
@@ -1142,13 +1142,14 @@ public final class MainActivity extends Activity {
         android.util.DisplayMetrics screenSize=getResources().getDisplayMetrics();int tall=screenSize.heightPixels;
         TextView scan=label("Scan with your phone",12,WHITE);scan.measure(0,0);
         ImageView code=new ImageView(this);code.setContentDescription("QR code for a new GitHub issue");
-        int size=drawDenseQr(code,ProblemReport.url(this,reportWhere),(int)(Math.min(tall,screenSize.widthPixels)*.70f));
+        int size=drawDenseQr(code,ProblemReport.url(this,reportWhere,reportByEmail),(int)(Math.min(tall,screenSize.widthPixels)*.70f));
         // The scroll view starts 23 dp down and the body adds 3 dp.
         LinearLayout.LayoutParams at=new LinearLayout.LayoutParams(size,size);at.topMargin=Math.max(0,(tall-size)/2-dp(26)-scan.getMeasuredHeight());at.bottomMargin=Math.max(dp(8),(tall-size)/2-dp(23));
         body.addView(code,at);
         title("Report a problem");
-        label("Scan the code with your phone to open a new GitHub issue, then say what happened.",12,SECONDARY);
-        label("The issue is public. It includes your watch model, the app version and a short log of recent loads and calls: times, networks and errors, nothing from your chats or account.",12,SECONDARY);
+        label(reportByEmail?"Your phone opens an email to Grok Wear’s developer with the details filled in. Say what happened, then send it.":"Your phone opens a new GitHub issue with the details filled in. Say what happened, then submit it. GitHub issues are public.",12,SECONDARY);
+        label("It includes your watch model, the app version and a short log of recent loads and calls: times, networks and errors. Nothing from your chats or account.",12,SECONDARY);
+        action(reportByEmail?"Use a GitHub issue instead":"Use email instead",()->{reportByEmail=!reportByEmail;render();});
         action("Back",()->{screen=reportReturnScreen;render();});
     }
     /**

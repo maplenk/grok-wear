@@ -16,11 +16,12 @@ import java.util.TimeZone;
  * wording, a service status or an error type: never a message from the network stack (those can name the
  * account's server), account data, Bot names or anything said or shown. The report is a link to a new
  * GitHub issue, shown as a QR code for the phone, with the watch model, the versions and as much of the
- * log as still scans on a watch screen.
+ * log as still scans on a watch screen: an email to the developer (the default, private), or a new
+ * GitHub issue (public). Wear OS mail apps don't take a drafted email from other apps, so the phone sends it.
  */
 final class ProblemReport {
     private ProblemReport(){}
-    static final String ISSUES="https://github.com/maplenk/grok-wear/issues/new";
+    static final String ISSUES="https://github.com/maplenk/grok-wear/issues/new",EMAIL="namankhator@gmail.com";
     private static final String PREFS="grokwear_ui",LOG="recent_problems";
     private static final int KEEP=15,LONGEST=90;
     /** Encoded link length: past about this, a QR code at watch size gets hard for a phone to read. */
@@ -74,24 +75,28 @@ final class ProblemReport {
     /** Seconds with one decimal, for the log. */
     static String seconds(long ms){return String.format(Locale.ROOT,"%.1f s",ms/1000.0);}
     /** where: the screen and message the report was made from, such as "Bot list: Bots aren’t available yet (HTTP 503)…", or "". */
-    static String url(Context context,String where){
+    static String url(Context context,String where,boolean email){
         return url(Build.MANUFACTURER+" "+Build.MODEL,Build.VERSION.RELEASE+" (API "+Build.VERSION.SDK_INT+")",
-            BuildConfig.VERSION_NAME+" ("+BuildConfig.VERSION_CODE+")",AssistantRole.held(context),network(context),where,log(context));
+            BuildConfig.VERSION_NAME+" ("+BuildConfig.VERSION_CODE+")",AssistantRole.held(context),network(context),where,log(context),email);
     }
     /** The details, then the newest log lines that keep the link within LINK_BUDGET. The title names where it happened. */
-    static String url(String watch,String android,String version,boolean button,String network,String where,String log){
+    static String url(String watch,String android,String version,boolean button,String network,String where,String log,boolean email){
         String place=where.isEmpty()?"":clean(where.split(":",2)[0]);
         String head=(where.isEmpty()?"":"Where: "+clean(where)+"\n")+"Watch: "+clean(watch)+"\nAndroid: "+clean(android)+"\nGrok Wear: "+clean(version)+"\nAssistant button: "+(button?"on":"off")
-            +"\nNetwork: "+clean(network)+"\nLog (UTC, newest first):\n",tail="\nWhat happened?\n",title=encode((place.isEmpty()?"Problem":place+" problem")+" on "+clean(watch));
+            +"\nNetwork: "+clean(network)+"\nLog (UTC, newest first):\n",tail="\nWhat happened?\n",title=(place.isEmpty()?"Problem":place+" problem")+" on "+clean(watch);
         StringBuilder lines=new StringBuilder();
         // " · " reads well on the watch but takes 8 characters in a link; " - " takes 3.
         for(String line:log.split("\n")){if(line.isEmpty())continue;
             String more=lines+line.replace(" · "," - ")+"\n";
-            if(link(title,head+more+tail).length()>LINK_BUDGET)break;
+            if(link(email,title,head+more+tail).length()>LINK_BUDGET)break;
             lines.setLength(0);lines.append(more);}
-        return link(title,head+(lines.length()==0?"none\n":lines.toString())+tail);
+        return link(email,title,head+(lines.length()==0?"none\n":lines.toString())+tail);
     }
-    private static String link(String title,String body){return ISSUES+"?title="+title+"&body="+encode(body);}
+    /** Mail apps read a space only as %20 (RFC 6068); GitHub also takes "+", which is shorter. */
+    private static String link(boolean email,String title,String body){
+        return email?"mailto:"+EMAIL+"?subject="+encode(title).replace("+","%20")+"&body="+encode(body).replace("+","%20")
+            :ISSUES+"?title="+encode(title)+"&body="+encode(body);
+    }
     /**
      * Form encoding that leaves the characters a query may carry as they are (RFC 3986): every escape
      * adds two characters, and each one makes the QR code denser.
