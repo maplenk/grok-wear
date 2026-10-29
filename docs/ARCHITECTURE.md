@@ -38,6 +38,7 @@ Talk:    sign-in check ─┬─ Bot voice setup (instructions + tools) ─┐
 
 ## Call rules
 
+- A call's setup reads only the sign-in tokens, so it never waits for, or fails with, a gateway bootstrap (`EnsureSandBox`, every 5 minutes, which waits while the Bot's sandbox starts and gets up to 60 s). Bootstraps themselves are still shared and never replayed automatically.
 - A call starts only from an explicit Talk tap or the watch's assistant button, on an unlocked, visible watch. Opening or resuming the app otherwise never starts one.
 - Like the official apps, a call doesn't preload chat history. The Bot's instructions and its lookup tools give it context. Audio follows the settings on the same socket as soon as it opens; an error or close before Grok confirms the settings fails the start, and settings never confirmed end the call after 10 seconds.
 - The voice model gets the official clients' tools when the Bot's harness offers them: `recall_text_messages`, `search_conversations`, `stay_silent`, `end_the_call` and `send_task` (a task handed to the Bot's main agent). All are served by `VoiceCallHarnessTool`; anything else is refused locally. Caller lines already handed off as a task are left out of the end-of-call handoff.

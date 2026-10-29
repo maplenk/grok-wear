@@ -1335,8 +1335,12 @@ public final class MainActivity extends Activity {
             if(!expected.equals(accountIdentity(account.authState())))throw new IllegalStateException();
             JSONArray found=account.bots();JSONObject saved=account.cachedRoster();
             long took=android.os.SystemClock.elapsedRealtime()-elapsed;
-            // Every load is logged; a run of them keeps one line, the latest, so failures stay in view.
-            ProblemReport.event(getApplicationContext(),"Bot list: ok · "+found.length()+" Bots in "+ProblemReport.seconds(took)+" · "+ProblemReport.network(getApplicationContext()),"Bot list: ok");
+            // Every load is logged; a run of them keeps one line, the latest, so failures stay in view. Where the time
+            // went: setup (sign-in and the Bot's sandbox), the server's wait, and the download.
+            long[] transfer=BotAccount.LAST_TRANSFER.get();
+            String timing=transfer[2]<0?" in "+ProblemReport.seconds(took):", "+ProblemReport.size(transfer[2])+" in "+ProblemReport.seconds(took)
+                +" (setup "+ProblemReport.seconds(Math.max(0,took-transfer[0]-transfer[1])).replace(" s","")+", server "+ProblemReport.seconds(transfer[0]).replace(" s","")+", download "+ProblemReport.seconds(transfer[1])+")";
+            ProblemReport.event(getApplicationContext(),"Bot list: ok · "+found.length()+" Bots"+timing+" · "+ProblemReport.network(getApplicationContext()),"Bot list: ok");
             if(!expected.equals(accountIdentity(account.authState())))throw new IllegalStateException();
             // bots() saves the full sanitized roster before this UI callback, even if navigation changed.
             main.post(()->{if(activeRosterRequest==request)rosterFetchActive=false;applyBotRefresh(request,expected,found);if(currentBotRefresh(request,expected))botsFetchedAtMs=saved.optLong("fetchedAtMs");});

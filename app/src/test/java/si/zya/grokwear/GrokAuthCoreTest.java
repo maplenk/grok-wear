@@ -255,6 +255,28 @@ public class GrokAuthCoreTest {
             }else {assertNull(leaderError.get());assertNull(followerError.get());assertTrue(f.memory.value.has("config"));}
         }
     }
+    @Test public void tokenReadsDoNotWaitForOrFailWithABootstrapInFlight()throws Exception {
+        for(boolean failLeader:new boolean[]{false,true}) {
+            Fixture f=new Fixture();f.signIn(NOW+3_600_000);
+            java.util.concurrent.CountDownLatch entered=new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.CountDownLatch release=new java.util.concurrent.CountDownLatch(1);
+            GrokAuthCore leader=new GrokAuthCore(f.memory,(op,input)->{
+                entered.countDown();assertTrue(release.await(5,java.util.concurrent.TimeUnit.SECONDS));
+                if(failLeader)throw new java.io.IOException();return f.bootstrap;
+            },()->f.now);
+            GrokAuthCore caller=new GrokAuthCore(f.memory,(op,input)->{throw new AssertionError("No request for fresh tokens: "+op);},()->f.now);
+            Thread first=new Thread(()->{try{leader.currentConfig();}catch(Throwable ignored){}});
+            first.start();assertTrue(entered.await(5,java.util.concurrent.TimeUnit.SECONDS));
+            try {
+                // A call's backend steps read the tokens while the Bot's sandbox is still starting.
+                long started=System.nanoTime();JSONObject context=caller.backendContext();
+                assertTrue("didn't wait for the bootstrap",System.nanoTime()-started<2_000_000_000L);
+                assertFalse(context.getString("accessToken").isEmpty());
+            }finally{release.countDown();}
+            first.join(5000);assertFalse(first.isAlive());
+            assertNotNull(caller.backendContext());assertTrue(f.core.state().getBoolean("linked"));
+        }
+    }
     @Test public void simultaneousRenewalIsSharedAndNeverReplayed()throws Exception {
         for(boolean failLeader:new boolean[]{false,true}) {
             Fixture f=new Fixture();f.signIn(NOW+1000);

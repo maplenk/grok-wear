@@ -23,7 +23,7 @@ final class ProblemReport {
     private ProblemReport(){}
     static final String ISSUES="https://github.com/maplenk/grok-wear/issues/new",EMAIL="namankhator@gmail.com";
     private static final String PREFS="grokwear_ui",LOG="recent_problems";
-    private static final int KEEP=15,LONGEST=90;
+    private static final int KEEP=15,LONGEST=130;
     /** Encoded link length: past about this, a QR code at watch size gets hard for a phone to read. */
     static final int LINK_BUDGET=900;
 
@@ -77,17 +77,35 @@ final class ProblemReport {
             return refused.getCause()!=null?refused.getCause().getClass().getSimpleName():"";}
         return failure==null?"":failure.getClass().getSimpleName();
     }
-    /** The watch's way online: its own Wi-Fi or LTE, or through the phone over Bluetooth. */
+    /** The watch's way online (its own Wi-Fi or LTE, or through the phone over Bluetooth) and Android's estimate of its download speed. */
     static String network(Context context){
-        try{ConnectivityManager manager=context.getSystemService(ConnectivityManager.class);
-            NetworkCapabilities link=manager==null||manager.getActiveNetwork()==null?null:manager.getNetworkCapabilities(manager.getActiveNetwork());
-            if(link==null)return "offline";
-            if(link.hasTransport(NetworkCapabilities.TRANSPORT_WIFI))return "Wi-Fi";
-            if(link.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH))return "via phone";
-            if(link.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR))return "LTE";
-            return "other network";}
-        catch(RuntimeException unknown){return "unknown network";}
+        NetworkCapabilities link=link(context);if(link==null)return "offline";
+        int down=link.getLinkDownstreamBandwidthKbps();
+        return kind(link)+(down>0?" "+mbps(down):"");
     }
+    /** For the report's header: both speed estimates and, on Wi-Fi, the signal. */
+    static String networkDetails(Context context){
+        NetworkCapabilities link=link(context);if(link==null)return "offline";
+        int down=link.getLinkDownstreamBandwidthKbps(),up=link.getLinkUpstreamBandwidthKbps(),signal=link.getSignalStrength();
+        return kind(link)+(down>0?", est. "+mbps(down)+" down":"")+(up>0?", "+mbps(up)+" up":"")
+            +(signal!=NetworkCapabilities.SIGNAL_STRENGTH_UNSPECIFIED&&signal<0?", signal "+signal+" dBm":"");
+    }
+    private static NetworkCapabilities link(Context context){
+        try{ConnectivityManager manager=context.getSystemService(ConnectivityManager.class);
+            return manager==null||manager.getActiveNetwork()==null?null:manager.getNetworkCapabilities(manager.getActiveNetwork());}
+        catch(RuntimeException unknown){return null;}
+    }
+    private static String kind(NetworkCapabilities link){
+        if(link.hasTransport(NetworkCapabilities.TRANSPORT_WIFI))return "Wi-Fi";
+        if(link.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH))return "via phone";
+        if(link.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR))return "LTE";
+        return "other network";
+    }
+    static String mbps(int kbps){return kbps<10_000?String.format(Locale.ROOT,"%.1f Mbps",kbps/1000.0):kbps/1000+" Mbps";}
+    /** Size for the log: bytes as KB, or MB above 1,000 KB. */
+    static String size(long bytes){return bytes<1_000_000?Math.max(1,(bytes+500)/1000)+" KB":String.format(Locale.ROOT,"%.1f MB",bytes/1_000_000.0);}
+    /** "Google Google Pixel Watch" reads as "Google Pixel Watch": many models already start with the maker. */
+    static String watch(String maker,String model){return model.toLowerCase(Locale.ROOT).startsWith(maker.toLowerCase(Locale.ROOT))?model:maker+" "+model;}
     /** Seconds with one decimal, for the log. */
     static String seconds(long ms){return String.format(Locale.ROOT,"%.1f s",ms/1000.0);}
     /**
@@ -95,8 +113,8 @@ final class ProblemReport {
      * state: the app's side, such as how many Bots and when they last loaded, so a report says something even when nothing failed.
      */
     static String url(Context context,String where,String state,boolean email){
-        return url(Build.MANUFACTURER+" "+Build.MODEL,Build.VERSION.RELEASE+" (API "+Build.VERSION.SDK_INT+")",
-            BuildConfig.VERSION_NAME+" ("+BuildConfig.VERSION_CODE+")",AssistantRole.held(context),network(context),
+        return url(watch(Build.MANUFACTURER,Build.MODEL),Build.VERSION.RELEASE+" (API "+Build.VERSION.SDK_INT+")",
+            BuildConfig.VERSION_NAME+" ("+BuildConfig.VERSION_CODE+")",AssistantRole.held(context),networkDetails(context),
             state+(state.isEmpty()?"":" · ")+battery(context),where,log(context),email);
     }
     /** The details, then the newest log lines that keep the link within LINK_BUDGET. The title names where it happened. */

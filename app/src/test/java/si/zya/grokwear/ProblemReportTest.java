@@ -25,6 +25,16 @@ public class ProblemReportTest {
         assertEquals("10-29 14:03Z Bot list: ok · 7 Bots in 1.0 s · Wi-Fi\n10-29 14:02Z Bot list: HTTP 503 · after 0.8 s · Wi-Fi\n10-29 14:01Z Bot list: ok · 7 Bots in 0.9 s · Wi-Fi",log);
     }
 
+    @Test public void watchSpeedAndSizeReadNaturally() {
+        assertEquals("Google Pixel Watch",ProblemReport.watch("Google","Google Pixel Watch"));
+        assertEquals("samsung SM-L340",ProblemReport.watch("samsung","SM-L340"));
+        assertEquals("1.6 Mbps",ProblemReport.mbps(1600));
+        assertEquals("28 Mbps",ProblemReport.mbps(28626));
+        assertEquals("412 KB",ProblemReport.size(411_700));
+        assertEquals("1 KB",ProblemReport.size(20));
+        assertEquals("1.2 MB",ProblemReport.size(1_234_567));
+    }
+
     @Test public void describesWithoutNetworkMessages() {
         assertEquals("HTTP 503",ProblemReport.describe(new GrokCore.Failure("Grok request failed (HTTP 503).",false,"",503)));
         assertEquals("HTTP 403 permission_denied",ProblemReport.describe(new GrokCore.Failure("x",true,"permission_denied",403)));
