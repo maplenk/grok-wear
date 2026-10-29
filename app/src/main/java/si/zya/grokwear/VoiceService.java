@@ -231,7 +231,18 @@ public final class VoiceService extends Service {
         syncStatus="Connected";
         liveStartedAt=SystemClock.elapsedRealtime();
         if(audio==null)prepareAudio(mine);NativeAudio prepared=audio;if(prepared==null||!valid(mine))return;
+        sendCarried();
         prepared.mute(muted||ending);listeningMs=sinceTalk();state=ending?"Ending":"Listening";emit();notifyCall();
+    }
+    /**
+     * After "Hello Grok": what was said while the call connected goes first, so a question in the same
+     * breath reaches the Bot. Taking it stops the wake word's recording before this call's starts.
+     */
+    private void sendCarried(){
+        short[] said=HelloGrok.takeCarry();NativeVoiceSession live=session;if(said==null)return;
+        long ms=said.length*1000L/WakeWord.SAMPLE_RATE;byte[] pcm=HelloGrok.toCallRate(said);java.util.Arrays.fill(said,(short)0);
+        if(live!=null&&!muted&&!ending)for(int at=0;at<pcm.length;at+=16000)live.sendPcm(java.util.Arrays.copyOfRange(pcm,at,Math.min(pcm.length,at+16000)));
+        java.util.Arrays.fill(pcm,(byte)0);android.util.Log.i("GrokWearVoice","hello_carry ms="+ms);
     }
     private void meter(long mine,float level,boolean input){long now=SystemClock.elapsedRealtime();synchronized(this){if(now-lastMeter<70&&level!=0)return;lastMeter=now;}post(mine,()->{if(input)inputLevel=muted?0:level;else outputLevel=level;emit();});}
     private void emit(){long elapsed=liveStartedAt==0?finishedElapsed:Math.max(0,SystemClock.elapsedRealtime()-liveStartedAt);

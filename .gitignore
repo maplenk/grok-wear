@@ -11,3 +11,4 @@ keystore.properties
 *.iml
 .DS_Store
 captures/
+.cxx/

@@ -21,20 +21,24 @@ Signing out removes all of this from the watch. It does not delete anything from
 
 When a Bot replies after you have left the app, the watch shows a notification with the Bot's name and the start of its reply. On the lock screen it shows only "New reply". Opening that chat removes it.
 
-Microphone audio is captured only during a call you started by tapping Talk, and only while it is not muted. Audio is streamed, never written to storage, and not sent anywhere else.
+Microphone audio is captured only during a call you start (by tapping Talk, with the watch's assistant button or by saying “Hello Grok”), and only while it is not muted. Audio is streamed, never written to storage, and not sent anywhere else.
+
+**“Hello Grok”** is off unless you turn it on. While it is on, the watch listens for the phrase on the watch itself: audio is checked in memory a fraction of a second at a time, then discarded, never stored and never sent. When the first model thinks it heard the phrase, a second on-device model checks the last two seconds again, also in memory only. When it hears the phrase, it keeps up to six seconds of audio from that moment (what you say next) in memory and sends it as the start of the call, so a question in the same breath reaches the Bot; if no call starts within 15 seconds, that audio is discarded. It listens only while the screen is on, and pauses when the watch is off your wrist, in Theater mode or Battery Saver, below 15% battery and during calls, and while it runs the watch shows its microphone indicator and an ongoing “Listening for Hello Grok” notification.
 
 ## Permissions
 
 | Permission | Why |
 |---|---|
-| Microphone | To hear you during a call you start. |
+| Microphone | To hear you during a call you start, and to listen for “Hello Grok” if you turn it on. |
 | Internet / network state | To reach Grok Bot and detect a lost connection. |
-| Foreground service (microphone, media playback) | To keep a call running when you leave the app. |
+| Foreground service (microphone, media playback) | To keep a call running when you leave the app, and to listen for “Hello Grok” in the background. |
 | Foreground service (data sync) | To keep listening for a Bot's reply for a few minutes after you send a message and leave the app. |
 | Notifications | To show the ongoing call so you can return to it or hang up, and a Bot's reply to a message you sent. |
 | Wake lock | To keep a call alive while the screen is off. |
 | Modify audio settings / Bluetooth connect | To route call audio. |
+| Vibrate | A short buzz when “Hello Grok” is heard. |
+| Digital assistant (chosen by you in watch settings) | Lets Grok Wear listen for “Hello Grok” while the app is closed, open the call screen when it hears it, and answer the watch's assistant button. Android shows that an assistant can read what's on screen; Grok Wear doesn't use that. |
 
 ## Your choices
 
-Turn reply alerts off in the app's Settings, or decline them when you sign in. Mute the microphone or hang up at any time. Revoke the microphone permission in watch settings, or sign out in the app's Settings to remove all local data.
+Turn reply alerts, the assistant button and “Hello Grok” off in the app's Settings, or decline the first two when you sign in. To give the assistant role back, choose another digital assistant in the watch's settings (Settings › Apps › Default apps › Digital assistant app). Mute the microphone or hang up at any time. Revoke the microphone permission in watch settings, or sign out in the app's Settings to remove all local data.

@@ -12,14 +12,19 @@ android {
     namespace 'si.zya.grokwear'
     compileSdk 36
     buildToolsVersion '35.0.0'
+    ndkVersion '29.0.13113456'
     buildFeatures { buildConfig true }
     defaultConfig {
         applicationId 'si.zya.grokwear'
         minSdk 30
         targetSdk 36
-        versionCode 23
-        versionName '0.5.1'
+        versionCode 26
+        versionName '0.6.0'
+        // The "Hello Grok" wake word engine. Wear OS watches run 64-bit or 32-bit ARM.
+        ndk { abiFilters 'arm64-v8a', 'armeabi-v7a' }
+        externalNativeBuild { cmake { arguments '-DANDROID_STL=c++_static' } }
     }
+    externalNativeBuild { cmake { path 'src/main/cpp/CMakeLists.txt'; version '3.31.6' } }
     signingConfigs {
         if (signingValue('storeFile')) {
             release {
@@ -39,6 +44,8 @@ android {
             shrinkResources false
         }
     }
+    // sherpa-onnx's library (HelloCheck) is large: compressed in the APK it downloads in half the size.
+    packaging { jniLibs { useLegacyPackaging true } }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
 }
 dependencies {

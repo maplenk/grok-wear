@@ -31,6 +31,8 @@ Talk to any of your Grok Bots from your Wear OS watch. Hands-free, real-time voi
 - **Text messages.** Tap Message on a Bot's page, then dictate, type or draw. You review the text before it goes, and the chat shows Sending…, then Sent, then the Bot's reply.
 - **Live updates.** While the app is open, new messages, unread counts and "Working…" appear as they happen, from the same live feed the official apps use.
 - **Reply alerts.** After sending a message you can leave the app: the watch buzzes when the Bot replies, and tapping the alert opens that chat. You choose whether to turn them on right after signing in, and can switch them on or off any time in Settings.
+- **Assistant button.** Hold the watch's assistant button (on a Galaxy Watch, the Home key) to call your main Bot, as the official app's assistant does on phones. It costs no battery. You're offered it right after signing in, and it's in Settings; turning it on makes Grok Wear the watch's digital assistant in place of the current one.
+- **“Hello Grok”.** Say it while the screen is on to call your main Bot, hands-free, from any screen; say your question in the same breath and it goes into the call. The phrase is recognised on the watch itself, by two small models (the second double-checks the first), and nothing leaves it until then. It's a separate switch in Settings, off unless you turn it on, and needs the assistant button.
 
 ## Status and limits
 
@@ -38,6 +40,7 @@ This is an experimental client. It talks to Grok Bot's **private, undocumented c
 
 - Calls end after five minutes. A dropped connection is redialled automatically for up to about two minutes.
 - The watch needs its own internet connection (Wi-Fi or LTE).
+- “Hello Grok” runs on the watch's main processor, because apps can't use the low-power chip “Hey Google” uses. So it listens only while the screen is on, skips quiet audio, and the watch shows the microphone indicator while it listens. On test recordings it catches about half of the phrases said, so the assistant button is the reliable way to call. It also pauses when the watch is off your wrist, in Theater mode or Battery Saver, below 15% battery and during calls.
 - Reply alerts cover messages sent from the watch, for up to ten minutes after sending. Grok Bot's own push notifications go to its phone app only; Wear OS can mirror those to the watch, but tapping them opens the phone.
 
 ## Build from source
@@ -68,6 +71,7 @@ adb shell am start -n si.zya.grokwear/.MainActivity --ez ui_preview true --es pr
 - Your sign-in stays on the watch, encrypted with a key held in the Android Keystore. It is sent only to Grok Bot's own servers.
 - Audio streams directly between the watch and xAI's realtime voice service. No other server is involved, and no audio is stored.
 - The final text of each call is saved to your Bot's history in your Grok account, as the official apps do.
+- With “Hello Grok” on, the watch listens for the phrase on the watch itself. Audio is checked in memory and discarded; only what you say after the phrase goes into the call.
 - No analytics, ads or tracking. Screenshots of account screens are blocked.
 
 Details: [PRIVACY.md](PRIVACY.md). To report a vulnerability, see [SECURITY.md](SECURITY.md).
@@ -96,4 +100,4 @@ Bug reports, device reports and pull requests are welcome. See [CONTRIBUTING.md]
 
 ## License
 
-The source code is released under the [MIT License](LICENSE). The Bot avatar design data in `app/src/main/assets/bot-avatar.json` belongs to xAI and is **not** covered by that license; see [NOTICE.md](NOTICE.md).
+The source code is released under the [MIT License](LICENSE). The Bot avatar design data in `app/src/main/assets/bot-avatar.json` belongs to xAI and is **not** covered by that license, and the “Hello Grok” wake word model in `app/src/main/assets/wakeword/` is licensed for **non-commercial use only**, because of the audio it was trained on; see [NOTICE.md](NOTICE.md). The wake word engine in `app/src/main/cpp/` is adapted from Home Assistant (Apache License 2.0); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

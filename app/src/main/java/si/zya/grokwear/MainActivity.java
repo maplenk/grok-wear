@@ -72,6 +72,11 @@ public final class MainActivity extends Activity {
     // Settings: a refused notification permission turns Reply alerts back off and says where to allow it.
     private boolean alertsBlocked,previewAlerts=true;
     private static final int NOTIFICATIONS=18;
+    // "Hello Grok" and the assistant button: a call with the main Bot once the account has loaded, and
+    // their Settings switches (helloBlocked: the microphone was refused; buttonSetup: asked during sign-in).
+    private boolean pendingAssist,helloBlocked,previewHello,previewButton;private int assistNavigation;private long assistUntil;
+    private final Runnable assistTalk=()->continueAssist();
+    private static final int HELLO_MICROPHONE=19;
     private FrameLayout root;
     private LinearLayout body;
     private BotAvatarView orb;
@@ -100,10 +105,13 @@ public final class MainActivity extends Activity {
         preview=BuildConfig.DEBUG&&getIntent().getBooleanExtra("ui_preview",false);
         // Launch-media captures: no preview label, a short demo chat per Bot. Synthetic data only.
         previewMedia=preview&&getIntent().getBooleanExtra("preview_media",false);
+        if(BuildConfig.DEBUG&&getIntent().hasExtra("hello_dry_run"))getSharedPreferences("grokwear_ui",MODE_PRIVATE).edit().putBoolean("hello_dry_run",getIntent().getBooleanExtra("hello_dry_run",false)).apply();
         // Real launches show a blank frame until the saved sign-in is read, never a flash of "Sign in".
         if(!preview){botName="Your Bot";screen="launch";getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);account=new BotAccount(this);
             // A notification tap opens its Bot once; reopening from recents or after a restart doesn't replay it.
-            if(state==null&&(getIntent().getFlags()&Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY)==0)pendingOpenBot=openBotExtra(getIntent());}
+            if(state==null&&(getIntent().getFlags()&Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY)==0){pendingOpenBot=openBotExtra(getIntent());noteAssist(getIntent());}
+            // Debug builds: emulator tests open Settings without touching Home, whose Talk button starts a real call.
+            if(BuildConfig.DEBUG&&"settings".equals(getIntent().getStringExtra("debug_screen"))){screen="settings";settingsReturnScreen="bots";}}
         side=(int)(getResources().getDisplayMetrics().widthPixels/getResources().getDisplayMetrics().density);
         if(android.os.Build.VERSION.SDK_INT>=33){modernBack=this::handleBack;getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,modernBack);}
         if(preview&&!openBotExtra(getIntent()).isEmpty())openPreviewReply(getIntent().getStringExtra("preview_bot"));
@@ -121,16 +129,50 @@ public final class MainActivity extends Activity {
         // An existing real-account activity cannot be switched into screenshot mode.
         if(preview&&!openBotExtra(intent).isEmpty())openPreviewReply(intent.getStringExtra("preview_bot"));
         else if(preview){previewMedia=intent.getBooleanExtra("preview_media",false);setPreviewScreen(intent.getStringExtra("preview_screen"));}
-        else pendingOpenBot=openBotExtra(intent); // onResume's account load opens it.
+        else{pendingOpenBot=openBotExtra(intent);noteAssist(intent);} // onResume's account load opens it.
+    }
+    /** The assistant button, or "Hello Grok" heard by GrokAssistantService: a call with the main Bot after the account loads. */
+    private void noteAssist(Intent intent){
+        String action=intent==null?null:intent.getAction();
+        boolean hello=HelloGrok.ACTION_HELLO.equals(action)&&HelloGrok.justHeard();
+        if(!hello&&!Intent.ACTION_ASSIST.equals(action)&&!"android.intent.action.VOICE_ASSIST".equals(action))return;
+        pendingAssist=true;pendingOpenBot="";
+        // The screen can dim just as the wake word ends: this launch turns it back on, as a call screen does.
+        if(hello)setTurnScreenOn(true);
+    }
+    /** Hello Grok or the assistant button: talk to the main Bot, switching to it first when another Bot is open. */
+    private void assist(JSONObject current){
+        if(VoiceService.snapshot().active||isCall()){renderVoice();return;}
+        JSONObject primary=primaryBot();String id=primary!=null?primary.optString("id",""):current.optString("id","");
+        if(id.isEmpty()){openBotPicker();return;}
+        // Debug builds: emulator tests check the launch and the carried audio without calling a real Bot.
+        if(BuildConfig.DEBUG&&getSharedPreferences("grokwear_ui",MODE_PRIVATE).getBoolean("hello_dry_run",false)){
+            short[] said=HelloGrok.takeCarry();android.util.Log.i("GrokWearHello","assist_dry_run main="+(primary!=null)+" switch="+!id.equals(current.optString("id",""))+" carry_ms="+(said==null?-1:said.length*1000L/WakeWord.SAMPLE_RATE));
+            screen="ready";render();return;}
+        if(!id.equals(current.optString("id",""))){screen="bots";render();chooseBot(id,false);}else{screen="ready";render();loadBotChat();}
+        assistNavigation=navigation;assistUntil=android.os.SystemClock.elapsedRealtime()+30000;main.removeCallbacks(assistTalk);main.post(assistTalk);
+    }
+    /** Starts the call once the Bot is open and the watch is awake and unlocked; a tap elsewhere cancels it. */
+    private void continueAssist(){
+        if(assistUntil==0)return;
+        android.os.PowerManager power=getSystemService(android.os.PowerManager.class);android.app.KeyguardManager keyguard=getSystemService(android.app.KeyguardManager.class);
+        boolean locked=keyguard!=null&&keyguard.isKeyguardLocked();
+        if(navigation!=assistNavigation||android.os.SystemClock.elapsedRealtime()>assistUntil||VoiceService.snapshot().active||(!visible&&!locked)){assistUntil=0;return;}
+        // Behind the lock screen, wait for the unlock, then talk.
+        if(locked||!visible||botSelectionPending||!screen.equals("ready")||historyStaging()||!hasWindowFocus()||power==null||!power.isInteractive()){main.postDelayed(assistTalk,100);return;}
+        assistUntil=0;talk();
     }
     private static String openBotExtra(Intent intent){String id=intent==null?null:intent.getStringExtra(ReplyAlertService.OPEN_BOT);return id==null||id.length()>512?"":id;}
     @Override protected void onResume(){super.onResume();visible=true;for(BotAvatarView face:avatars)face.running(true);if(waveform!=null)waveform.running(true);if(isCall()){main.removeCallbacks(callClock);main.post(callClock);}
         if(!preview){VoiceService.addListener(voiceListener);EventStream.add(this,live);if(SIGN_OUT_ACTIVE.get()){screen="signout_confirm";render();main.removeCallbacks(signOutObserver);main.post(signOutObserver);return;}if(awaitingMicrophonePermission&&!pendingTalkCurrent())clearPendingTalk();rosterRetryUsed=false;
+            // A wake word after a call ended starts the next one from the Bot page; during a call it just shows the call.
+            if(pendingAssist&&(VoiceService.snapshot().active||isCall()))pendingAssist=false;
+            else if(pendingAssist&&(screen.equals("done")||screen.equals("dropped")||screen.equals("error"))){screen="ready";safeError="";}
             // A notification tap is used now or not at all: it never switches Bots on some later resume.
             boolean loads=!(VoiceService.snapshot().active||isCall())&&!(screen.equals("done")||screen.equals("dropped")||screen.equals("error"))&&!awaitingMicrophonePermission&&!pendingTalkGranted;if(!loads)pendingOpenBot="";
             if(VoiceService.snapshot().active||isCall())renderVoice();else if(screen.equals("done")||screen.equals("dropped")||screen.equals("error"))render();else if(loads)loadAccount();}
     }
-    @Override protected void onPause(){cancelRosterRetry();if(pendingTalkGranted)clearPendingTalk();visible=false;epoch++;historyRequest++;historyLoading=false;polling=false;main.removeCallbacks(pollTick);for(BotAvatarView face:avatars)face.running(false);if(waveform!=null)waveform.running(false);main.removeCallbacks(callClock);
+    @Override protected void onPause(){cancelRosterRetry();setTurnScreenOn(false);if(pendingTalkGranted)clearPendingTalk();visible=false;epoch++;historyRequest++;historyLoading=false;polling=false;main.removeCallbacks(pollTick);for(BotAvatarView face:avatars)face.running(false);if(waveform!=null)waveform.running(false);main.removeCallbacks(callClock);
         if(!preview){VoiceService.removeListener(voiceListener);EventStream.remove(live);}openChat="";main.removeCallbacks(liveChat);main.removeCallbacks(liveRender);super.onPause();}
     @Override protected void onStop(){if(!awaitingMicrophonePermission)clearPendingTalk();super.onStop();}
     @Override protected void onDestroy(){if(android.os.Build.VERSION.SDK_INT>=33&&modernBack!=null)getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(modernBack);previewEpoch++;worker.shutdownNow();preferencesWorker.shutdownNow();rosterWorker.shutdownNow();main.removeCallbacksAndMessages(null);super.onDestroy();}
@@ -143,6 +185,7 @@ public final class MainActivity extends Activity {
         navigation++;clearPendingTalk();
         if(screen.equals("signout_confirm")){screen="settings";render();return;}
         if(screen.equals("alerts_setup")){finishAlertsSetup(false);return;}
+        if(screen.equals("button_setup")){finishButtonSetup(false);return;}
         if(screen.equals("settings")){leaveSettings();return;}
         if(screen.equals("history_detail")){screen="history";render();return;}
         if(screen.equals("bot_actions")){closeBotActions();return;}
@@ -213,6 +256,7 @@ public final class MainActivity extends Activity {
             case "account_error":message("Needs attention",safeError,"Try again",()->recover());break;
             case "settings":settings();break;
             case "alerts_setup":alertsSetup();break;
+            case "button_setup":buttonSetup();break;
             case "signout_confirm":confirmSignOut();break;
             case "approval":approval();break;
             case "task":task();break;
@@ -1018,11 +1062,64 @@ public final class MainActivity extends Activity {
         if(!notificationsAllowed()){notificationsAsked=true;requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},NOTIFICATIONS);return;}
         render();
     }
+    /** Part of signing in, after reply alerts: offered once. Turning it on opens the watch's Digital assistant page. */
+    private void buttonSetup(){
+        title("Assistant button");JSONObject primary=preview?null:primaryBot();
+        label("Hold the watch’s assistant button to call "+(primary==null?"your main Bot":primary.optString("name","your main Bot"))+". On a Galaxy Watch, hold the Home key.",12,SECONDARY);
+        Button on=action("Turn on",()->finishButtonSetup(true));on.setTextColor(Color.BLACK);on.setBackground(shape(WHITE,24));
+        action("Not now",()->finishButtonSetup(false));
+        label("Grok Wear becomes the watch’s assistant in place of the current one. Change this any time in Settings.",12,SECONDARY);
+    }
+    private void finishButtonSetup(boolean on){
+        if(preview){previewButton=on;setPreviewScreen("bots");return;}
+        HelloGrok.setSetupPending(this,false);
+        // The system page is where the assistant is chosen; the Bot list loads on the way back.
+        if(on&&!HelloGrok.isAssistant(this))try{startActivity(HelloGrok.assistantSettings(this));return;}catch(RuntimeException unavailable){}
+        loadAccount();
+    }
+    /** On while Grok Wear is the watch's assistant. Apps can't take or give up that role, so both ways open the system page. */
+    private boolean buttonOn(){return preview?previewButton:HelloGrok.isAssistant(this);}
+    private void toggleButton(){
+        if(preview){previewButton=!previewButton;render();return;}
+        openAssistantSettings();
+    }
+    /** On means listening can start: the switch and the microphone. The status line says whether the assistant role is still missing. */
+    private boolean helloOn(){return preview?previewHello:HelloGrok.enabled(this)&&HelloGrok.microphoneAllowed(this);}
+    private String helloStatus(){
+        if(preview?previewHello:HelloGrok.ready(this))return "Say “Hello Grok” while the screen is on to call your main Bot.";
+        if(helloBlocked||!preview&&HelloGrok.enabled(this)&&!HelloGrok.microphoneAllowed(this))return "Allow the microphone for Grok Wear in your watch’s settings, then try again.";
+        if(!preview&&HelloGrok.enabled(this))return "Needs the assistant button: choose Grok Wear as the watch’s digital assistant.";
+        return "Say “Hello Grok” while the screen is on to call your main Bot, hands-free. Uses more battery.";
+    }
+    private void toggleHello(){
+        helloBlocked=false;
+        if(preview){previewHello=!previewHello;render();return;}
+        if(helloOn()){HelloGrok.setEnabled(this,false);render();return;}
+        turnOnHello();
+    }
+    /** The microphone first, then the assistant role (the assistant button) if Grok Wear doesn't hold it yet. The answers come back through onResume. */
+    private void turnOnHello(){
+        HelloGrok.setEnabled(this,true);
+        if(!HelloGrok.microphoneAllowed(this)){requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},HELLO_MICROPHONE);return;}
+        continueHello();
+    }
+    private void continueHello(){
+        if(!HelloGrok.isAssistant(this)){openAssistantSettings();return;}
+        render();
+    }
+    private void openAssistantSettings(){try{startActivity(HelloGrok.assistantSettings(this));}catch(RuntimeException unavailable){helloBlocked=false;render();}}
     private void openSettings(){settingsReturnScreen=screen.equals("ready")||screen.equals("done")?"ready":"bots";screen="settings";render();}
     private void leaveSettings(){screen=settingsReturnScreen.equals("ready")?"ready":"bots";render();}
     private void settings(){title("Settings");boolean alerts=replyAlerts();
         Button toggle=action("Reply alerts: "+(alerts?"On":"Off"),()->toggleReplyAlerts());toggle.setContentDescription("Reply alerts, "+(alerts?"on":"off")+". Double-tap to turn "+(alerts?"off":"on"));
         label(alertsBlocked?"Allow notifications for Grok Wear in your watch’s settings, then try again.":"Buzz when a Bot answers your message.",12,SECONDARY);gap(8);
+        boolean button=buttonOn();
+        Button hold=action("Assistant button: "+(button?"On":"Off"),()->toggleButton());hold.setContentDescription("Assistant button, "+(button?"on":"off")+". Double-tap to open the watch’s assistant settings");
+        label(button?"Hold the watch’s assistant button to call your main Bot. To turn this off, choose another assistant.":"Hold the watch’s assistant button to call your main Bot (on a Galaxy Watch, the Home key). No extra battery.",12,SECONDARY);gap(8);
+        boolean hello=helloOn();
+        Button wake=action("Hello Grok: "+(hello?"On":"Off"),()->toggleHello());wake.setContentDescription("Hello Grok, "+(hello?"on":"off")+". Double-tap to turn "+(hello?"off":"on"));
+        label(helloStatus(),12,SECONDARY);
+        gap(8);
         label("Unofficial Grok client",12,SECONDARY);label("Not affiliated with or endorsed by xAI or Cursor.",12,SECONDARY);gap(4);label("5-minute calls · tasks go to your Bot",12,SECONDARY);label("Calls share this Bot’s main chat.",12,SECONDARY);
         action("Back",()->leaveSettings());gap(24);
         action("Sign out…",()->{screen="signout_confirm";render();});
@@ -1040,6 +1137,8 @@ public final class MainActivity extends Activity {
         final BotAccount signingOutAccount=account;
         // Only local encrypted writes: do not queue behind HTTP, or cancel on Activity rotation.
         ReplyAlertService.forget(getApplicationContext());
+        // Signed out, a wake word has no Bot to call: listening stops until it's turned on again.
+        HelloGrok.setEnabled(getApplicationContext(),false);
         new Thread(()->{try{VoiceService.stop(getApplicationContext());signingOutAccount.unlink();}catch(Exception failure){signOutFailed=true;}finally{SIGN_OUT_ACTIVE.set(false);main.post(()->{if(visible&&!isDestroyed())finishSignOut();});}},"grok-local-signout").start();
     }
     private void finishSignOut(){
@@ -1079,6 +1178,12 @@ public final class MainActivity extends Activity {
             if(!allowed){ReplyAlertService.setEnabled(this,false);alertsBlocked=screen.equals("settings");}
             else if(!alertBot.isEmpty())ReplyAlertService.watch(this,botsAccountBinding,alertBot,alertName,alertMessage);
             alertBot="";alertName="";alertMessage="";if(screen.equals("settings"))render();return;}
+        if(request==HELLO_MICROPHONE&&!preview){
+            boolean granted=false;for(int i=0;i<Math.min(permissions.length,results.length);i++)if(Manifest.permission.RECORD_AUDIO.equals(permissions[i])&&results[i]==PackageManager.PERMISSION_GRANTED)granted=true;
+            if(granted){continueHello();return;}
+            // No microphone, no listening: the switch goes back off.
+            HelloGrok.setEnabled(this,false);helloBlocked=screen.equals("settings");
+            if(screen.equals("settings"))render();return;}
         if(request!=17||preview)return;
         boolean granted=false;for(int i=0;i<Math.min(permissions.length,results.length);i++)if(Manifest.permission.RECORD_AUDIO.equals(permissions[i])&&results[i]==PackageManager.PERMISSION_GRANTED)granted=true;
         if(!awaitingMicrophonePermission||!pendingTalkCurrent()){clearPendingTalk();return;}
@@ -1137,8 +1242,10 @@ public final class MainActivity extends Activity {
                 }
                 JSONObject bot=value.getJSONObject("bot");acceptAccountBot(bot);
                 account.recoverPendingInBackground(binding,bot.optString("id"));
-                // A new sign-in asks about reply alerts once, before the Bot list.
-                if(alertsSetupPending()&&!VoiceService.snapshot().active){screen="alerts_setup";render();return;}
+                // A new sign-in asks about reply alerts, then the assistant button, once each, before the Bot list.
+                if(alertsSetupPending()&&!VoiceService.snapshot().active){pendingAssist=false;screen="alerts_setup";render();return;}
+                if(HelloGrok.setupPending(this)&&!VoiceService.snapshot().active){pendingAssist=false;screen="button_setup";render();return;}
+                if(pendingAssist){pendingAssist=false;assist(bot);return;}
                 // From a reply notification: that Bot's chat, switching Bots if needed.
                 String open=pendingOpenBot;pendingOpenBot="";
                 if(!open.isEmpty()&&!VoiceService.snapshot().active&&!isCall()){
@@ -1224,5 +1331,5 @@ public final class MainActivity extends Activity {
     private void beginLogin(){if(preview){setPreviewScreen("qr");return;}clearBotCache();epoch++;polling=false;main.removeCallbacks(pollTick);task(()->account.beginLogin(),value->{loginAttempt=value.optString("login_attempt","");screen="qr";render();schedulePoll();});}
     private void cancelLogin(){if(preview){setPreviewScreen("welcome");return;}final String attempt=loginAttempt;if(attempt.isEmpty())return;epoch++;polling=false;main.removeCallbacks(pollTick);task(()->{account.cancelLogin(attempt);return new JSONObject();},value->{screen="welcome";render();});}
     private void schedulePoll(){if(!visible||preview||!screen.equals("qr"))return;polling=true;main.removeCallbacks(pollTick);main.postDelayed(pollTick,3000);}
-    private void pollLogin(){if(preview||!visible||!polling||!screen.equals("qr"))return;task(()->account.pollLogin(),value->{if("waiting".equals(value.optString("status")))schedulePoll();else{polling=false;if("ready".equals(value.optString("status")))setAlertsSetupPending(true);loadAccount();}});}
+    private void pollLogin(){if(preview||!visible||!polling||!screen.equals("qr"))return;task(()->account.pollLogin(),value->{if("waiting".equals(value.optString("status")))schedulePoll();else{polling=false;if("ready".equals(value.optString("status"))){setAlertsSetupPending(true);HelloGrok.setSetupPending(this,true);}loadAccount();}});}
 }

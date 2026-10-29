@@ -11,12 +11,26 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
     <application android:label="Grok Wear" android:icon="@drawable/ic_voice" android:theme="@style/AppTheme" android:allowBackup="false" android:fullBackupContent="@xml/backup_rules" android:dataExtractionRules="@xml/data_extraction_rules" android:usesCleartextTraffic="false" android:supportsRtl="true">
         <meta-data android:name="com.google.android.wearable.standalone" android:value="true" />
         <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:taskAffinity="si.zya.grokwear">
             <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
         </activity>
+        <!-- The watch's assistant button or gesture: a call with the main Bot. -->
+        <activity-alias android:name=".AssistActivity" android:targetActivity=".MainActivity" android:exported="true" android:label="Grok Wear">
+            <intent-filter><action android:name="android.intent.action.ASSIST"/><action android:name="android.intent.action.VOICE_ASSIST"/><category android:name="android.intent.category.DEFAULT"/></intent-filter>
+        </activity-alias>
         <service android:name=".VoiceService" android:exported="false" android:foregroundServiceType="microphone|mediaPlayback" />
         <service android:name=".ReplyAlertService" android:exported="false" android:foregroundServiceType="dataSync" />
+        <!-- Bound by Android only while Grok Wear is the digital assistant; listens for "Hello Grok" when that's turned on. -->
+        <service android:name=".GrokAssistantService" android:exported="true" android:permission="android.permission.BIND_VOICE_INTERACTION" android:foregroundServiceType="microphone">
+            <meta-data android:name="android.voice_interaction" android:resource="@xml/grok_assistant" />
+            <intent-filter><action android:name="android.service.voice.VoiceInteractionService" /></intent-filter>
+        </service>
+        <service android:name=".GrokAssistantSessionService" android:exported="true" android:permission="android.permission.BIND_VOICE_INTERACTION" />
+        <service android:name=".GrokRecognitionService" android:exported="true" android:permission="android.permission.RECORD_AUDIO">
+            <intent-filter><action android:name="android.speech.RecognitionService" /></intent-filter>
+        </service>
     </application>
 </manifest>
