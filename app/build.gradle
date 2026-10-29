@@ -17,7 +17,7 @@ android {
         applicationId 'si.zya.grokwear'
         minSdk 30
         targetSdk 36
-        versionCode 29
+        versionCode 30
         versionName '0.6.0'
     }
     signingConfigs {

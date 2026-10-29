@@ -1100,6 +1100,12 @@ public final class MainActivity extends Activity {
         if(preview){previewButton=!previewButton;render();return;}
         try{startActivity(AssistantRole.settings(this));}catch(RuntimeException unavailable){render();}
     }
+    /** The app's side for a report: Bots, the main Bot, the last load and reply alerts. No names. */
+    private String reportState(){
+        if(preview)return "";
+        return bots.length()+" Bots"+(botsCached?"":" (none loaded)")+" · main Bot "+(primaryBot()!=null?"set":preferencesKnown?"none":"unknown")
+            +" · loaded "+(botsFetchedAtMs>0?ago(botsFetchedAtMs):"never")+" · reply alerts "+(replyAlerts()?"on":"off");
+    }
     /** Report a problem from where it happened: the issue names the place, and Back returns there. */
     private void openReport(String where,String returnTo){reportWhere=where;reportReturnScreen=returnTo;reportByEmail=true;screen="report";render();}
     /** After 5 s the wait and the network show, so a stuck list says how long and over what. */
@@ -1142,7 +1148,7 @@ public final class MainActivity extends Activity {
         android.util.DisplayMetrics screenSize=getResources().getDisplayMetrics();int tall=screenSize.heightPixels;
         TextView scan=label("Scan with your phone",12,WHITE);scan.measure(0,0);
         ImageView code=new ImageView(this);code.setContentDescription("QR code for a new GitHub issue");
-        int size=drawDenseQr(code,ProblemReport.url(this,reportWhere,reportByEmail),(int)(Math.min(tall,screenSize.widthPixels)*.70f));
+        int size=drawDenseQr(code,ProblemReport.url(this,reportWhere,reportState(),reportByEmail),(int)(Math.min(tall,screenSize.widthPixels)*.70f));
         // The scroll view starts 23 dp down and the body adds 3 dp.
         LinearLayout.LayoutParams at=new LinearLayout.LayoutParams(size,size);at.topMargin=Math.max(0,(tall-size)/2-dp(26)-scan.getMeasuredHeight());at.bottomMargin=Math.max(dp(8),(tall-size)/2-dp(23));
         body.addView(code,at);
@@ -1323,15 +1329,14 @@ public final class MainActivity extends Activity {
         if(!explicit&&(fresh||recentlyAttempted)){refreshPins(false);return;}
         boolean hadError=!botListError.isEmpty();
         cancelRosterRetry();lastBotRefreshAttemptElapsed=elapsed;rosterStartedElapsed=elapsed;rosterFetchActive=true;botsLoading=true;botListError="";
-        // The log keeps first loads, recoveries and slow ones, not the minute-by-minute refreshes.
-        final boolean firstOrRecovery=!botsCached||hadError;
         if(!botsCached||hadError)renderBotListPreservingScroll();
         final int request=++botRequest;activeRosterRequest=request;final String expected=botsAccountBinding;
         rosterWorker.execute(()->{try{
             if(!expected.equals(accountIdentity(account.authState())))throw new IllegalStateException();
             JSONArray found=account.bots();JSONObject saved=account.cachedRoster();
             long took=android.os.SystemClock.elapsedRealtime()-elapsed;
-            if(firstOrRecovery||took>=5000)ProblemReport.event(getApplicationContext(),"Bot list: "+found.length()+" Bots in "+ProblemReport.seconds(took)+" · "+ProblemReport.network(getApplicationContext()));
+            // Every load is logged; a run of them keeps one line, the latest, so failures stay in view.
+            ProblemReport.event(getApplicationContext(),"Bot list: ok · "+found.length()+" Bots in "+ProblemReport.seconds(took)+" · "+ProblemReport.network(getApplicationContext()),"Bot list: ok");
             if(!expected.equals(accountIdentity(account.authState())))throw new IllegalStateException();
             // bots() saves the full sanitized roster before this UI callback, even if navigation changed.
             main.post(()->{if(activeRosterRequest==request)rosterFetchActive=false;applyBotRefresh(request,expected,found);if(currentBotRefresh(request,expected))botsFetchedAtMs=saved.optLong("fetchedAtMs");});

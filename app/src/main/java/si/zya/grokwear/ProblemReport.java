@@ -30,24 +30,40 @@ final class ProblemReport {
     static void note(Context context,String where,Throwable failure){note(context,where,failure,"");}
     /** A failure: where, why, and anything else worth knowing, such as the time taken and the network. */
     static void note(Context context,String where,Throwable failure,String detail){event(context,where+": "+describe(failure)+(detail.isEmpty()?"":" · "+detail));}
-    /** Keeps the newest lines, with the time in UTC, across restarts: the report is often made later. */
-    static synchronized void event(Context context,String text){
+    static void event(Context context,String text){event(context,text,"");}
+    /**
+     * Keeps the newest lines, with the time in UTC, across restarts: the report is often made later.
+     * sameKind: a newest line starting with it is replaced, so a routine success repeated every minute
+     * keeps one line, the latest, instead of pushing the failures out.
+     */
+    static synchronized void event(Context context,String text,String sameKind){
         try{SharedPreferences prefs=context.getSharedPreferences(PREFS,Context.MODE_PRIVATE);
             SimpleDateFormat time=new SimpleDateFormat("MM-dd HH:mm",Locale.ROOT);time.setTimeZone(TimeZone.getTimeZone("UTC"));
-            prefs.edit().putString(LOG,add(prefs.getString(LOG,""),time.format(new Date())+"Z "+text)).apply();}
+            prefs.edit().putString(LOG,add(prefs.getString(LOG,""),time.format(new Date())+"Z "+text,sameKind)).apply();}
         catch(RuntimeException unavailable){}
     }
     /** Newest first, one per line. */
     static String log(Context context){try{return context.getSharedPreferences(PREFS,Context.MODE_PRIVATE).getString(LOG,"");}catch(RuntimeException unavailable){return "";}}
     /** Signing out clears it with the rest of the account's data. */
     static synchronized void forget(Context context){try{context.getSharedPreferences(PREFS,Context.MODE_PRIVATE).edit().remove(LOG).apply();}catch(RuntimeException unavailable){}}
-    /** Newest first, one per line, at most KEEP. */
-    static String add(String recent,String line){
-        StringBuilder out=new StringBuilder(clean(line));int kept=1;
-        for(String old:recent.split("\n"))if(!old.isEmpty()&&kept<KEEP){out.append('\n').append(old);kept++;}
+    static String add(String recent,String line){return add(recent,line,"");}
+    /** Newest first, one per line, at most KEEP; the newest is replaced when it's the same kind (after its "MM-dd HH:mmZ " time). */
+    static String add(String recent,String line,String sameKind){
+        StringBuilder out=new StringBuilder(clean(line));int kept=1;boolean first=true;
+        for(String old:recent.split("\n")){if(old.isEmpty())continue;
+            if(first&&!sameKind.isEmpty()&&old.length()>13&&old.startsWith(sameKind,13)){first=false;continue;}first=false;
+            if(kept<KEEP){out.append('\n').append(old);kept++;}}
         return out.toString();
     }
-    private static String clean(String text){text=text.replaceAll("[\\s\\p{Cc}]+"," ").trim();return text.length()>LONGEST?text.substring(0,LONGEST-1)+"…":text;}
+    private static String clean(String text){return clean(text,LONGEST);}
+    private static String clean(String text,int longest){text=text.replaceAll("[\\s\\p{Cc}]+"," ").trim();return text.length()>longest?text.substring(0,longest-1)+"…":text;}
+    /** Charge and Battery Saver: a saver that throttles the network explains some slow loads. */
+    static String battery(Context context){
+        try{android.os.BatteryManager meter=context.getSystemService(android.os.BatteryManager.class);android.os.PowerManager power=context.getSystemService(android.os.PowerManager.class);
+            int level=meter==null?-1:meter.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY);
+            return "battery "+(level>=0?level+"%":"unknown")+(power!=null&&power.isPowerSaveMode()?", saver on":"");}
+        catch(RuntimeException unknown){return "battery unknown";}
+    }
     /** The service's status or code, the cause's type, or the app's own wording. */
     static String describe(Throwable failure){
         String code=code(failure);
@@ -74,16 +90,20 @@ final class ProblemReport {
     }
     /** Seconds with one decimal, for the log. */
     static String seconds(long ms){return String.format(Locale.ROOT,"%.1f s",ms/1000.0);}
-    /** where: the screen and message the report was made from, such as "Bot list: Bots aren’t available yet (HTTP 503)…", or "". */
-    static String url(Context context,String where,boolean email){
+    /**
+     * where: the screen and message the report was made from, such as "Bot list: Bots aren’t available yet (HTTP 503)…", or "".
+     * state: the app's side, such as how many Bots and when they last loaded, so a report says something even when nothing failed.
+     */
+    static String url(Context context,String where,String state,boolean email){
         return url(Build.MANUFACTURER+" "+Build.MODEL,Build.VERSION.RELEASE+" (API "+Build.VERSION.SDK_INT+")",
-            BuildConfig.VERSION_NAME+" ("+BuildConfig.VERSION_CODE+")",AssistantRole.held(context),network(context),where,log(context),email);
+            BuildConfig.VERSION_NAME+" ("+BuildConfig.VERSION_CODE+")",AssistantRole.held(context),network(context),
+            state+(state.isEmpty()?"":" · ")+battery(context),where,log(context),email);
     }
     /** The details, then the newest log lines that keep the link within LINK_BUDGET. The title names where it happened. */
-    static String url(String watch,String android,String version,boolean button,String network,String where,String log,boolean email){
+    static String url(String watch,String android,String version,boolean button,String network,String state,String where,String log,boolean email){
         String place=where.isEmpty()?"":clean(where.split(":",2)[0]);
         String head=(where.isEmpty()?"":"Where: "+clean(where)+"\n")+"Watch: "+clean(watch)+"\nAndroid: "+clean(android)+"\nGrok Wear: "+clean(version)+"\nAssistant button: "+(button?"on":"off")
-            +"\nNetwork: "+clean(network)+"\nLog (UTC, newest first):\n",tail="\nWhat happened?\n",title=(place.isEmpty()?"Problem":place+" problem")+" on "+clean(watch);
+            +"\nNetwork: "+clean(network)+(state.isEmpty()?"":"\nState: "+clean(state,160))+"\nLog (UTC, newest first):\n",tail="\nWhat happened?\n",title=(place.isEmpty()?"Problem":place+" problem")+" on "+clean(watch);
         StringBuilder lines=new StringBuilder();
         // " · " reads well on the watch but takes 8 characters in a link; " - " takes 3.
         for(String line:log.split("\n")){if(line.isEmpty())continue;

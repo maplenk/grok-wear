@@ -15,6 +15,16 @@ public class ProblemReportTest {
         assertEquals("event 3 second line",lines[14]);
     }
 
+    @Test public void aRepeatedSuccessKeepsOneLineAndFailuresStay() {
+        String log="";
+        log=ProblemReport.add(log,"10-29 14:00Z Bot list: ok · 7 Bots in 1.2 s · Wi-Fi","Bot list: ok");
+        log=ProblemReport.add(log,"10-29 14:01Z Bot list: ok · 7 Bots in 0.9 s · Wi-Fi","Bot list: ok");
+        assertEquals("10-29 14:01Z Bot list: ok · 7 Bots in 0.9 s · Wi-Fi",log);
+        log=ProblemReport.add(log,"10-29 14:02Z Bot list: HTTP 503 · after 0.8 s · Wi-Fi");
+        log=ProblemReport.add(log,"10-29 14:03Z Bot list: ok · 7 Bots in 1.0 s · Wi-Fi","Bot list: ok");
+        assertEquals("10-29 14:03Z Bot list: ok · 7 Bots in 1.0 s · Wi-Fi\n10-29 14:02Z Bot list: HTTP 503 · after 0.8 s · Wi-Fi\n10-29 14:01Z Bot list: ok · 7 Bots in 0.9 s · Wi-Fi",log);
+    }
+
     @Test public void describesWithoutNetworkMessages() {
         assertEquals("HTTP 503",ProblemReport.describe(new GrokCore.Failure("Grok request failed (HTTP 503).",false,"",503)));
         assertEquals("HTTP 403 permission_denied",ProblemReport.describe(new GrokCore.Failure("x",true,"permission_denied",403)));
@@ -33,7 +43,7 @@ public class ProblemReportTest {
     }
 
     @Test public void issueLinkCarriesTheDetailsAndTheLog() throws Exception {
-        String url=ProblemReport.url("Google Pixel Watch 5","16 (API 36)","0.6.0 (28)",false,"via phone","",
+        String url=ProblemReport.url("Google Pixel Watch 5","16 (API 36)","0.6.0 (28)",false,"via phone","","",
             "10-29 14:02Z Bot list: HTTP 503 · after 0.8 s · via phone\n10-29 14:01Z Bot list: 7 in 1.2 s · Wi-Fi",false);
         assertTrue(url.startsWith("https://github.com/maplenk/grok-wear/issues/new?title="));
         String decoded=URLDecoder.decode(url,"UTF-8");
@@ -41,23 +51,23 @@ public class ProblemReportTest {
         assertTrue(decoded.contains("Watch: Google Pixel Watch 5\nAndroid: 16 (API 36)\nGrok Wear: 0.6.0 (28)\nAssistant button: off\nNetwork: via phone\n"
             +"Log (UTC, newest first):\n10-29 14:02Z Bot list: HTTP 503 - after 0.8 s - via phone\n10-29 14:01Z Bot list: 7 in 1.2 s - Wi-Fi\n"));
         assertTrue(decoded.endsWith("What happened?\n"));
-        assertTrue(ProblemReport.url("a","b","c",false,"Wi-Fi","","",false).contains("none"));
+        assertTrue(ProblemReport.url("a","b","c",false,"Wi-Fi","","","",false).contains("none"));
     }
 
     @Test public void aReportFromAScreenNamesIt() throws Exception {
-        String decoded=URLDecoder.decode(ProblemReport.url("Google Pixel Watch","15 (API 35)","0.6.0 (28)",true,"via phone",
+        String decoded=URLDecoder.decode(ProblemReport.url("Google Pixel Watch","15 (API 35)","0.6.0 (28)",true,"via phone","",
             "Bot list: Bots aren’t available yet (HTTP 503). Try again later.","",false),"UTF-8");
         assertTrue(decoded.contains("title=Bot list problem on Google Pixel Watch&body=Where: Bot list: Bots aren’t available yet (HTTP 503). Try again later.\nWatch: Google Pixel Watch\n"));
     }
 
     @Test public void emailIsAMailtoLinkWithSpacesAsPercent20() throws Exception {
-        String url=ProblemReport.url("Google Pixel Watch","15 (API 35)","0.6.0 (29)",true,"Wi-Fi","Bot list: Bots aren’t available yet (HTTP 503).",
+        String url=ProblemReport.url("Google Pixel Watch","15 (API 35)","0.6.0 (29)",true,"Wi-Fi","7 Bots · main Bot set · loaded 2 min ago · reply alerts on · battery 54%","Bot list: Bots aren’t available yet (HTTP 503).",
             "10-29 14:02Z Bot list: HTTP 503 · after 0.8 s · Wi-Fi",true);
         assertTrue(url.startsWith("mailto:namankhator@gmail.com?subject=Bot%20list%20problem%20on%20Google%20Pixel%20Watch&body=Where:%20Bot%20list:"));
         assertFalse("mail apps show + literally",url.contains("+"));
         assertTrue(url.length()<=ProblemReport.LINK_BUDGET);
         String body=URLDecoder.decode(url.substring(url.indexOf("&body=")+6),"UTF-8");
-        assertTrue(body.contains("Log (UTC, newest first):\n10-29 14:02Z Bot list: HTTP 503 - after 0.8 s - Wi-Fi\n"));
+        assertTrue(body.contains("Network: Wi-Fi\nState: 7 Bots · main Bot set · loaded 2 min ago · reply alerts on · battery 54%\nLog (UTC, newest first):\n10-29 14:02Z Bot list: HTTP 503 - after 0.8 s - Wi-Fi\n"));
     }
 
     @Test public void encodingLeavesQueryCharactersAndDecodesBack() throws Exception {
@@ -70,7 +80,7 @@ public class ProblemReportTest {
     @Test public void aFullLogKeepsTheNewestLinesThatFit() throws Exception {
         String log="";
         for(int i=1;i<=15;i++)log=ProblemReport.add(log,String.format("10-29 14:%02dZ Call: transport_closed · 61.0 s · via phone · Voice connection dropped. Try again.",i));
-        String url=ProblemReport.url("samsung SM-L340","15 (API 35)","0.6.0 (28)",true,"Wi-Fi","Call dropped: Voice connection dropped. Try again.",log,false);
+        String url=ProblemReport.url("samsung SM-L340","15 (API 35)","0.6.0 (28)",true,"Wi-Fi","","Call dropped: Voice connection dropped. Try again.",log,false);
         assertTrue(url.length()<=ProblemReport.LINK_BUDGET);
         String decoded=URLDecoder.decode(url,"UTF-8");
         assertTrue("newest line kept",decoded.contains("14:15Z"));
