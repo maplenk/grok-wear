@@ -351,8 +351,13 @@ final class BotAccount {
         }catch(Exception unreadable){return "";}
     }
     private static JSONObject execute(Request.Builder request,JSONObject body,boolean arrayAllowed) throws Exception {return execute(HTTP,request,body,arrayAllowed);}
+    /**
+     * The last gateway reply on this thread, for Report a problem: ms until the reply started, ms to read
+     * it, and its size in bytes; -1 when unknown. Tells a slow server from a slow link.
+     */
+    static final ThreadLocal<long[]> LAST_TRANSFER=ThreadLocal.withInitial(()->new long[]{-1,-1,-1});
     private static JSONObject execute(OkHttpClient client,Request.Builder request,JSONObject body,boolean arrayAllowed) throws Exception {
-        byte[] bytes=body.toString().getBytes(StandardCharsets.UTF_8);
+        byte[] bytes=body.toString().getBytes(StandardCharsets.UTF_8);LAST_TRANSFER.set(new long[]{-1,-1,-1});long sent=System.nanoTime();
         try {
             if(bytes.length>1024*1024)throw new GrokCore.Failure("Grok request is too large.",true);
             RequestBody payload=new RequestBody(){
@@ -365,7 +370,9 @@ final class BotAccount {
                 // A 4xx is the service refusing; a 5xx may or may not have taken effect.
                 if(response.code()!=200)throw new GrokCore.Failure("Grok request failed (HTTP "+response.code()+").",response.code()<500,errorCode(response),response.code());
                 if(response.body()==null)throw new java.io.IOException();
+                long started=System.nanoTime();
                 byte[] received=GrokVault.readBounded(response.body().byteStream(),1024*1024);
+                LAST_TRANSFER.set(new long[]{(started-sent)/1_000_000,(System.nanoTime()-started)/1_000_000,received.length});
                 try {String text=new String(received,StandardCharsets.UTF_8);
                     // Some operations answer with nothing (or null) on success.
                     if(text.trim().isEmpty()||text.trim().equals("null"))return new JSONObject();
@@ -375,7 +382,8 @@ final class BotAccount {
             }
         }catch(GrokCore.Failure safe){throw safe;}
         // A dropped or timed-out request may have reached Grok: not a refusal.
-        catch(Exception failure){throw new GrokCore.Failure("Grok connection failed. Check sign-in before trying again.",false);}
+        // The cause stays for Report a problem; only this wording is shown.
+        catch(Exception failure){GrokCore.Failure lost=new GrokCore.Failure("Grok connection failed. Check sign-in before trying again.",false);lost.initCause(failure);throw lost;}
         finally{java.util.Arrays.fill(bytes,(byte)0);}
     }
 }

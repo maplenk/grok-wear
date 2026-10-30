@@ -1,0 +1,5 @@
+<voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sessionService="si.zya.grokwear.GrokAssistantSessionService"
+    android:recognitionService="si.zya.grokwear.GrokRecognitionService"
+    android:supportsAssist="true"
+    android:supportsLaunchVoiceAssistFromKeyguard="true" />

@@ -174,7 +174,7 @@ final class GrokAuthCore {
     JSONObject backendContext() throws Exception {
         renewIfDue();
         synchronized(LOCK) {
-            JSONObject root=pendingRoot();JSONObject tokens=needTokens(root);
+            JSONObject root=tokensRoot();JSONObject tokens=needTokens(root);
             JSONObject context=new JSONObject().put("accessToken",tokens.getString("access"));
             if(tokens.has("team"))context.put("selectedTeamId",tokens.getLong("team"));
             return context;
@@ -184,6 +184,8 @@ final class GrokAuthCore {
     private void renewIfDue() throws Exception {
         JSONObject request;String epoch,id,subject;long team;BootstrapFlight flight;
         synchronized(LOCK) {
+            // Tokens that aren't due need no renewal, so no wait for a gateway bootstrap either.
+            if(needTokens(tokensRoot()).getLong("expires_at_ms")-clock.now()>REFRESH_LEAD_MS)return;
             JSONObject root=pendingRoot();JSONObject tokens=needTokens(root);
             if(tokens.getLong("expires_at_ms")-clock.now()>REFRESH_LEAD_MS)return;
             request=new JSONObject().put("refreshToken",tokens.getString("refresh"));
@@ -279,6 +281,16 @@ final class GrokAuthCore {
     }
     private void clearNonRotating(String epoch,String id) throws Exception {
         synchronized(LOCK) {JSONObject root=active(epoch,id);root.remove("operation");store.write(root);}
+    }
+    /**
+     * Called under LOCK, for reading tokens only. A gateway bootstrap this process is running doesn't
+     * change them, so a call's backend steps neither wait for it (it can take a while when the Bot's
+     * sandbox is starting) nor fail with it. Anything else goes through pendingRoot.
+     */
+    private JSONObject tokensRoot() throws Exception {
+        JSONObject root=store.read(),op=root.optJSONObject("operation");
+        if(op!=null&&BOOTSTRAP.equals(op.optString("kind"))&&BOOTSTRAPS.containsKey(op.optString("id")))return root;
+        return pendingRoot();
     }
     /** Called under LOCK. A persisted bootstrap without a live owner is safe to repeat. */
     private JSONObject pendingRoot() throws Exception {

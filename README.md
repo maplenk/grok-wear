@@ -10,7 +10,7 @@ Talk to any of your Grok Bots from your Wear OS watch. Hands-free, real-time voi
 
 **[Install guide](docs/INSTALL.md)** · about ten minutes, once, from a computer on the same Wi-Fi.
 
-**Works on:** Wear OS 3+ (API 30+). Tested on Galaxy Watch and the Wear OS emulator.
+**Works on:** Wear OS 3+ (API 30+). Tested on Galaxy Watch, Pixel Watch and the Wear OS emulator.
 
 ## What it does
 
@@ -31,6 +31,9 @@ Talk to any of your Grok Bots from your Wear OS watch. Hands-free, real-time voi
 - **Text messages.** Tap Message on a Bot's page, then dictate, type or draw. You review the text before it goes, and the chat shows Sending…, then Sent, then the Bot's reply.
 - **Live updates.** While the app is open, new messages, unread counts and "Working…" appear as they happen, from the same live feed the official apps use.
 - **Reply alerts.** After sending a message you can leave the app: the watch buzzes when the Bot replies, and tapping the alert opens that chat. You choose whether to turn them on right after signing in, and can switch them on or off any time in Settings.
+- **Assistant button.** Hold the watch's assistant button (on a Galaxy Watch, the Home key; on a Pixel Watch, the crown) to call your main Bot, as the official app's assistant does on phones. It costs no battery and keeps no microphone open. You're offered it right after signing in, and it's in Settings; turning it on makes Grok Wear the watch's digital assistant in place of the current one.
+- **Report a problem.** A stuck Bot list, a call that stopped or dropped, and a sign-in problem each have a Report a problem button, also in Settings. It shows a QR code. Scan it with your phone to write an email to the developer, or open a new GitHub issue, with your watch model, the app version and a short log of recent Bot list loads and calls filled in. (Mail apps on Wear OS don't accept a drafted email from other apps, so it's sent from the phone.)
+- **When the Bot list is slow or stuck,** it shows how long it has been loading and over which network, and a failure says why. Details shows the recent attempts, with Report a problem one tap away. Nothing is sent from the watch.
 
 ## Status and limits
 
@@ -38,6 +41,7 @@ This is an experimental client. It talks to Grok Bot's **private, undocumented c
 
 - Calls end after five minutes. A dropped connection is redialled automatically for up to about two minutes.
 - The watch needs its own internet connection (Wi-Fi or LTE).
+- While Grok Wear is the watch's assistant, "Hey Google" and the watch's own assistant don't answer; choose another assistant in watch settings to switch back.
 - Reply alerts cover messages sent from the watch, for up to ten minutes after sending. Grok Bot's own push notifications go to its phone app only; Wear OS can mirror those to the watch, but tapping them opens the phone.
 
 ## Build from source
