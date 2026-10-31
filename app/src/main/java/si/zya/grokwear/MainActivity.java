@@ -857,7 +857,7 @@ public final class MainActivity extends Activity {
         shownCaption=null;shownMuteColor=0;shownStatusSize=0;
         FrameLayout.LayoutParams sp=(FrameLayout.LayoutParams)currentScroll.getLayoutParams();sp.topMargin=0;sp.bottomMargin=dp(62);currentScroll.setLayoutParams(sp);body.setPadding(0,0,0,dp(24));
         callStage=new FrameLayout(this);body.addView(callStage,new LinearLayout.LayoutParams(-1,dp(side-62)));callCompact=!caption.isEmpty();
-        orb=new BotAvatarView(this);avatars.add(orb);applyAvatar(orb,botName,selectedMetadata);orb.state(screen,accent(),0);orb.running(visible);orb.setOnClickListener(v->{if(preview){screen="listening";caption="";updateCallText();}else VoiceService.interrupt(this);});
+        orb=new BotAvatarView(this);avatars.add(orb);applyAvatar(orb,botName,selectedMetadata);orb.state(CallFace.orb(screen,preview?"":VoiceService.snapshot().state,preview),accent(),0);orb.running(visible);orb.setOnClickListener(v->{if(preview){screen="listening";caption="";updateCallText();}else VoiceService.interrupt(this);});
         int faceSize=callCompact?44:64;FrameLayout.LayoutParams fp=new FrameLayout.LayoutParams(dp(faceSize),dp(faceSize),Gravity.TOP|Gravity.CENTER_HORIZONTAL);fp.topMargin=dp(side*(callCompact?.25f:.34f)-faceSize/2f);callStage.addView(orb,fp);
         callBot=text(botName,getResources().getConfiguration().fontScale>1.2f?12:15,WHITE);callBot.setTypeface(Typeface.create(Typeface.DEFAULT,600,false));callBot.setSingleLine(true);callBot.setEllipsize(android.text.TextUtils.TruncateAt.END);callBot.setContentDescription("Current Bot: "+botName);placeCall(callBot,callCompact?.385f:.535f,22);
         LinearLayout status=new LinearLayout(this);status.setGravity(Gravity.CENTER);waveform=new WaveformView(this);waveform.setColor(accent());waveform.running(visible);status.addView(waveform,new LinearLayout.LayoutParams(dp(36),dp(18)));callStatus=text("",13,SECONDARY);callStatus.setSingleLine(true);callStatus.setEllipsize(android.text.TextUtils.TruncateAt.END);LinearLayout.LayoutParams statusText=new LinearLayout.LayoutParams(-2,-2);statusText.leftMargin=dp(10);status.addView(callStatus,statusText);placeCall(status,callCompact?.47f:.615f,22);
@@ -896,7 +896,8 @@ public final class MainActivity extends Activity {
     private void updateCallText(){
         if(callBot!=null&&!android.text.TextUtils.equals(callBot.getText(),botName))callBot.setText(botName);
         VoiceService.Snapshot snap=preview?null:VoiceService.snapshot();String phase=preview?screen:snap.state.toLowerCase(java.util.Locale.ROOT);
-        if(callStatus!=null){String status=phase.equals("connecting")?(preview?"Calling…":snap.syncStatus.equals("Loading shared history")?"Loading chat…":"Connecting…"):phase.equals("reconnecting")?(preview?"Calling…":"Reconnecting…"):phase.equals("ending")?"Ending…":duration(preview?previewElapsed():snap.elapsedMs);if(phase.equals("muted"))status="Muted · "+status;if(phase.equals("paused"))status="Paused · "+status;long elapsed=preview?previewElapsed():snap.elapsedMs;long budgetElapsed=preview?previewElapsed():snap.deadlineElapsedMs>0?300000-Math.max(0,snap.deadlineElapsedMs-android.os.SystemClock.elapsedRealtime()):0;String warning=callLimitNotice(budgetElapsed);
+        long callMs=preview?previewElapsed():CallElapsed.millis(snap.liveStartedAt,snap.elapsedMs,android.os.SystemClock.elapsedRealtime());
+        if(callStatus!=null){String status=phase.equals("connecting")?(preview?"Calling…":snap.syncStatus.equals("Loading shared history")?"Loading chat…":"Connecting…"):phase.equals("reconnecting")?(preview?"Calling…":"Reconnecting…"):phase.equals("ending")?"Ending…":duration(callMs);if(phase.equals("muted"))status="Muted · "+status;if(phase.equals("paused"))status="Paused · "+status;long elapsed=callMs;long budgetElapsed=preview?previewElapsed():snap.deadlineElapsedMs>0?300000-Math.max(0,snap.deadlineElapsedMs-android.os.SystemClock.elapsedRealtime()):0;String warning=callLimitNotice(budgetElapsed);
             boolean showLimit=!warning.isEmpty()&&!phase.equals("connecting")&&!phase.equals("reconnecting")&&!phase.equals("ending");
             if(showLimit)status=(phase.equals("muted")?"Muted · ":phase.equals("paused")?"Paused · ":"")+duration(elapsed)+" · "+warning;
             // Snapshots arrive many times a second; only touch views whose content changed.
@@ -1281,7 +1282,8 @@ public final class MainActivity extends Activity {
         if(s.active){if(!micTicked&&!s.state.equals("Connecting")&&!s.state.equals("Ending")){micTicked=true;root.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK);}botName=s.botName.isEmpty()?botName:s.botName;caption=s.caption;captionLine=s.captionLine;speaker=s.speaker;screen=s.muted?"muted":s.state.toLowerCase(java.util.Locale.ROOT);if(!isCall())screen="connecting";}
         else{safeError=s.error;screen="Call dropped".equals(s.state)?"dropped":s.error.isEmpty()?(java.util.Set.of("connecting","listening","thinking","speaking","muted","paused","reconnecting","done").contains(previous)?"ready":"ready"):"error";caption="";captionLine="";}
         if(isCall()&&isCallScreen(previous)&&orb!=null){
-            orb.state(screen,accent(),screen.equals("speaking")?s.outputLevel:s.inputLevel);updateCallText();
+            String face=CallFace.orb(screen,s.state,false);
+            orb.state(face,accent(),face.equals("speaking")?s.outputLevel:s.inputLevel);updateCallText();
         }else render();
     }
     private boolean isCallScreen(String value){return java.util.Set.of("connecting","listening","thinking","speaking","muted","paused","reconnecting").contains(value);}
