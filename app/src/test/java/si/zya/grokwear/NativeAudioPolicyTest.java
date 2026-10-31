@@ -19,6 +19,19 @@ public class NativeAudioPolicyTest {
         NativeAudio.CaptureGate gate=new NativeAudio.CaptureGate();gate.mute(false);
         long read=gate.begin();gate.mute(false);assertTrue(gate.accepts(read));
     }
+    @Test public void voiceCallFractionIsZeroWithoutARangeAndClamped(){
+        assertEquals(0f,NativeAudio.voiceCallFraction(3,5,5),0f);
+        assertEquals(0f,NativeAudio.voiceCallFraction(1,2,1),0f);
+        assertEquals(0f,NativeAudio.voiceCallFraction(0,0,10),0f);
+        assertEquals(.5f,NativeAudio.voiceCallFraction(5,0,10),0f);
+        assertEquals(1f,NativeAudio.voiceCallFraction(10,0,10),0f);
+        assertEquals(0f,NativeAudio.voiceCallFraction(-1,0,10),0f);
+        assertEquals(1f,NativeAudio.voiceCallFraction(12,0,10),0f);
+    }
+    @Test public void echoDiagnosticsAreCountsAndBooleansOnly(){
+        String line=NativeAudio.echoDiagnostics(true,false,true,3,4);
+        assertEquals("aec_available=true,aec_created=false,aec_enabled=true,gated=3,passed=4",line);
+    }
     @Test public void pcmMeterHandlesSignedLittleEndianSilenceAndClipping() {
         assertEquals(0,NativeAudio.level(new byte[20]),0);
         assertEquals(0,NativeAudio.level(new byte[0]),0);
