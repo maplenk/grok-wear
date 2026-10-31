@@ -268,10 +268,12 @@ public final class VoiceService extends Service {
         // For Report a problem: how it ended and how long it ran, and for a broken call the words shown on the watch.
         // A call that never started is already logged by its setup failure.
         boolean broke=finalState.equals("Call stopped")||finalState.equals("Call dropped");
-        if(wentLive||broke)ProblemReport.event(this,"Call: "+stopCategory(finalState,safe)+" · "+ProblemReport.seconds(finishedElapsed)+" · "+ProblemReport.network(this)+(broke&&!safe.isEmpty()?" · "+safe:""));
+        // Counts and booleans only, on the same line as the other call_stop diagnostics.
+        String echo=echoDiagnostics();
+        if(wentLive||broke)ProblemReport.event(this,"Call: "+stopCategory(finalState,safe)+" · "+ProblemReport.seconds(finishedElapsed)+" · "+ProblemReport.network(this)+(broke&&!safe.isEmpty()?" · "+safe:"")+" · "+echo);
         android.util.Log.i("GrokWearVoice","call_stop cause="+stopCategory(finalState,safe)+" duration_ms="+finishedElapsed
                 +" lease_ms="+leaseMs+",plan_ms="+planMs+",mint_ms="+mintMs+",dial_ms="+dialMs+",listening_ms="+listeningMs
-                +(session==null?"":" "+session.protocolDiagnostics()));
+                +(session==null?"":" "+session.protocolDiagnostics())+" "+echo);
         unwatchNetwork();replyText="";lastSpoken="";
         running=false;generation++;VoiceStartup preparing=startup;startup=null;if(preparing!=null)preparing.close();main.removeCallbacksAndMessages(null);NativeVoiceSession old=session;session=null;if(old!=null){if(!drained)old.discardUnheardReply();old.end();}
         BotAccount account=callAccount;HistoryCoordinator.Context context=callContext;JSONObject bot=callBot;callAccount=null;callContext=null;callBot=null;
@@ -314,6 +316,7 @@ public final class VoiceService extends Service {
         NativeAudio closing; synchronized(this){closing=audio;audio=null;}if(closing!=null)closing.close();
         if(wake!=null){if(wake.isHeld())wake.release();wake=null;}muted=false;inputLevel=0;outputLevel=0;state=finalState;error=safe;emit();if(savingRecord){((NotificationManager)getSystemService(NOTIFICATION_SERVICE)).notify(NOTIFICATION,new NotificationCompat.Builder(this,CHANNEL).setSmallIcon(R.drawable.ic_voice_status).setContentTitle("Saving shared history").setContentText("Microphone is off").setOngoing(true).setOnlyAlertOnce(true).build());}else{stopForeground(STOP_FOREGROUND_REMOVE);stopSelf();}
     }
+    private String echoDiagnostics(){NativeAudio live=audio;return live==null?NativeAudio.echoDiagnostics(false,false,false,0,0):live.echoDiagnostics();}
     private static String stopCategory(String state,String safe){
         if(state.contains("five-minute")||safe.contains("five-minute"))return "call_time_limit";
         if("Call dropped".equals(state))return "transport_closed";
