@@ -270,7 +270,7 @@ public final class VoiceService extends Service {
         boolean broke=finalState.equals("Call stopped")||finalState.equals("Call dropped");
         // Counts and booleans only, on the same line as the other call_stop diagnostics.
         String echo=echoDiagnostics();
-        if(wentLive||broke)ProblemReport.event(this,"Call: "+stopCategory(finalState,safe)+" · "+ProblemReport.seconds(finishedElapsed)+" · "+ProblemReport.network(this)+(broke&&!safe.isEmpty()?" · "+safe:"")+" · "+echo);
+        if(wentLive||broke)ProblemReport.event(this,"Call: "+stopCategory(finalState,safe)+" · "+ProblemReport.seconds(finishedElapsed)+" · "+ProblemReport.network(this)+" · "+echo+(broke&&!safe.isEmpty()?" · "+safe:""));
         android.util.Log.i("GrokWearVoice","call_stop cause="+stopCategory(finalState,safe)+" duration_ms="+finishedElapsed
                 +" lease_ms="+leaseMs+",plan_ms="+planMs+",mint_ms="+mintMs+",dial_ms="+dialMs+",listening_ms="+listeningMs
                 +(session==null?"":" "+session.protocolDiagnostics())+" "+echo);
