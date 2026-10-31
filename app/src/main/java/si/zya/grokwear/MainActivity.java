@@ -914,13 +914,17 @@ public final class MainActivity extends Activity {
         if(!caption.isEmpty()&&!callCompact&&orb!=null){callCompact=true;FrameLayout.LayoutParams p=(FrameLayout.LayoutParams)orb.getLayoutParams();p.width=dp(44);p.height=dp(44);p.topMargin=dp(side*.25f-22);orb.setLayoutParams(p);orb.setScaleX(64f/44);orb.setScaleY(64f/44);orb.animate().scaleX(1).scaleY(1).setDuration(android.animation.ValueAnimator.areAnimatorsEnabled()?520:0).start();moveCall(callBot,.385f);if(callStatus!=null)moveCall((View)callStatus.getParent(),.47f);}
     }
     private void moveCall(View v,float at){FrameLayout.LayoutParams p=(FrameLayout.LayoutParams)v.getLayoutParams();p.topMargin=dp(side*at-11);v.setLayoutParams(p);}
+    // The focused ScrollView consumes a crown turn on API 26+ before onGenericMotionEvent runs.
+    @Override public boolean dispatchGenericMotionEvent(android.view.MotionEvent event){
+        if(event.getAction()==android.view.MotionEvent.ACTION_SCROLL&&event.isFromSource(android.view.InputDevice.SOURCE_ROTARY_ENCODER)&&isCall()){
+            adjustCallVolume(event.getAxisValue(android.view.MotionEvent.AXIS_SCROLL));return true;
+        }
+        return super.dispatchGenericMotionEvent(event);
+    }
     @Override public boolean onGenericMotionEvent(android.view.MotionEvent event){
         if(event.getAction()==android.view.MotionEvent.ACTION_SCROLL&&event.isFromSource(android.view.InputDevice.SOURCE_ROTARY_ENCODER)&&currentScroll!=null){
-            float scroll=event.getAxisValue(android.view.MotionEvent.AXIS_SCROLL);
-            // Paused is still this call, so the crown changes call volume instead of scrolling.
-            if(isCall()){adjustCallVolume(scroll);return true;}
             float factor=android.view.ViewConfiguration.get(this).getScaledVerticalScrollFactor();
-            currentScroll.scrollBy(0,-Math.round(scroll*factor));return true;
+            currentScroll.scrollBy(0,-Math.round(event.getAxisValue(android.view.MotionEvent.AXIS_SCROLL)*factor));return true;
         }
         return super.onGenericMotionEvent(event);
     }
