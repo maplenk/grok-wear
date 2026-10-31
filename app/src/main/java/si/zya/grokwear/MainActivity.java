@@ -8,6 +8,7 @@ import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.media.AudioManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -84,6 +85,8 @@ public final class MainActivity extends Activity {
     private BotAvatarView orb;
     private final java.util.ArrayList<BotAvatarView> avatars=new java.util.ArrayList<>();
     private ScrollView currentScroll;
+    private final CrownSteps crownSteps=new CrownSteps();
+    private boolean callStream;
     private TextView callBot,callCaption,callHint;
     private Button callMute,qrCancel;
     private WaveformView waveform;private TextView callStatus;private FrameLayout callStage;private boolean callCompact;private long previewCallAt;
@@ -216,6 +219,7 @@ public final class MainActivity extends Activity {
     private int dp(float value){return Math.round(value*getResources().getDisplayMetrics().density);}
     private GradientDrawable shape(int color,float radius){GradientDrawable d=new GradientDrawable();d.setColor(color);d.setCornerRadius(dp(radius));return d;}
     private void render(){
+        syncCallVolume();
         // Re-rendering the same screen (history refresh, sync status) keeps the reader's place.
         final int keepY=currentScroll!=null&&screen.equals(renderedScreen)&&!isCall()?currentScroll.getScrollY():0;renderedScreen=screen;bottomAction=false;
         if(!screen.equals("bots"))pickToCall=false;loadingLine=null;
@@ -912,10 +916,29 @@ public final class MainActivity extends Activity {
     private void moveCall(View v,float at){FrameLayout.LayoutParams p=(FrameLayout.LayoutParams)v.getLayoutParams();p.topMargin=dp(side*at-11);v.setLayoutParams(p);}
     @Override public boolean onGenericMotionEvent(android.view.MotionEvent event){
         if(event.getAction()==android.view.MotionEvent.ACTION_SCROLL&&event.isFromSource(android.view.InputDevice.SOURCE_ROTARY_ENCODER)&&currentScroll!=null){
+            float scroll=event.getAxisValue(android.view.MotionEvent.AXIS_SCROLL);
+            // Paused is still this call, so the crown changes call volume instead of scrolling.
+            if(isCall()){adjustCallVolume(scroll);return true;}
             float factor=android.view.ViewConfiguration.get(this).getScaledVerticalScrollFactor();
-            currentScroll.scrollBy(0,-Math.round(event.getAxisValue(android.view.MotionEvent.AXIS_SCROLL)*factor));return true;
+            currentScroll.scrollBy(0,-Math.round(scroll*factor));return true;
         }
         return super.onGenericMotionEvent(event);
+    }
+    /** Clockwise raises the call. Scrolling down is scrollBy(0, -AXIS_SCROLL), and that downward turn is clockwise. */
+    private void adjustCallVolume(float axisScroll){
+        int steps=crownSteps.consume(-axisScroll);if(steps==0)return;
+        AudioManager audio=(AudioManager)getSystemService(AUDIO_SERVICE);if(audio==null)return;
+        int direction=steps>0?AudioManager.ADJUST_RAISE:AudioManager.ADJUST_LOWER;
+        for(int i=0,n=Math.abs(steps);i<n;i++){
+            audio.adjustStreamVolume(AudioManager.STREAM_VOICE_CALL,direction,AudioManager.FLAG_SHOW_UI);
+            currentScroll.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK);
+        }
+    }
+    /** Voice-call stream while the call screen is up; the default stream again when that screen or the call is gone. */
+    private void syncCallVolume(){
+        boolean onCall=isCall();if(onCall==callStream)return;callStream=onCall;
+        setVolumeControlStream(onCall?AudioManager.STREAM_VOICE_CALL:AudioManager.USE_DEFAULT_STREAM_TYPE);
+        if(!onCall)crownSteps.reset();
     }
     private void showCaption(){String full=caption;if(full.isEmpty())return;ScrollView scroll=new ScrollView(this);TextView t=text(MessageText.plain(full),14,"You".equalsIgnoreCase(speaker)?SECONDARY:WHITE);t.setPadding(dp(18),dp(12),dp(18),dp(12));scroll.addView(t);new android.app.AlertDialog.Builder(this).setTitle(speaker.isEmpty()?"Caption":speaker).setView(scroll).setPositiveButton("Close",(d,w)->{}).show();}
     private void message(String heading,String detail,String action,Runnable run){
