@@ -89,7 +89,7 @@ public final class MainActivity extends Activity {
     private boolean callStream;
     private TextView callBot,callCaption,callHint;
     private Button callMute,qrCancel;
-    private WaveformView waveform;private TextView callStatus;private FrameLayout callStage;private boolean callCompact;private long previewCallAt;
+    private WaveformView waveform;private TextView callStatus;private FrameLayout callStage;private CallVolumeArc volumeArc;private boolean callCompact;private long previewCallAt;
     private String captionLine="",shownCaption,renderedScreen="";private int shownMuteColor;private float shownStatusSize;private boolean bottomAction;
     private final java.util.ArrayList<String> transcript=new java.util.ArrayList<>();private String transcriptLast="";
     private final Runnable callClock=new Runnable(){public void run(){if(visible&&isCall()){updateCallText();main.postDelayed(this,1000);}}};
@@ -225,7 +225,7 @@ public final class MainActivity extends Activity {
         if(!screen.equals("bots"))pickToCall=false;loadingLine=null;
         String chat=visible&&!preview&&screen.equals("ready")?selectedMetadata.optString("id",""):"";
         if(!chat.equals(openChat)){openChat=chat;if(!chat.isEmpty())ReplyAlertService.dismiss(this,chat);}
-        for(BotAvatarView face:avatars)face.running(false);avatars.clear();orb=null;if(waveform!=null)waveform.running(false);waveform=null;transcriptBody=null;callStatus=null;main.removeCallbacks(callClock);
+        for(BotAvatarView face:avatars)face.running(false);avatars.clear();orb=null;if(waveform!=null)waveform.running(false);waveform=null;volumeArc=null;transcriptBody=null;callStatus=null;main.removeCallbacks(callClock);
         root=new FrameLayout(this);root.setBackgroundColor(Color.BLACK);setContentView(root);
         TextView top=text(preview&&!previewMedia?"UI preview":"",10,SECONDARY);top.setLetterSpacing(.08f);
         FrameLayout.LayoutParams tp=new FrameLayout.LayoutParams(-1,dp(18),Gravity.TOP|Gravity.CENTER_HORIZONTAL);tp.topMargin=dp(9);root.addView(top,tp);if(!preview||screen.equals("ready")||screen.equals("done")||isCall())top.setVisibility(View.GONE);
@@ -866,6 +866,8 @@ public final class MainActivity extends Activity {
         boolean muted=preview?previewMuted:VoiceService.snapshot().muted;callMute=button(muted?"Unmute":"Mute",()->toggleMute());callMute.setText("");callMute.setPadding(0,0,0,0);callMute.setForeground(new MicGlyph(muted,false));callMute.setForegroundGravity(Gravity.CENTER);callMute.setBackground(shape(GLASS,24));controls.addView(callMute,new LinearLayout.LayoutParams(dp(48),dp(48)));
         Button end=button("Hang up",()->endCall());end.setText("×");end.setTextSize(28);end.setPadding(0,0,0,0);end.setBackground(shape(RED,24));LinearLayout.LayoutParams ep=new LinearLayout.LayoutParams(dp(48),dp(48));ep.leftMargin=dp(12);controls.addView(end,ep);
         LinearLayout extra=new LinearLayout(this);extra.setOrientation(LinearLayout.VERTICAL);extra.setPadding(dp(side*.12f),dp(12),dp(side*.12f),0);body.addView(extra,new LinearLayout.LayoutParams(-1,-2));TextView heading=text("Voice chat transcript",15,WHITE);extra.addView(heading);transcriptBody=new LinearLayout(this);transcriptBody.setOrientation(LinearLayout.VERTICAL);extra.addView(transcriptBody);renderTranscript();extra.addView(text("Voice call settings",15,WHITE));extra.addView(text("Voice settings are managed on your phone or Mac.",12,SECONDARY));extra.addView(text("Hang up to switch Bots.",12,SECONDARY));updateCallText();main.postDelayed(callClock,1000);
+        // On the screen, not the padded stage, so the arc follows the bezel beside the crown.
+        volumeArc=new CallVolumeArc(this);volumeArc.setAccent(accent());root.addView(volumeArc,new FrameLayout.LayoutParams(-1,-1));
     }
     private void placeCall(View view,float at,int height){FrameLayout.LayoutParams p=new FrameLayout.LayoutParams(dp(side*.76f),dp(height),Gravity.TOP|Gravity.CENTER_HORIZONTAL);p.topMargin=dp(side*at-height/2f);callStage.addView(view,p);}
     private final class VoiceGlyph extends android.graphics.drawable.Drawable {
@@ -935,9 +937,11 @@ public final class MainActivity extends Activity {
         AudioManager audio=(AudioManager)getSystemService(AUDIO_SERVICE);if(audio==null)return;
         int direction=steps>0?AudioManager.ADJUST_RAISE:AudioManager.ADJUST_LOWER;
         for(int i=0,n=Math.abs(steps);i<n;i++){
-            audio.adjustStreamVolume(AudioManager.STREAM_VOICE_CALL,direction,AudioManager.FLAG_SHOW_UI);
+            audio.adjustStreamVolume(AudioManager.STREAM_VOICE_CALL,direction,0);
             currentScroll.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK);
         }
+        int min=audio.getStreamMinVolume(AudioManager.STREAM_VOICE_CALL),max=audio.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL),volume=audio.getStreamVolume(AudioManager.STREAM_VOICE_CALL);
+        if(volumeArc!=null)volumeArc.show(CallVolume.fraction(volume,min,max),volume,max);
     }
     /** Voice-call stream while the call screen is up; the default stream again when that screen or the call is gone. */
     private void syncCallVolume(){
