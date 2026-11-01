@@ -15,21 +15,28 @@ import java.util.TimeZone;
  * calls and sign-in, with how long they took, the network and why they failed. A reason is the app's own
  * wording, a service status or an error type: never a message from the network stack (those can name the
  * account's server), account data, Bot names or anything said or shown. The report is a link to a new
- * GitHub issue, shown as a QR code for the phone, with the watch model, the versions and as much of the
- * log as still scans on a watch screen: an email to the developer (the default, private), or a new
+ * GitHub issue, shown as a QR code for the phone, with the watch model, the versions, the latest error's
+ * trace and as much of the log as still scans on a watch screen: an email to the developer (the default, private), or a new
  * GitHub issue (public). Wear OS mail apps don't take a drafted email from other apps, so the phone sends it.
  */
 final class ProblemReport {
     private ProblemReport(){}
     static final String ISSUES="https://github.com/maplenk/grok-wear/issues/new",EMAIL="namankhator@gmail.com";
-    private static final String PREFS="grokwear_ui",LOG="recent_problems";
-    private static final int KEEP=15,LONGEST=130;
+    private static final String PREFS="grokwear_ui",LOG="recent_problems",ERROR="last_error";
+    private static final int KEEP=15,LONGEST=130,TRACE=300;
     /** Encoded link length: past about this, a QR code at watch size gets hard for a phone to read. */
     static final int LINK_BUDGET=900;
 
     static void note(Context context,String where,Throwable failure){note(context,where,failure,"");}
-    /** A failure: where, why, and anything else worth knowing, such as the time taken and the network. */
-    static void note(Context context,String where,Throwable failure,String detail){event(context,where+": "+describe(failure)+(detail.isEmpty()?"":" · "+detail));}
+    /**
+     * A failure: where, why, and anything else worth knowing, such as the time taken and the network.
+     * Its trace is kept as the last error, so a report says what failed and where without guessing.
+     */
+    static void note(Context context,String where,Throwable failure,String detail){
+        event(context,where+": "+describe(failure)+(detail.isEmpty()?"":" · "+detail));
+        try{context.getSharedPreferences(PREFS,Context.MODE_PRIVATE).edit().putString(ERROR,clean(now()+"Z "+where+": "+trace(failure),TRACE)).apply();}
+        catch(RuntimeException unavailable){}
+    }
     static void event(Context context,String text){event(context,text,"");}
     /**
      * Keeps the newest lines, with the time in UTC, across restarts: the report is often made later.
@@ -38,14 +45,48 @@ final class ProblemReport {
      */
     static synchronized void event(Context context,String text,String sameKind){
         try{SharedPreferences prefs=context.getSharedPreferences(PREFS,Context.MODE_PRIVATE);
-            SimpleDateFormat time=new SimpleDateFormat("MM-dd HH:mm",Locale.ROOT);time.setTimeZone(TimeZone.getTimeZone("UTC"));
-            prefs.edit().putString(LOG,add(prefs.getString(LOG,""),time.format(new Date())+"Z "+text,sameKind)).apply();}
+            prefs.edit().putString(LOG,add(prefs.getString(LOG,""),now()+"Z "+text,sameKind)).apply();}
         catch(RuntimeException unavailable){}
     }
+    private static String now(){SimpleDateFormat time=new SimpleDateFormat("MM-dd HH:mm",Locale.ROOT);time.setTimeZone(TimeZone.getTimeZone("UTC"));return time.format(new Date());}
     /** Newest first, one per line. */
     static String log(Context context){try{return context.getSharedPreferences(PREFS,Context.MODE_PRIVATE).getString(LOG,"");}catch(RuntimeException unavailable){return "";}}
+    /** The latest failure's trace, with its time and place, or "". */
+    static String lastError(Context context){try{return context.getSharedPreferences(PREFS,Context.MODE_PRIVATE).getString(ERROR,"");}catch(RuntimeException unavailable){return "";}}
     /** Signing out clears it with the rest of the account's data. */
-    static synchronized void forget(Context context){try{context.getSharedPreferences(PREFS,Context.MODE_PRIVATE).edit().remove(LOG).apply();}catch(RuntimeException unavailable){}}
+    static synchronized void forget(Context context){try{context.getSharedPreferences(PREFS,Context.MODE_PRIVATE).edit().remove(LOG).remove(ERROR).apply();}catch(RuntimeException unavailable){}}
+    /**
+     * Where a failure came from: the root error's type, its limit when it's one of the app's own, and the
+     * first frames of the app's own code it passed through (class.method:line), such as
+     * "ResponseTooLarge (reply over 1 MB) at GrokVault.readBounded:121 ← BotAccount.execute:380".
+     * Never a message from the network stack or the platform, which can name the account's server.
+     */
+    static String trace(Throwable failure){
+        if(failure==null)return "unknown";
+        Throwable root=failure;java.util.Set<Throwable> seen=new java.util.HashSet<>();
+        while(root.getCause()!=null&&seen.add(root))root=root.getCause();
+        StringBuilder out=new StringBuilder(root.getClass().getSimpleName());
+        String own=root instanceof GrokVault.ResponseTooLarge?String.valueOf(root.getMessage()):code(root instanceof GrokCore.Failure?root:null);
+        if(!own.isEmpty())out.append(" (").append(own).append(')');
+        int frames=0;
+        for(StackTraceElement frame:root.getStackTrace()){String type=frame.getClassName();if(!type.startsWith("si.zya.grokwear."))continue;
+            out.append(frames==0?" at ":" ← ").append(type.substring(type.lastIndexOf('.')+1)).append('.').append(frame.getMethodName()).append(':').append(frame.getLineNumber());
+            if(++frames==4)break;}
+        if(root!=failure)out.append(" · via ").append(failure.getClass().getSimpleName());
+        return out.toString();
+    }
+    private static final java.util.concurrent.atomic.AtomicBoolean CRASHES=new java.util.concurrent.atomic.AtomicBoolean();
+    /** A crash is logged the same way, written before the app closes; the system then handles it as before. */
+    static void watchCrashes(Context context){
+        if(!CRASHES.compareAndSet(false,true))return;
+        Context app=context.getApplicationContext();Thread.UncaughtExceptionHandler previous=Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((thread,crash)->{
+            try{String line=now()+"Z Crash: "+trace(crash);SharedPreferences prefs=app.getSharedPreferences(PREFS,Context.MODE_PRIVATE);
+                prefs.edit().putString(LOG,add(prefs.getString(LOG,""),line)).putString(ERROR,clean(line,TRACE)).commit();}
+            catch(Throwable ignored){}
+            if(previous!=null)previous.uncaughtException(thread,crash);
+        });
+    }
     static String add(String recent,String line){return add(recent,line,"");}
     /** Newest first, one per line, at most KEEP; the newest is replaced when it's the same kind (after its "MM-dd HH:mmZ " time). */
     static String add(String recent,String line,String sameKind){
@@ -115,13 +156,21 @@ final class ProblemReport {
     static String url(Context context,String where,String state,boolean email){
         return url(watch(Build.MANUFACTURER,Build.MODEL),Build.VERSION.RELEASE+" (API "+Build.VERSION.SDK_INT+")",
             BuildConfig.VERSION_NAME+" ("+BuildConfig.VERSION_CODE+")",AssistantRole.held(context),networkDetails(context),
-            state+(state.isEmpty()?"":" · ")+battery(context),where,log(context),email);
+            state+(state.isEmpty()?"":" · ")+battery(context),where,lastError(context),log(context),email);
     }
-    /** The details, then the newest log lines that keep the link within LINK_BUDGET. The title names where it happened. */
     static String url(String watch,String android,String version,boolean button,String network,String state,String where,String log,boolean email){
+        return url(watch,android,version,button,network,state,where,"",log,email);
+    }
+    /**
+     * The details, the latest error's trace, then the newest log lines that keep the link within LINK_BUDGET.
+     * The title names where it happened.
+     */
+    static String url(String watch,String android,String version,boolean button,String network,String state,String where,String error,String log,boolean email){
         String place=where.isEmpty()?"":clean(where.split(":",2)[0]);
+        // "←" and " · " read well on the watch but take 9 and 8 characters in a link; " < " and " - " take 3.
         String head=(where.isEmpty()?"":"Where: "+clean(where)+"\n")+"Watch: "+clean(watch)+"\nAndroid: "+clean(android)+"\nGrok Wear: "+clean(version)+"\nAssistant button: "+(button?"on":"off")
-            +"\nNetwork: "+clean(network)+(state.isEmpty()?"":"\nState: "+clean(state,160))+"\nLog (UTC, newest first):\n",tail="\nWhat happened?\n",title=(place.isEmpty()?"Problem":place+" problem")+" on "+clean(watch);
+            +"\nNetwork: "+clean(network)+(state.isEmpty()?"":"\nState: "+clean(state,160))+(error.isEmpty()?"":"\nError: "+clean(error,TRACE).replace(" ← "," < ").replace(" · "," - "))
+            +"\nLog (UTC, newest first):\n",tail="\nWhat happened?\n",title=(place.isEmpty()?"Problem":place+" problem")+" on "+clean(watch);
         StringBuilder lines=new StringBuilder();
         // " · " reads well on the watch but takes 8 characters in a link; " - " takes 3.
         for(String line:log.split("\n")){if(line.isEmpty())continue;

@@ -21,6 +21,8 @@ final class BotAccount {
     // History reads are small. A transfer that stalls this long on a weak watch link is
     // usually a dead connection, so the single read retry below starts a fresh one.
     private static final OkHttpClient HISTORY=HTTP.newBuilder().readTimeout(8,TimeUnit.SECONDS).build();
+    // An account with many Bots or large Bot photos sends a Bot list of several megabytes.
+    private static final OkHttpClient ROSTER=HTTP.newBuilder().callTimeout(60,TimeUnit.SECONDS).build();
     /**
      * The network changed: close idle pooled connections so the next request dials fresh instead of
      * waiting out a read timeout on a connection that died with the old network.
@@ -329,6 +331,7 @@ final class BotAccount {
             .header("Authorization","Bearer "+valid.getString("gatewayToken"));
         JSONObject headers=valid.getJSONObject("headers");Iterator<String> keys=headers.keys();
         while(keys.hasNext()){String key=keys.next();request.header(key,headers.getString(key));}
+        if("listAgents".equals(method))return execute(ROSTER,request,body,true,true);
         if(!"sendPrompt".equals(method))return execute(request,body,true);
         try{return execute(request,body,false);}
         catch(GrokCore.Failure refused){
@@ -356,7 +359,9 @@ final class BotAccount {
      * it, and its size in bytes; -1 when unknown. Tells a slow server from a slow link.
      */
     static final ThreadLocal<long[]> LAST_TRANSFER=ThreadLocal.withInitial(()->new long[]{-1,-1,-1});
-    private static JSONObject execute(OkHttpClient client,Request.Builder request,JSONObject body,boolean arrayAllowed) throws Exception {
+    private static JSONObject execute(OkHttpClient client,Request.Builder request,JSONObject body,boolean arrayAllowed) throws Exception {return execute(client,request,body,arrayAllowed,false);}
+    /** roster: the Bot list, read through RosterStream instead of the 1 MB cap. */
+    private static JSONObject execute(OkHttpClient client,Request.Builder request,JSONObject body,boolean arrayAllowed,boolean roster) throws Exception {
         byte[] bytes=body.toString().getBytes(StandardCharsets.UTF_8);LAST_TRANSFER.set(new long[]{-1,-1,-1});long sent=System.nanoTime();
         try {
             if(bytes.length>1024*1024)throw new GrokCore.Failure("Grok request is too large.",true);
@@ -371,8 +376,9 @@ final class BotAccount {
                 if(response.code()!=200)throw new GrokCore.Failure("Grok request failed (HTTP "+response.code()+").",response.code()<500,errorCode(response),response.code());
                 if(response.body()==null)throw new java.io.IOException();
                 long started=System.nanoTime();
-                byte[] received=GrokVault.readBounded(response.body().byteStream(),1024*1024);
-                LAST_TRANSFER.set(new long[]{(started-sent)/1_000_000,(System.nanoTime()-started)/1_000_000,received.length});
+                long[] raw={-1};
+                byte[] received=roster?RosterStream.read(response.body().byteStream(),raw,PhotoShrink.INSTANCE):GrokVault.readBounded(response.body().byteStream(),1024*1024);
+                LAST_TRANSFER.set(new long[]{(started-sent)/1_000_000,(System.nanoTime()-started)/1_000_000,roster?raw[0]:received.length});
                 try {String text=new String(received,StandardCharsets.UTF_8);
                     // Some operations answer with nothing (or null) on success.
                     if(text.trim().isEmpty()||text.trim().equals("null"))return new JSONObject();

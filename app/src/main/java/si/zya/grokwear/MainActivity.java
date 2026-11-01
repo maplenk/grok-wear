@@ -103,7 +103,7 @@ public final class MainActivity extends Activity {
         if(takeOwnHistoryRefresh(status.active,historyStaging()))loadBotChat();
     };
     private final Runnable pollTick=()->pollLogin();
-    @Override public void onCreate(Bundle state){super.onCreate(state);
+    @Override public void onCreate(Bundle state){super.onCreate(state);ProblemReport.watchCrashes(this);
         preview=BuildConfig.DEBUG&&getIntent().getBooleanExtra("ui_preview",false);
         // Launch-media captures: no preview label, a short demo chat per Bot. Synthetic data only.
         previewMedia=preview&&getIntent().getBooleanExtra("preview_media",false);
@@ -229,9 +229,11 @@ public final class MainActivity extends Activity {
         FrameLayout.LayoutParams sp=new FrameLayout.LayoutParams(-1,-1);sp.topMargin=dp(isCall()?(preview?27:19):23);sp.bottomMargin=dp(isCall()?side*.12f+50:screen.equals("bots")?9:screen.equals("done")?12:30);root.addView(scroll,sp);
         body=new LinearLayout(this);body.setOrientation(LinearLayout.VERTICAL);body.setGravity(Gravity.CENTER_HORIZONTAL);body.setPadding(dp(side*.12f),dp(isCall()||screen.equals("ready")?0:3),dp(side*.12f),dp(isCall()?0:screen.equals("bots")||screen.equals("done")?12:58));scroll.addView(body,new ScrollView.LayoutParams(-1,-2));
         if(isCall()){call();return;}
-        // After sending, and when the Bot's reply lands, show the newest message rather than the top of the page.
+        // After sending, and when the Bot's reply lands, show the newest message rather than the top of the page:
+        // the end of the chat, or its start when the newest comes first.
         if(scrollToEnd&&screen.equals("ready")){scrollToEnd=false;final ScrollView end=scroll;end.getViewTreeObserver().addOnPreDrawListener(new android.view.ViewTreeObserver.OnPreDrawListener(){
-            public boolean onPreDraw(){end.getViewTreeObserver().removeOnPreDrawListener(this);end.scrollTo(0,Math.max(0,end.getChildAt(0).getHeight()-end.getHeight()));return true;}});}
+            public boolean onPreDraw(){end.getViewTreeObserver().removeOnPreDrawListener(this);View chat=end.findViewWithTag("chat");
+                int bottom=Math.max(0,end.getChildAt(0).getHeight()-end.getHeight());end.scrollTo(0,newestFirst()&&chat!=null?Math.min(bottom,chat.getTop()):bottom);return true;}});}
         else if(keepY>0){final ScrollView restored=scroll;restored.getViewTreeObserver().addOnPreDrawListener(new android.view.ViewTreeObserver.OnPreDrawListener(){
             public boolean onPreDraw(){restored.getViewTreeObserver().removeOnPreDrawListener(this);restored.scrollTo(0,keepY);return true;}});}
         TextView more=text("↓ More",12,SECONDARY);more.setContentDescription("Scroll for more options");more.setBackground(shape(Color.BLACK,12));more.setVisibility(View.GONE);
@@ -344,7 +346,10 @@ public final class MainActivity extends Activity {
         if(bots.length()==0&&!botsCached&&!selectedMetadata.optString("id","").isEmpty())botChip(botName,BLUE,()->chooseBot(selectedMetadata.optString("id")),selectedMetadata);
         else{java.util.HashSet<String> shown=new java.util.HashSet<>();for(JSONObject bot:pinned)shown.add(bot.optString("id"));
             for(JSONObject bot:orderedBots()){if(primary!=null&&primary.optString("id").equals(bot.optString("id")))continue;if(shown.contains(bot.optString("id")))continue;String name=bot.optString("name","Unnamed Bot");botChip(name,BLUE,()->primaryAction(bot,pickToCall),bot);}}
-        if(!botListError.isEmpty())label(botListError,12,SECONDARY);if(botsCached||!botsLoading){if(bots.length()==0&&botListError.isEmpty())label("No Bots found",14,SECONDARY);action(botsCached?"Refresh":"Try again",()->loadBots());}
+        if(!botListError.isEmpty())label(botListError,12,SECONDARY);if(botsCached||!botsLoading){if(bots.length()==0&&botListError.isEmpty())label("No Bots found",14,SECONDARY);
+            // A refresh of a saved list shows that it's running and when the list last arrived, even when nothing changed.
+            if(botsCached&&botsLoading){Button busy=action("Refreshing…",()->{});busy.setEnabled(false);}else action(botsCached?"Refresh":"Try again",()->loadBots());
+            if(botsCached&&!botsLoading&&botsFetchedAtMs>0&&botListError.isEmpty())label("Updated "+ago(botsFetchedAtMs),11,SECONDARY);}
         if(!preview&&!botListError.isEmpty()){action("Report a problem",()->openReport("Bot list: "+botListError,"bots"));action("Details",()->{screen="bot_details";render();});}
         action("Settings",()->openSettings());
     }
@@ -601,8 +606,11 @@ public final class MainActivity extends Activity {
             TextView excerpt=text(last.isEmpty()?(preview?"Ready when you are":"Ready to talk"):MessageText.plain(last),compactHero()?11:12,SECONDARY);excerpt.setTag("bot_excerpt");excerpt.setSingleLine(true);excerpt.setEllipsize(android.text.TextUtils.TruncateAt.END);FrameLayout.LayoutParams xp=new FrameLayout.LayoutParams(dp(side*.76f),dp(20),Gravity.TOP|Gravity.CENTER_HORIZONTAL);xp.topMargin=dp(Math.min(side-88,side*.615f-10));hero.addView(excerpt,xp);}
         LinearLayout chat=new LinearLayout(this);chat.setOrientation(LinearLayout.VERTICAL);chat.setPadding(dp(side*.12f),dp(10),dp(side*.12f),0);body.addView(chat,new LinearLayout.LayoutParams(-1,-2));body=chat;label("Chat",17,WHITE);messageButton();if(historyLoading&&historyEntries.length()==0)label("Loading history…",12,SECONDARY);if(historyStale)label("Showing last loaded messages",12,SECONDARY);if(!historyError.isEmpty())label(historyError,12,SECONDARY);
         if(historyEntries.length()==0&&!historyLoading)label("No messages loaded",12,SECONDARY);
-        for(int i=0;i<historyEntries.length();i++){JSONObject e=historyEntries.optJSONObject(i);if(e==null)continue;chatBubble(e);}
-        outgoingBubbles();
+        chat.setTag("chat");boolean newest=newestFirst();int count=historyEntries.length();
+        // Newest first: messages still sending come first, then the chat from its newest message back.
+        if(newest)outgoingBubbles();
+        for(int k=0;k<count;k++){JSONObject e=historyEntries.optJSONObject(newest?count-1-k:k);if(e==null)continue;chatBubble(e);}
+        if(!newest)outgoingBubbles();
         if(historyHasMore&&historyPages<5){Button older=action("Load older messages",()->loadHistory(true));older.setEnabled(!historyLoading);}
         if(screen.equals("done")||(!preview&&hasCurrentReceipt()&&receiptElapsed>0)){long ms=preview?102000:receiptElapsed;label("Voice chat · "+duration(ms),12,SECONDARY);}
         String sync=preview?(previewSaving?"Saving shared history":""):hasCurrentReceipt()?receiptSync:"";if(!sync.isEmpty())label(sync.equals("Saving shared history")?"Saving shared history…":sync.equals("synced")?"Shared history saved":sync.equals("pending")||sync.equals("uncertain")?"Voice sync pending":sync.equals("rejected")?"History could not be saved":sync,12,SECONDARY);
@@ -1064,6 +1072,9 @@ public final class MainActivity extends Activity {
     private boolean alertsSetupPending(){if(preview)return false;try{return getSharedPreferences("grokwear_ui",MODE_PRIVATE).getBoolean("alerts_setup_pending",false);}catch(RuntimeException unavailable){return false;}}
     private void setAlertsSetupPending(boolean pending){try{getSharedPreferences("grokwear_ui",MODE_PRIVATE).edit().putBoolean("alerts_setup_pending",pending).apply();}catch(RuntimeException ignored){}}
     /** Reply alerts are on when the switch is and the watch lets Grok Wear show notifications. */
+    /** Chat order on a Bot's page: newest message first, under the Message button, or last (the default). */
+    private boolean newestFirst(){try{return getSharedPreferences("grokwear_ui",MODE_PRIVATE).getBoolean("newest_first",false);}catch(RuntimeException unavailable){return false;}}
+    private void setNewestFirst(boolean on){try{getSharedPreferences("grokwear_ui",MODE_PRIVATE).edit().putBoolean("newest_first",on).apply();}catch(RuntimeException ignored){}}
     private boolean replyAlerts(){if(preview)return previewAlerts;return ReplyAlertService.enabled(this)&&notificationsAllowed();}
     private boolean notificationsAllowed(){return android.os.Build.VERSION.SDK_INT<33||checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)==PackageManager.PERMISSION_GRANTED;}
     private void toggleReplyAlerts(){
@@ -1126,6 +1137,7 @@ public final class MainActivity extends Activity {
         label(botListError.isEmpty()?(botsLoading?"Loading…":"Loaded"):botListError,13,WHITE);
         label("Network: "+ProblemReport.network(this),12,SECONDARY);
         label("Last loaded: "+(botsFetchedAtMs>0?ago(botsFetchedAtMs):"not yet on this watch"),12,SECONDARY);gap(6);
+        String error=ProblemReport.lastError(this);if(!error.isEmpty()){label("Last error (UTC)",13,WHITE);label(error,11,SECONDARY);gap(6);}
         label("Recent (UTC)",13,WHITE);int shown=0;
         // Each entry: when and what in white, then how it went.
         for(String line:ProblemReport.log(this).split("\n"))if(!line.isEmpty()&&shown<8){int split=line.indexOf(": ");
@@ -1178,6 +1190,9 @@ public final class MainActivity extends Activity {
     private void settings(){title("Settings");boolean alerts=replyAlerts();
         Button toggle=action("Reply alerts: "+(alerts?"On":"Off"),()->toggleReplyAlerts());toggle.setContentDescription("Reply alerts, "+(alerts?"on":"off")+". Double-tap to turn "+(alerts?"off":"on"));
         label(alertsBlocked?"Allow notifications for Grok Wear in your watch’s settings, then try again.":"Buzz when a Bot answers your message.",12,SECONDARY);gap(8);
+        boolean newest=newestFirst();
+        Button order=action("Newest first: "+(newest?"On":"Off"),()->{setNewestFirst(!newest);render();});order.setContentDescription("Newest messages first, "+(newest?"on":"off")+". Double-tap to turn "+(newest?"off":"on"));
+        label(newest?"A Bot’s chat starts with its newest message.":"A Bot’s chat ends with its newest message.",12,SECONDARY);gap(8);
         boolean button=buttonOn();
         Button hold=action("Assistant button: "+(button?"On":"Off"),()->toggleButton());hold.setContentDescription("Assistant button, "+(button?"on":"off")+". Double-tap to open the watch’s assistant settings");
         String target=assistTarget(preview?null:primaryBot());
@@ -1322,14 +1337,16 @@ public final class MainActivity extends Activity {
     private void refreshBots(boolean explicit){
         if(preview||botSelectionPending)return;
         if(VoiceService.snapshot().active){renderVoice();return;}
-        if(rosterFetchActive)return;
+        // A tap during a background refresh shows that one running, and its result when it lands.
+        if(rosterFetchActive){if(explicit){refreshShown=true;renderBotListPreservingScroll();}return;}
         long now=System.currentTimeMillis(),elapsed=android.os.SystemClock.elapsedRealtime();
         boolean fresh=botsCached&&botsFetchedAtMs>0&&now>=botsFetchedAtMs&&now-botsFetchedAtMs<BOT_REFRESH_INTERVAL_MS;
         boolean recentlyAttempted=lastBotRefreshAttemptElapsed>0&&elapsed-lastBotRefreshAttemptElapsed<BOT_REFRESH_INTERVAL_MS;
         if(!explicit&&(fresh||recentlyAttempted)){refreshPins(false);return;}
         boolean hadError=!botListError.isEmpty();
         cancelRosterRetry();lastBotRefreshAttemptElapsed=elapsed;rosterStartedElapsed=elapsed;rosterFetchActive=true;botsLoading=true;botListError="";
-        if(!botsCached||hadError)renderBotListPreservingScroll();
+        if(explicit)refreshShown=true;
+        if(!botsCached||hadError||explicit)renderBotListPreservingScroll();
         final int request=++botRequest;activeRosterRequest=request;final String expected=botsAccountBinding;
         rosterWorker.execute(()->{try{
             if(!expected.equals(accountIdentity(account.authState())))throw new IllegalStateException();
@@ -1357,8 +1374,10 @@ public final class MainActivity extends Activity {
         if(!currentBotRefresh(request,expected))return;
         boolean changed=!botsCached||!bots.toString().equals(found.toString())||!botListError.isEmpty();
         cancelRosterRetry();bots=found;botsCached=true;botsFetchedAtMs=System.currentTimeMillis();botsLoading=false;botListError="";
-        if(changed)renderBotListPreservingScroll();
+        if(changed||refreshShown)renderBotListPreservingScroll();refreshShown=false;
     }
+    /** A refresh someone asked for: its end redraws the list even when nothing changed, to show "Updated just now". */
+    private boolean refreshShown;
     private void applyBotPreferences(int request,String expected,JSONObject prefs){
         if(!currentBotRefresh(request,expected))return;
         boolean changed=!botPreferences.toString().equals(prefs.toString())||!preferencesKnown;botPreferences=prefs;preferencesKnown=true;
@@ -1366,7 +1385,7 @@ public final class MainActivity extends Activity {
     }
     /** why: a status or error type, shown so a screenshot of a stuck list says what failed. */
     private void applyBotRefreshFailure(int request,String expected,String why){
-        if(!currentBotRefresh(request,expected))return;botsLoading=false;why=why.isEmpty()?"":" ("+why+")";
+        if(!currentBotRefresh(request,expected))return;botsLoading=false;refreshShown=false;why=why.isEmpty()?"":" ("+why+")";
         // Keep saved rows usable. One foreground retry can recover a transient slow link.
         botListError=botsCached?"Showing saved Bots"+why:"Bots aren’t available yet"+why+". Trying again shortly.";renderBotListPreservingScroll();
         if(!rosterRetryUsed&&visible&&screen.equals("bots")){

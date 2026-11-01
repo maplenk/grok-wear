@@ -17,8 +17,10 @@ android {
         applicationId 'si.zya.grokwear'
         minSdk 30
         targetSdk 36
-        versionCode 32
-        versionName '0.6.1'
+        versionCode 34
+        versionName '0.6.2'
+        // On-device tests run on an emulator only (ANDROID_SERIAL), never a personal watch.
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
     signingConfigs {
         if (signingValue('storeFile')) {
@@ -49,4 +51,21 @@ dependencies {
     implementation 'androidx.wear:wear-input:1.1.0'
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.json:json:20240303'
+    androidTestImplementation 'androidx.test:runner:1.7.0'
+    androidTestImplementation 'androidx.test.ext:junit:1.3.0'
 }
+
+// On-device tests install a test copy of Grok Wear and uninstall the app afterwards, sign-in included.
+// They run only on one named emulator that doesn't have Grok Wear: ANDROID_SERIAL=emulator-NNNN.
+tasks.register('checkTestDevice') {
+    doLast {
+        def serial = System.getenv('ANDROID_SERIAL') ?: ''
+        if (!serial.startsWith('emulator-'))
+            throw new GradleException('On-device tests run on one emulator only: set ANDROID_SERIAL=emulator-NNNN, an emulator without Grok Wear.')
+        def adb = new File(android.sdkDirectory, 'platform-tools/adb').path
+        def packages = [adb, '-s', serial, 'shell', 'pm', 'list', 'packages', 'si.zya.grokwear'].execute().text
+        if (packages.readLines().any { it.trim() == 'package:si.zya.grokwear' })
+            throw new GradleException("Grok Wear is installed on $serial. The test run would uninstall it, sign-in included. Uninstall it there first, or use another emulator.")
+    }
+}
+tasks.matching { it.name.startsWith('connected') && it.name.endsWith('AndroidTest') }.configureEach { dependsOn 'checkTestDevice' }
