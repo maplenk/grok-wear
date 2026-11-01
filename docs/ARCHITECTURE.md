@@ -27,7 +27,7 @@ Talk:    sign-in check ─┬─ Bot voice setup (instructions + tools) ─┐
 | `HistoryCoordinator` | Shared-chat pages for the Bot page, and a durable outbox for call transcripts. |
 | `VoiceStartup` | Runs Bot voice setup and credential minting in parallel under a 45-second budget. |
 | `NativeVoiceSession` | One realtime voice session: settings (including the Bot's own voice, speed and language), turn handling, interruption, the tool allowlist, the caller-first greeting and reconnecting a dropped line. |
-| `NativeAudio`, `PcmPlaybackBuffer` | Microphone capture and speaker playback (24 kHz mono PCM16) with echo cancellation where available, a bounded playback buffer, audio-focus pause and resume, and routing to a headset or the speaker. |
+| `NativeAudio`, `PcmPlaybackBuffer` | Microphone capture and speaker playback (24 kHz mono PCM16) with echo cancellation where available, a bounded playback buffer, audio-focus pause and resume, and routing to a headset or the speaker. On the watch speaker the voice plays as media, since watches play call audio quietly; call mode stays on for the microphone's processing and echo cancelling. A headset, or media volume at zero, keeps call audio. |
 | `VoiceService` | Foreground service that owns a call: admission, ongoing notification, network loss detection, captions and saving the transcript. |
 | `CallHandoff` | The end-of-call note and leftover request sent to the Bot after the transcript is saved. |
 | `BotEvents`, `EventStream` | The gateway's live event stream (`/events`, read as the official Android app reads it): roster changes and new chat entries. One connection while the app is open or a reply alert waits. Events only refresh what's shown; the roster and chat are still read the usual way. |

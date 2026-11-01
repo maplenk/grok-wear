@@ -1077,7 +1077,7 @@ public final class MainActivity extends Activity {
     /** Part of signing in, after reply alerts: offered once. Turning it on opens the watch's Digital assistant page. */
     private void buttonSetup(){
         title("Assistant button");JSONObject primary=preview?null:primaryBot();
-        label("Hold the watch’s assistant button to call "+assistTarget(primary)+". On a Galaxy Watch, hold the Home key.",12,SECONDARY);
+        label("Hold the watch’s assistant button to call "+assistTarget(primary)+": the Home key on a Galaxy Watch, the crown on a Pixel Watch.",12,SECONDARY);
         Button on=action("Turn on",()->finishButtonSetup(true));on.setTextColor(Color.BLACK);on.setBackground(shape(WHITE,24));
         action("Not now",()->finishButtonSetup(false));
         label("Grok Wear becomes the watch’s assistant in place of the current one. Change this any time in Settings.",12,SECONDARY);
@@ -1181,7 +1181,7 @@ public final class MainActivity extends Activity {
         boolean button=buttonOn();
         Button hold=action("Assistant button: "+(button?"On":"Off"),()->toggleButton());hold.setContentDescription("Assistant button, "+(button?"on":"off")+". Double-tap to open the watch’s assistant settings");
         String target=assistTarget(preview?null:primaryBot());
-        label(button?"Hold the watch’s assistant button to call "+target+". To turn this off, choose another assistant.":"Hold the watch’s assistant button to call "+target+" (on a Galaxy Watch, the Home key). No extra battery.",12,SECONDARY);gap(8);
+        label(button?"Hold the watch’s assistant button to call "+target+". To turn this off, choose another assistant.":"Hold the watch’s assistant button to call "+target+" (the Home key on a Galaxy Watch, the crown on a Pixel Watch). No extra battery.",12,SECONDARY);gap(8);
         action("Report a problem",()->openReport("","settings"));gap(8);
         label("Unofficial Grok client",12,SECONDARY);label("Not affiliated with or endorsed by xAI or Cursor.",12,SECONDARY);gap(4);label("5-minute calls · tasks go to your Bot",12,SECONDARY);label("Calls share this Bot’s main chat.",12,SECONDARY);
         action("Back",()->leaveSettings());gap(24);
