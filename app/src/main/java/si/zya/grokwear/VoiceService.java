@@ -268,7 +268,8 @@ public final class VoiceService extends Service {
         // For Report a problem: how it ended and how long it ran, and for a broken call the words shown on the watch.
         // A call that never started is already logged by its setup failure.
         boolean broke=finalState.equals("Call stopped")||finalState.equals("Call dropped");
-        if(wentLive||broke)ProblemReport.event(this,"Call: "+stopCategory(finalState,safe)+" · "+ProblemReport.seconds(finishedElapsed)+" · "+ProblemReport.network(this)+(broke&&!safe.isEmpty()?" · "+safe:""));
+        if(wentLive||broke)ProblemReport.event(this,"Call: "+stopCategory(finalState,safe)+" · "+ProblemReport.seconds(finishedElapsed)+" · "+ProblemReport.network(this)
+            +(audio==null?"":audio.voiceAsMedia()?" · media voice":" · call voice")+(broke&&!safe.isEmpty()?" · "+safe:""));
         android.util.Log.i("GrokWearVoice","call_stop cause="+stopCategory(finalState,safe)+" duration_ms="+finishedElapsed
                 +" lease_ms="+leaseMs+",plan_ms="+planMs+",mint_ms="+mintMs+",dial_ms="+dialMs+",listening_ms="+listeningMs
                 +(session==null?"":" "+session.protocolDiagnostics()));

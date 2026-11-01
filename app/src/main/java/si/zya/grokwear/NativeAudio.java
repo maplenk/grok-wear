@@ -42,6 +42,27 @@ final class NativeAudio implements AutoCloseable {
             if(chosen!=null&&manager.setCommunicationDevice(chosen))routed=true;
         }catch(RuntimeException ignored){}
     }
+    private static final int[] HEADSETS={AudioDeviceInfo.TYPE_WIRED_HEADSET,AudioDeviceInfo.TYPE_WIRED_HEADPHONES,AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,AudioDeviceInfo.TYPE_USB_HEADSET,AudioDeviceInfo.TYPE_HEARING_AID,AudioDeviceInfo.TYPE_BLE_HEADSET,AudioDeviceInfo.TYPE_BLE_SPEAKER};
+    /**
+     * The Bot's voice plays as media on the watch speaker: watches play call audio quietly, and quieter
+     * still for its first seconds (found on a Galaxy Watch7). Call mode stays on, so the microphone keeps
+     * its voice processing and echo cancelling. A headset keeps call audio, so its call link isn't split
+     * from a media link, and so does media volume at zero, so the Bot is never silent.
+     */
+    static boolean voiceAsMedia(int[] outputs,int mediaVolume){
+        if(mediaVolume<=0)return false;
+        for(int type:outputs)for(int headset:HEADSETS)if(type==headset)return false;
+        return true;
+    }
+    private volatile boolean media;
+    /** Whether this call's voice plays as media; for the problem log. */
+    boolean voiceAsMedia(){return media;}
+    private int[] outputs(){
+        try{AudioDeviceInfo[] devices=manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS);int[] types=new int[devices.length];
+            for(int i=0;i<devices.length;i++)types[i]=devices[i].getType();return types;}
+        catch(RuntimeException unknown){return new int[0];}
+    }
     private volatile long framesWritten,framesQueued; private boolean hadOutput;
     NativeAudio(Context context,Listener listener){this.context=context.getApplicationContext();this.manager=(AudioManager)context.getSystemService(Context.AUDIO_SERVICE);this.listener=listener;}
     void start(boolean initiallyMuted) {
@@ -50,6 +71,7 @@ final class NativeAudio implements AutoCloseable {
             if(context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){
                 close();listener.failure("Microphone access is required to start voice.");return;
             }
+            // Audio focus is always asked for as a call, whichever way the voice plays.
             AudioAttributes attributes=new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build();
             focus=new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT).setAudioAttributes(attributes)
                 .setOnAudioFocusChangeListener(change->{if(closed.get())return;
@@ -71,7 +93,10 @@ final class NativeAudio implements AutoCloseable {
             AudioFormat format=new AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(RATE).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build();
             // ~300 ms of headroom rides out a GC pause or scheduling gap on a watch without polling.
             int out=Math.max(14400,AudioTrack.getMinBufferSize(RATE,AudioFormat.CHANNEL_OUT_MONO,AudioFormat.ENCODING_PCM_16BIT));
-            track=new AudioTrack.Builder().setAudioAttributes(attributes).setAudioFormat(format).setTransferMode(AudioTrack.MODE_STREAM).setBufferSizeInBytes(out).build();
+            media=voiceAsMedia(outputs(),manager.getStreamVolume(AudioManager.STREAM_MUSIC));
+            android.util.Log.i("GrokWearAudio","voice_output="+(media?"media":"call"));
+            AudioAttributes voice=media?new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build():attributes;
+            track=new AudioTrack.Builder().setAudioAttributes(voice).setAudioFormat(format).setTransferMode(AudioTrack.MODE_STREAM).setBufferSizeInBytes(out).build();
             if(track.getState()!=AudioTrack.STATE_INITIALIZED)throw new IllegalStateException();
             int in=Math.max(FRAME*4,AudioRecord.getMinBufferSize(RATE,AudioFormat.CHANNEL_IN_MONO,AudioFormat.ENCODING_PCM_16BIT));
             record=new AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
