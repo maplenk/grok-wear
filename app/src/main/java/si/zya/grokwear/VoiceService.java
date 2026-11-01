@@ -90,7 +90,7 @@ public final class VoiceService extends Service {
     private volatile long talkElapsed,leaseMs=-1,planMs=-1,mintMs=-1,dialMs=-1,listeningMs=-1;
     private long sinceTalk(){return SystemClock.elapsedRealtime()-talkElapsed;}
     @Override public IBinder onBind(Intent intent){return null;}
-    @Override public int onStartCommand(Intent intent,int flags,int startId){
+    @Override public int onStartCommand(Intent intent,int flags,int startId){ProblemReport.watchCrashes(this);
         String action=intent==null?"":intent.getAction();
         if(END.equals(action)){finish("Call ended.","");return START_NOT_STICKY;}
         if(MUTE.equals(action)){if(running&&!ending){muted=!muted;if(session!=null)session.mute(muted);if(audio!=null&&liveStartedAt>0)audio.mute(muted);inputLevel=0;emit();notifyCall();}return START_NOT_STICKY;}

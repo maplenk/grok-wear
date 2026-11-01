@@ -141,7 +141,8 @@ final class GrokCore {
         if(bots==null&&body.optJSONObject("agent")!=null)bots=new JSONArray().put(body.getJSONObject("agent"));
         if (bots == null) throw new Failure("Bot list format is not recognized. No Bot was selected.", true);
         JSONArray safe = new JSONArray();
-        int photoBudget = 262144;
+        // Photos arrive shrunk to a few KB each (RosterStream, PhotoShrink): enough for about 100 Bots.
+        int photoBudget = RosterStream.PHOTOS;
         for (int i = 0; i < Math.min(200, bots.length()); i++) {
             JSONObject candidate = rosterRow(bots.optJSONObject(i), photoBudget);
             if (candidate == null) continue;

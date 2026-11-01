@@ -102,7 +102,7 @@ public final class ReplyAlertService extends Service {
             }catch(Exception unavailable){}});
     }
     @Override public IBinder onBind(Intent intent){return null;}
-    @Override public int onStartCommand(Intent intent,int flags,int startId){
+    @Override public int onStartCommand(Intent intent,int flags,int startId){ProblemReport.watchCrashes(this);
         lastStart=startId;
         if(intent==null||!WATCH.equals(intent.getAction())){finishIfDone();return START_NOT_STICKY;}
         String account=intent.getStringExtra("identity"),botId=intent.getStringExtra("bot"),name=intent.getStringExtra("name"),message=intent.getStringExtra("message");

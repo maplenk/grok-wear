@@ -118,8 +118,13 @@ final class GrokVault implements GrokCore.Store {
     }
     static byte[] readBounded(InputStream in,int max)throws IOException {
         ByteArrayOutputStream b=new ByteArrayOutputStream();byte[] block=new byte[4096];int n;
-        while((n=in.read(block))!=-1){if(b.size()+n>max)throw new ResponseTooLarge();b.write(block,0,n);}return b.toByteArray();
+        while((n=in.read(block))!=-1){if(b.size()+n>max)throw new ResponseTooLarge("reply",max);b.write(block,0,n);}return b.toByteArray();
     }
-    /** Its own type so Report a problem can tell it from a dropped connection. */
-    static final class ResponseTooLarge extends IOException {}
+    /**
+     * Its own type so Report a problem can tell it from a dropped connection. The message is the app's
+     * own wording, what and which limit, such as "reply over 1 MB", so a report can show it.
+     */
+    static final class ResponseTooLarge extends IOException {
+        ResponseTooLarge(String what,long limit){super(what+" over "+(limit>=1<<20?(limit>>20)+" MB":(limit>>10)+" KB"));}
+    }
 }

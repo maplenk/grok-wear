@@ -9,6 +9,7 @@ Issues and pull requests are welcome.
 ## Before you open a pull request
 
 1. Run the unit tests: `./gradlew :app:testDebugUnitTest`.
+   On-device tests run on one emulator without Grok Wear installed, since the run uninstalls the app afterwards: `ANDROID_SERIAL=emulator-5554 ./gradlew :app:connectedDebugAndroidTest`. The build refuses any other device.
 2. Check a release build still compiles: `./gradlew :app:assembleRelease`.
 3. For UI changes, check the screen in the debug preview on a round 438 × 438 emulator, and say what you checked.
 

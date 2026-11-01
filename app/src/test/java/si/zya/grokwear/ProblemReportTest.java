@@ -42,7 +42,7 @@ public class ProblemReportTest {
         lost.initCause(new java.net.UnknownHostException("Unable to resolve host \"secret.cursorvm.com\""));
         assertEquals("UnknownHostException",ProblemReport.describe(lost));
         GrokCore.Failure tooLarge=new GrokCore.Failure("Grok connection failed. Check sign-in before trying again.",false);
-        tooLarge.initCause(new GrokVault.ResponseTooLarge());
+        tooLarge.initCause(new GrokVault.ResponseTooLarge("reply",1<<20));
         assertEquals("ResponseTooLarge",ProblemReport.describe(tooLarge));
         assertEquals("Bot list format is not recognized. No Bot was selected.",
             ProblemReport.describe(new GrokCore.Failure("Bot list format is not recognized. No Bot was selected.",true)));
@@ -96,5 +96,29 @@ public class ProblemReportTest {
         assertTrue("newest line kept",decoded.contains("14:15Z"));
         assertFalse("oldest line dropped",decoded.contains("14:01Z"));
         assertTrue(decoded.endsWith("What happened?\n"));
+    }
+
+    @Test public void aTraceNamesTheLimitAndTheAppCodeItPassedThrough() {
+        Exception failure=null;
+        try{GrokVault.readBounded(new java.io.ByteArrayInputStream(new byte[2*1024*1024]),1024*1024);}catch(Exception tooLarge){failure=tooLarge;}
+        GrokCore.Failure wrapped=new GrokCore.Failure("Grok request could not finish.",false);wrapped.initCause(failure);
+        String trace=ProblemReport.trace(wrapped);
+        assertTrue(trace,trace.startsWith("ResponseTooLarge (reply over 1 MB) at GrokVault.readBounded:"));
+        assertTrue(trace,trace.contains(" ← ProblemReportTest.aTraceNamesTheLimitAndTheAppCodeItPassedThrough:"));
+        assertTrue(trace,trace.endsWith(" · via Failure"));
+    }
+
+    @Test public void aTraceNeverCarriesANetworkMessage() {
+        String trace=ProblemReport.trace(new java.net.SocketTimeoutException("timeout talking to private-host.example.com"));
+        assertTrue(trace,trace.startsWith("SocketTimeoutException at ProblemReportTest."));
+        assertFalse(trace,trace.contains("example"));
+        assertEquals("unknown",ProblemReport.trace(null));
+    }
+
+    @Test public void theReportCarriesTheLastErrorAboveTheLog() throws Exception {
+        String error="11-01 16:18Z Bot list: ResponseTooLarge (reply over 1 MB) at GrokVault.readBounded:121 ← BotAccount.execute:380 · via Failure";
+        String decoded=URLDecoder.decode(ProblemReport.url("samsung SM-L300","14 (API 34)","0.6.2 (33)",true,"Wi-Fi","","Bot list: Bots aren’t available yet",error,
+            "11-01 16:18Z Bot list: ResponseTooLarge · after 5.4 s · Wi-Fi 30 Mbps",false),"UTF-8");
+        assertTrue(decoded,decoded.contains("\nError: 11-01 16:18Z Bot list: ResponseTooLarge (reply over 1 MB) at GrokVault.readBounded:121 < BotAccount.execute:380 - via Failure\nLog (UTC, newest first):\n11-01 16:18Z Bot list"));
     }
 }
