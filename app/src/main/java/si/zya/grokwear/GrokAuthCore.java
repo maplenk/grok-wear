@@ -21,9 +21,18 @@ final class GrokAuthCore {
     static final class Reply {
         final int status;
         final JSONObject body;
-        Reply(int status, JSONObject body) { this.status=status; this.body=body==null?new JSONObject():body; }
+        /** Safe details of a refusal (status, Connect code, failure hint, scope reason); null on success. */
+        final ServiceRefusal refusal;
+        Reply(int status, JSONObject body) { this(status, body, null); }
+        Reply(int status, JSONObject body, ServiceRefusal refusal) {
+            this.status=status; this.body=body==null?new JSONObject():body;
+            this.refusal=status==200?null:refusal!=null?refusal:new ServiceRefusal(status,"","","");
+        }
     }
-    static final String POLL="poll", REFRESH="refresh", BOOTSTRAP="bootstrap";
+    /** One short line for Report a problem's log; never credentials or account data. */
+    interface Log { void line(String text); }
+    /** ACCESS: DashboardService/GetSandAccessStatus, read-only, asked when the backend refuses the account. */
+    static final String POLL="poll", REFRESH="refresh", BOOTSTRAP="bootstrap", ACCESS="access";
     static final long LOGIN_MS=5*60_000L, POLL_MS=3_000L, REFRESH_LEAD_MS=300_000L, CONFIG_CACHE_MS=300_000L;
     static final String WEBSITE="https://cursor.com", BACKEND="https://api2.cursor.sh";
     // Public client identifier shipped in the native app, not a client secret.
@@ -42,7 +51,23 @@ final class GrokAuthCore {
     private final Store store;
     private final Transport transport;
     private final Clock clock;
-    GrokAuthCore(Store store, Transport transport, Clock clock) { this.store=store; this.transport=transport; this.clock=clock; }
+    private final Log log;
+    GrokAuthCore(Store store, Transport transport, Clock clock) { this(store,transport,clock,text->{}); }
+    GrokAuthCore(Store store, Transport transport, Clock clock, Log log) { this.store=store; this.transport=transport; this.clock=clock; this.log=log; }
+    /**
+     * Like the desktop client's access hold: once GetSandAccessStatus says this sign-in can't use Grok Bot,
+     * background callers (live updates, reply alerts) get that answer for 15 minutes instead of asking again.
+     * Try again and a new sign-in release it.
+     */
+    static final long ACCESS_HOLD_MS=15*60_000L;
+    private static final class Hold { final String access; final long until; final GrokCore.Failure failure;
+        Hold(String access,long until,GrokCore.Failure failure){this.access=access;this.until=until;this.failure=failure;} }
+    private static volatile Hold HOLD;
+    static void releaseHold(){HOLD=null;}
+    /** Tests only: forgets this process's access hold and forced renewal. */
+    static void forgetRecoveries(){HOLD=null;FORCED_TO="";}
+    /** Digest of the token a forced renewal produced: if Grok refuses that one too, renewing again won't help. */
+    private static volatile String FORCED_TO="";
 
     JSONObject begin() throws Exception {
         synchronized(LOCK) {
@@ -126,16 +151,47 @@ final class GrokAuthCore {
 
     JSONObject state() throws Exception {synchronized(LOCK){return stateOf(store.read());}}
 
-    /** Called before a new request, never in response to an uncertain prompt submission. */
+    /**
+     * Called before a new request, never in response to an uncertain prompt submission.
+     * A refused EnsureSandBox is handled like Grok Bot Android 1.18.0 (postWithScopeRecovery): a stale team is
+     * dropped and asked again without it, any other 401 renews the sign-in once and asks again, and a refusal
+     * that is still about access is explained by GetSandAccessStatus.
+     */
     JSONObject currentConfig() throws Exception {
-        renewIfDue();
+        renewIfDue(false,null);
+        boolean teamCleared=false,renewed=false;
+        while(true){
+            Attempt attempt=bootstrapOnce();
+            if(attempt.config!=null){
+                if(teamCleared||renewed)log.line("Bot sandbox start: ok after "+(teamCleared?"dropping a stale team":"renewing sign-in"));
+                return attempt.config;
+            }
+            ServiceRefusal refused=attempt.refusal;
+            if(refused.staleTeam()&&!teamCleared&&attempt.team>0){
+                clearTeam(attempt.team);teamCleared=true;log.line("Bot sandbox start: stale team, asking again without it");continue;
+            }
+            if(refused.status==401&&!renewed&&!digest(attempt.access).equals(FORCED_TO)){
+                renewIfDue(true,attempt.access);renewed=true;continue;
+            }
+            throw refusalFailure(refused,"Grok refused this sign-in. No message was sent.");
+        }
+    }
+    private static final class Attempt {
+        JSONObject config;ServiceRefusal refusal;String access="";long team;
+    }
+    /** One EnsureSandBox request, or the saved config while it's fresh. A refusal is returned, not thrown. */
+    private Attempt bootstrapOnce() throws Exception {
+        Attempt attempt=new Attempt();
         JSONObject request;String epoch,id;BootstrapFlight flight;
         synchronized(LOCK) {
             JSONObject root=pendingRoot();JSONObject tokens=needTokens(root);
             JSONObject config=root.optJSONObject("config");long now=clock.now(),saved=root.optLong("config_saved_ms");
-            if(config!=null&&saved<=now&&now-saved<CONFIG_CACHE_MS&&!gatewayDue(config,now))return copy(config);
+            if(config!=null&&saved<=now&&now-saved<CONFIG_CACHE_MS&&!gatewayDue(config,now)){attempt.config=copy(config);return attempt;}
+            Hold held=HOLD;
+            if(held!=null&&now<held.until&&held.access.equals(digest(tokens.getString("access"))))throw copyFailure(held.failure);
             request=new JSONObject().put("accessToken",tokens.getString("access"));
             if(tokens.has("team"))request.put("selectedTeamId",tokens.getLong("team"));
+            attempt.access=tokens.getString("access");attempt.team=tokens.optLong("team",0);
             epoch=root.getString("epoch");id=mark(root,BOOTSTRAP);
             flight=new BootstrapFlight();BOOTSTRAPS.put(id,flight);
         }
@@ -145,21 +201,76 @@ final class GrokAuthCore {
         catch(Exception e) {clearNonRotating(epoch,id);throw e;}
         synchronized(LOCK) {
             JSONObject root=active(epoch,id);
-            // This operation is read/bootstrap, not a rotating-token request. A later explicit
-            // user action may try it again; no automatic retry happens here.
+            // This operation is read/bootstrap, not a rotating-token request: it may be asked again.
             root.remove("operation");store.write(root);
-            if(response.status!=200)throw failure(response.status==401||response.status==403
-                    ?"Grok refused this sign-in. No message was sent."
-                    :"Could not connect to Grok (HTTP "+response.status+"). No message was sent.");
+            if(response.status!=200){attempt.refusal=response.refusal;return attempt;}
             JSONObject config=configFrom(response.body);
             root.put("config",config).put("config_saved_ms",clock.now());store.write(root);
             flight.succeeded=true;
-            return copy(config);
+            attempt.config=copy(config);return attempt;
         }
         } finally {
             synchronized(LOCK) {flight.finished=true;BOOTSTRAPS.remove(id);LOCK.notifyAll();}
         }
     }
+    /** Drops the team chosen at sign-in after Grok called it stale, unless it already changed. */
+    private void clearTeam(long team) throws Exception {
+        synchronized(LOCK) {
+            JSONObject root=pendingRoot();JSONObject tokens=needTokens(root);
+            if(tokens.optLong("team",0)!=team)return;
+            tokens.remove("team");root.put("tokens",tokens);root.remove("config");root.remove("config_saved_ms");store.write(root);
+        }
+    }
+
+    static final int NOT_RECOVERED=0,RENEWED=1,TEAM_DROPPED=2;
+    /**
+     * For other backend requests refused with a 401 (call setup and tools): drop a stale team, or renew the
+     * sign-in once, so the caller can ask once more. NOT_RECOVERED when neither applies.
+     */
+    int recoverRejected(JSONObject used,ServiceRefusal refused) throws Exception {
+        if(refused==null||refused.status!=401)return NOT_RECOVERED;
+        if(refused.staleTeam()&&used.optLong("selectedTeamId",0)>0){clearTeam(used.getLong("selectedTeamId"));log.line("Grok: stale team dropped");return TEAM_DROPPED;}
+        String access=used.optString("accessToken","");
+        if(access.isEmpty()||digest(access).equals(FORCED_TO))return NOT_RECOVERED;
+        renewIfDue(true,access);return RENEWED;
+    }
+
+    /**
+     * The Failure for a refusal: the failure hint's own wording, GetSandAccessStatus's explanation when the
+     * refusal is about access (with where to fix it), or the plain fallback.
+     */
+    GrokCore.Failure refusalFailure(ServiceRefusal refused,String fallback) throws Exception {
+        String hinted=refused.hintMessage();
+        GrokCore.Failure failure;
+        if(!hinted.isEmpty())failure=new GrokCore.Failure(hinted,true,refused.failureCode(),refused.status);
+        else{
+            SandAccess access=refused.accessRefusal()?accessStatus():null;
+            if(access!=null&&!access.granted()){
+                failure=new GrokCore.Failure(access.message(),true,access.reason.equals("unspecified")?access.state:access.reason,refused.status,access.link());
+                JSONObject tokens;synchronized(LOCK){tokens=needTokens(tokensRoot());}
+                HOLD=new Hold(digest(tokens.getString("access")),clock.now()+ACCESS_HOLD_MS,failure);
+            }else failure=new GrokCore.Failure(refused.status==401||refused.status==403?fallback
+                    :"Could not connect to Grok (HTTP "+refused.status+"). No message was sent.",true,refused.failureCode(),refused.status);
+        }
+        failure.refusal=refused;return failure;
+    }
+    /** GetSandAccessStatus with the current sign-in, or null when it can't be read. Logs one line. */
+    SandAccess accessStatus() throws Exception {
+        JSONObject request;
+        synchronized(LOCK) {
+            JSONObject tokens=needTokens(tokensRoot());
+            request=new JSONObject().put("accessToken",tokens.getString("access"));
+            if(tokens.has("team"))request.put("selectedTeamId",tokens.getLong("team"));
+        }
+        Reply response;
+        try{response=transport.request(ACCESS,request);}catch(Exception unreadable){return null;}
+        if(response.status!=200)return null;
+        SandAccess access=SandAccess.parse(response.body);log.line(access.logLine());return access;
+    }
+    private static GrokCore.Failure copyFailure(GrokCore.Failure held){
+        GrokCore.Failure again=new GrokCore.Failure(held.getMessage(),held.rejected,held.code,held.status,held.link);again.refusal=held.refusal;return again;
+    }
+    private static String digest(String value){try{return hexDigest(value==null?"":value);}catch(Exception unavailable){return "";}}
 
     /** Drops the saved gateway config the gateway refused, unless a newer one already replaced it. */
     void forgetConfig(String gatewayToken) throws Exception {
@@ -181,19 +292,26 @@ final class GrokAuthCore {
         }
     }
 
-    private void renewIfDue() throws Exception {
+    private void renewIfDue() throws Exception {renewIfDue(false,null);}
+    /**
+     * force: Grok refused rejectedAccess before it was due (Android's refreshAfterRejectedBearer). Renews once,
+     * unless another caller already replaced that token. The rotation-safety rules are the same either way.
+     */
+    private void renewIfDue(boolean force,String rejectedAccess) throws Exception {
         JSONObject request;String epoch,id,subject;long team;BootstrapFlight flight;
         synchronized(LOCK) {
             // Tokens that aren't due need no renewal, so no wait for a gateway bootstrap either.
-            if(needTokens(tokensRoot()).getLong("expires_at_ms")-clock.now()>REFRESH_LEAD_MS)return;
+            if(!force&&needTokens(tokensRoot()).getLong("expires_at_ms")-clock.now()>REFRESH_LEAD_MS)return;
             JSONObject root=pendingRoot();JSONObject tokens=needTokens(root);
-            if(tokens.getLong("expires_at_ms")-clock.now()>REFRESH_LEAD_MS)return;
+            if(force){if(!tokens.getString("access").equals(rejectedAccess))return;}
+            else if(tokens.getLong("expires_at_ms")-clock.now()>REFRESH_LEAD_MS)return;
             request=new JSONObject().put("refreshToken",tokens.getString("refresh"));
             subject=tokens.getString("subject");team=tokens.optLong("team",0);
             epoch=root.getString("epoch");id=mark(root,REFRESH);
             flight=new BootstrapFlight();REFRESHES.put(id,flight);
         }
-        try{renew(request,epoch,id,subject,team);flight.succeeded=true;}
+        try{renew(request,epoch,id,subject,team);flight.succeeded=true;
+            if(force){synchronized(LOCK){FORCED_TO=digest(needTokens(tokensRoot()).getString("access"));}log.line("Sign-in renewal: after a refusal, ok");}}
         finally{synchronized(LOCK){flight.finished=true;REFRESHES.remove(id);LOCK.notifyAll();}}
     }
     private void renew(JSONObject request,String epoch,String id,String subject,long team) throws Exception {
@@ -264,7 +382,8 @@ final class GrokAuthCore {
             view.put("expires_at_ms",tokens.getLong("expires_at_ms"))
                     .put("refresh_due",tokens.getLong("expires_at_ms")-clock.now()<=REFRESH_LEAD_MS)
                     .put("account_key",hexDigest(tokens.getString("subject")+"\n"+tokens.optLong("team",0)))
-                    .put("auth_generation",root.optString("generation")).put("author_key",hexDigest(tokens.getString("subject")));
+                    .put("auth_generation",root.optString("generation")).put("author_key",hexDigest(tokens.getString("subject")))
+                    .put("team",tokens.optLong("team",0)>0);
         }
         return view;
     }

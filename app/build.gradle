@@ -7,6 +7,9 @@ def signingProps = new Properties()
 def signingFile = rootProject.file('keystore.properties')
 if (signingFile.exists()) signingFile.withInputStream { signingProps.load(it) }
 def signingValue = { String key -> signingProps.getProperty(key) ?: System.getenv('GROKWEAR_' + key.toUpperCase()) }
+// Report a problem's optional "Send logs" (off by default) goes to this Sentry project. Without it the option is hidden.
+def sentryDsn = ((project.findProperty('GROKWEAR_SENTRY_DSN') ?: System.getenv('GROKWEAR_SENTRY_DSN')) ?: '').toString().trim()
+if (!(sentryDsn ==~ /[A-Za-z0-9:\/@._-]*/)) throw new GradleException('GROKWEAR_SENTRY_DSN has unexpected characters.')
 
 android {
     namespace 'si.zya.grokwear'
@@ -17,8 +20,9 @@ android {
         applicationId 'si.zya.grokwear'
         minSdk 30
         targetSdk 36
-        versionCode 34
-        versionName '0.6.2'
+        versionCode 35
+        versionName '0.6.3'
+        buildConfigField 'String', 'SENTRY_DSN', "\"${sentryDsn}\""
         // On-device tests run on an emulator only (ANDROID_SERIAL), never a personal watch.
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }

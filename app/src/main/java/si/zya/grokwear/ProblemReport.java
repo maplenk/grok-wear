@@ -23,7 +23,8 @@ final class ProblemReport {
     private ProblemReport(){}
     static final String ISSUES="https://github.com/maplenk/grok-wear/issues/new",EMAIL="namankhator@gmail.com";
     private static final String PREFS="grokwear_ui",LOG="recent_problems",ERROR="last_error";
-    private static final int KEEP=15,LONGEST=130,TRACE=300;
+    // The QR code takes the newest lines that fit; Send logs (Sentry, off by default) takes all of them.
+    private static final int KEEP=60,LONGEST=130,TRACE=300;
     /** Encoded link length: past about this, a QR code at watch size gets hard for a phone to read. */
     static final int LINK_BUDGET=900;
 
@@ -153,11 +154,34 @@ final class ProblemReport {
      * where: the screen and message the report was made from, such as "Bot list: Bots aren’t available yet (HTTP 503)…", or "".
      * state: the app's side, such as how many Bots and when they last loaded, so a report says something even when nothing failed.
      */
-    static String url(Context context,String where,String state,boolean email){
+    static String url(Context context,String where,String state,boolean email){return url(context,where,state,email,"");}
+    /** logId: the Log ID of logs sent to Sentry for this report, or "". */
+    static String url(Context context,String where,String state,boolean email,String logId){
         return url(watch(Build.MANUFACTURER,Build.MODEL),Build.VERSION.RELEASE+" (API "+Build.VERSION.SDK_INT+")",
             BuildConfig.VERSION_NAME+" ("+BuildConfig.VERSION_CODE+")",AssistantRole.held(context),networkDetails(context),
-            state+(state.isEmpty()?"":" · ")+battery(context),where,lastError(context),log(context),email);
+            state+(state.isEmpty()?"":" · ")+battery(context),where,lastError(context),log(context),email,logId);
     }
+    /** Send logs' attachment: the same details as the QR code, the latest error and every kept log line. */
+    static String fullText(Context context,String where,String state,String logId){
+        return fullText(watch(Build.MANUFACTURER,Build.MODEL),Build.VERSION.RELEASE+" (API "+Build.VERSION.SDK_INT+")",
+            BuildConfig.VERSION_NAME+" ("+BuildConfig.VERSION_CODE+")",AssistantRole.held(context),networkDetails(context),
+            state+(state.isEmpty()?"":" · ")+battery(context),where,lastError(context),log(context),logId);
+    }
+    static String fullText(String watch,String android,String version,boolean button,String network,String state,String where,String error,String log,String logId){
+        StringBuilder out=new StringBuilder();
+        if(!logId.isEmpty())out.append("Log ID: ").append(logId).append('\n');
+        if(!where.isEmpty())out.append("Where: ").append(clean(where,400)).append('\n');
+        out.append("Watch: ").append(clean(watch)).append("\nAndroid: ").append(clean(android)).append("\nGrok Wear: ").append(clean(version))
+            .append("\nAssistant button: ").append(button?"on":"off").append("\nNetwork: ").append(clean(network));
+        if(!state.isEmpty())out.append("\nState: ").append(clean(state,300));
+        if(!error.isEmpty())out.append("\nError: ").append(clean(error,TRACE));
+        out.append("\nLog (UTC, newest first):\n");boolean any=false;
+        for(String line:log.split("\n"))if(!line.isEmpty()){out.append(line).append('\n');any=true;}
+        if(!any)out.append("none\n");
+        return out.toString();
+    }
+    /** Only the kind of link (Wi-Fi, via phone, LTE), for a Sentry tag. */
+    static String networkKind(Context context){NetworkCapabilities link=link(context);return link==null?"offline":kind(link);}
     static String url(String watch,String android,String version,boolean button,String network,String state,String where,String log,boolean email){
         return url(watch,android,version,button,network,state,where,"",log,email);
     }
@@ -166,9 +190,12 @@ final class ProblemReport {
      * The title names where it happened.
      */
     static String url(String watch,String android,String version,boolean button,String network,String state,String where,String error,String log,boolean email){
+        return url(watch,android,version,button,network,state,where,error,log,email,"");
+    }
+    static String url(String watch,String android,String version,boolean button,String network,String state,String where,String error,String log,boolean email,String logId){
         String place=where.isEmpty()?"":clean(where.split(":",2)[0]);
         // "←" and " · " read well on the watch but take 9 and 8 characters in a link; " < " and " - " take 3.
-        String head=(where.isEmpty()?"":"Where: "+clean(where)+"\n")+"Watch: "+clean(watch)+"\nAndroid: "+clean(android)+"\nGrok Wear: "+clean(version)+"\nAssistant button: "+(button?"on":"off")
+        String head=(logId.isEmpty()?"":"Log ID: "+clean(logId)+"\n")+(where.isEmpty()?"":"Where: "+clean(where)+"\n")+"Watch: "+clean(watch)+"\nAndroid: "+clean(android)+"\nGrok Wear: "+clean(version)+"\nAssistant button: "+(button?"on":"off")
             +"\nNetwork: "+clean(network)+(state.isEmpty()?"":"\nState: "+clean(state,160))+(error.isEmpty()?"":"\nError: "+clean(error,TRACE).replace(" ← "," < ").replace(" · "," - "))
             +"\nLog (UTC, newest first):\n",tail="\nWhat happened?\n",title=(place.isEmpty()?"Problem":place+" problem")+" on "+clean(watch);
         StringBuilder lines=new StringBuilder();
