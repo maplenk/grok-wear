@@ -24,7 +24,12 @@ final class GrokCore {
         final int status;
         Failure(String safeMessage, boolean rejected) { this(safeMessage, rejected, ""); }
         Failure(String safeMessage, boolean rejected, String code) { this(safeMessage, rejected, code, 0); }
-        Failure(String safeMessage, boolean rejected, String code, int status) { super(safeMessage); this.rejected = rejected; this.code = code; this.status = status; }
+        /** Where the phone can fix it (an https paywall or onboarding page, shown as a QR code), or "". */
+        final String link;
+        /** The backend's safe refusal details when it refused this request, or null. */
+        ServiceRefusal refusal;
+        Failure(String safeMessage, boolean rejected, String code, int status) { this(safeMessage, rejected, code, status, ""); }
+        Failure(String safeMessage, boolean rejected, String code, int status, String link) { super(safeMessage); this.rejected = rejected; this.code = code; this.status = status; this.link = link == null ? "" : link; }
     }
     /**
      * Like the official Android client: a gateway answering 401, 404 or 417 has moved on from this

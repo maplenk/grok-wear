@@ -31,7 +31,12 @@ final class BotAccount {
     BotAccount(Context context) {
         auth=new GrokAuthClient(context);
         core=new GrokCore(new GrokVault(context),BotAccount::gateway,new GrokCore.ConfigProvider(){
-            public JSONObject current(JSONObject root)throws Exception{verify(root,auth.state());JSONObject config=auth.currentConfig();verify(root,auth.state());return config;}
+            public JSONObject current(JSONObject root)throws Exception{
+                JSONObject before=auth.state();verify(root,before);JSONObject config=auth.currentConfig();JSONObject after=auth.state();
+                // Grok dropped a stale team during this sign-in: the account binding changed, so relink cleanly
+                // and let the caller start over rather than finish with the old binding.
+                if(teamChanged(before,after)){relink(config,after.optString("auth_generation"));throw new GrokCore.Failure("Grok dropped an old team from this sign-in. Loading again.",true,TEAM_CHANGED);}
+                verify(root,after);return config;}
             public void stale(JSONObject config)throws Exception{auth.forgetConfig(config.optString("gatewayToken"));}
         });
         GrokVault privateHistory=new GrokVault(context,".continuity-v1");
@@ -48,14 +53,32 @@ final class BotAccount {
         if("ready".equals(state.optString("status"))) {
             String expectedGeneration=state.optString("auth_generation");
             JSONObject config=auth.currentConfig();
-            synchronized(core){synchronized(GrokAuthCore.LOCK){
-                state=auth.state();
-                if(!"ready".equals(state.optString("status"))||!expectedGeneration.equals(state.optString("auth_generation")))throw new GrokCore.Failure("Grok sign-in was cancelled. Start a new sign-in.",true);
-                core.linkBrowser(config,state.getString("account_key"),state.getString("auth_generation"));
-            }}
+            state=relink(config,expectedGeneration);
         }
         return state;
     }
+    static final String TEAM_CHANGED="team_changed";
+    /** Same sign-in, different account binding: Grok dropped the team chosen at sign-in. */
+    private static boolean teamChanged(JSONObject before,JSONObject after){
+        return before.optBoolean("linked")&&after.optBoolean("linked")&&before.optString("auth_generation").equals(after.optString("auth_generation"))
+            &&!before.optString("account_key").equals(after.optString("account_key"));
+    }
+    /**
+     * Links the core to the current sign-in. When the same sign-in's binding changed because a stale team was
+     * dropped, the old binding's local state (selection, outbox, saved Bots) is cleared first, like a new account.
+     */
+    private JSONObject relink(JSONObject config,String expectedGeneration) throws Exception {
+        synchronized(core){synchronized(GrokAuthCore.LOCK){
+            JSONObject state=auth.state();
+            if(!"ready".equals(state.optString("status"))||!expectedGeneration.equals(state.optString("auth_generation")))throw new GrokCore.Failure("Grok sign-in was cancelled. Start a new sign-in.",true);
+            JSONObject root=core.store.read();String account=state.getString("account_key");
+            if(root.has("config")&&expectedGeneration.equals(root.optString("auth_generation"))&&!account.equals(root.optString("auth_account")))core.unlink();
+            core.linkBrowser(config,account,state.getString("auth_generation"));
+            return state;
+        }}
+    }
+    /** Debug builds: asks GetSandAccessStatus with this sign-in and logs the answer. */
+    SandAccess accessProbe() throws Exception {auth.core.backendContext();return auth.core.accessStatus();}
     void cancelLogin(String attempt) throws Exception {
         synchronized(core){synchronized(GrokAuthCore.LOCK){if(auth.core.cancelAttempt(attempt)){core.unlink();}}}
     }
@@ -100,12 +123,43 @@ final class BotAccount {
         if(!"MintSandVoiceCallSecret".equals(method)&&!selected.equals(body.optString("agentId")))
             throw new GrokCore.Failure("Grok Bot changed. Start the call again.",true);
         JSONObject context=auth.core.backendContext();bound();
+        return recovering(client,method,body,context,this::bound);
+    }
+    interface Check { void run() throws Exception; }
+    /** A GrokBotService request with this sign-in's token and team. */
+    private static Request.Builder backendRequest(String method,JSONObject context)throws Exception {
         Request.Builder request=new Request.Builder().url(GrokAuthCore.BACKEND+"/aiserver.v1.GrokBotService/"+method)
             .header("Authorization","Bearer "+context.getString("accessToken"))
             .header("connect-protocol-version","1").header("x-cursor-client-type","sand")
             .header("x-cursor-client-version","0.71.2").header("x-sand-box-namespace","prod");
         if(context.has("selectedTeamId"))request.header("x-cursor-team-id",Long.toString(context.getLong("selectedTeamId")));
-        return execute(client,request,body,false);
+        return request;
+    }
+    /**
+     * Like Grok Bot Android 1.18.0: a 401 refused the request before it acted, so after dropping a stale team
+     * or renewing the sign-in once it is asked once more. A refusal that remains is explained (failure hint
+     * or GetSandAccessStatus). A dropped team changes the account binding: the call starts over.
+     */
+    private JSONObject recovering(OkHttpClient client,String method,JSONObject body,JSONObject context,Check check)throws Exception {
+        try{return execute(client,backendRequest(method,context),body,false);}
+        catch(GrokCore.Failure refused){
+            if(refused.refusal==null)throw refused;
+            int recovered=auth.core.recoverRejected(context,refused.refusal);
+            if(recovered==GrokAuthCore.TEAM_DROPPED){
+                JSONObject state=auth.state();relink(auth.currentConfig(),state.optString("auth_generation"));
+                throw new GrokCore.Failure("Grok dropped an old team from this sign-in. Start again.",true,TEAM_CHANGED,401);
+            }
+            if(recovered==GrokAuthCore.RENEWED){
+                JSONObject fresh=auth.core.backendContext();check.run();
+                try{return execute(client,backendRequest(method,fresh),body,false);}
+                catch(GrokCore.Failure again){throw explained(again);}
+            }
+            throw explained(refused);
+        }
+    }
+    private GrokCore.Failure explained(GrokCore.Failure refused)throws Exception {
+        if(refused.refusal==null||(refused.refusal.status!=401&&refused.refusal.status!=403&&refused.refusal.hintMessage().isEmpty()))return refused;
+        return auth.core.refusalFailure(refused.refusal,"Grok refused this sign-in. Sign in again.");
     }
     /** The finished call's own Bot, not the current selection: the user may switch Bots right after hanging up. */
     JSONObject handoffTool(JSONObject binding,JSONObject body) throws Exception {
@@ -113,18 +167,13 @@ final class BotAccount {
         verifyHistoryBinding(binding,false);
         if(!binding.optString("agentId").equals(body.optString("agentId")))throw new GrokCore.Failure("Grok Bot changed. Nothing was sent.",true);
         JSONObject context=auth.core.backendContext();verifyHistoryBinding(binding,false);
-        Request.Builder request=new Request.Builder().url(GrokAuthCore.BACKEND+"/aiserver.v1.GrokBotService/VoiceCallHarnessTool")
-            .header("Authorization","Bearer "+context.getString("accessToken"))
-            .header("connect-protocol-version","1").header("x-cursor-client-type","sand")
-            .header("x-cursor-client-version","0.71.2").header("x-sand-box-namespace","prod");
-        if(context.has("selectedTeamId"))request.header("x-cursor-team-id",Long.toString(context.getLong("selectedTeamId")));
-        return execute(request,body,false);
+        return recovering(HTTP,"VoiceCallHarnessTool",body,context,()->verifyHistoryBinding(binding,false));
     }
     /** A call-scoped lease, created after normal renewal, never used for later tool calls. */
     NativeVoiceSession.Backend startupBackend(JSONObject requestedBinding) throws Exception {
         final JSONObject binding=new JSONObject(requestedBinding.toString());
         verifyHistoryBinding(binding,true);
-        JSONObject credentials=auth.core.backendContext();
+        final JSONObject credentials=auth.core.backendContext();
         verifyHistoryBinding(binding,true);
         return (method,body)->{
             if(!method.equals("VoiceCallHarnessSession")&&!method.equals("MintSandVoiceCallSecret"))
@@ -132,12 +181,7 @@ final class BotAccount {
             verifyHistoryBinding(binding,true);
             if(method.equals("VoiceCallHarnessSession")&&!binding.getString("agentId").equals(body.optString("agentId")))
                 throw new GrokCore.Failure("Grok Bot changed. Start the call again.",true);
-            Request.Builder request=new Request.Builder().url(GrokAuthCore.BACKEND+"/aiserver.v1.GrokBotService/"+method)
-                .header("Authorization","Bearer "+credentials.getString("accessToken"))
-                .header("connect-protocol-version","1").header("x-cursor-client-type","sand")
-                .header("x-cursor-client-version","0.71.2").header("x-sand-box-namespace","prod");
-            if(credentials.has("selectedTeamId"))request.header("x-cursor-team-id",Long.toString(credentials.getLong("selectedTeamId")));
-            JSONObject result=execute(request,body,false);verifyHistoryBinding(binding,true);return result;
+            JSONObject result=recovering(HTTP,method,body,credentials,()->verifyHistoryBinding(binding,true));verifyHistoryBinding(binding,true);return result;
         };
     }
     /** Read-only account settings. Optional UI enhancement; failure must not block Bots. */
@@ -347,11 +391,10 @@ final class BotAccount {
         }
     }
     /** The Connect error code token of a refused call, or "". Nothing else from the body is kept. */
-    private static String errorCode(Response response){
-        try{if(response.body()==null)return "";byte[] received=GrokVault.readBounded(response.body().byteStream(),16384);
-            try{JSONObject error=new JSONObject(new String(received,StandardCharsets.UTF_8));String code=error.optString("failureCode",error.optString("code"));return code.matches("[a-z_/-]{1,60}")?code:"";}
-            finally{java.util.Arrays.fill(received,(byte)0);}
-        }catch(Exception unreadable){return "";}
+    static String errorCode(byte[] received){
+        if(received==null)return "";
+        try{JSONObject error=new JSONObject(new String(received,StandardCharsets.UTF_8));String code=error.optString("failureCode",error.optString("code"));return code.matches("[a-z_/-]{1,60}")?code:"";}
+        catch(Exception unreadable){return "";}
     }
     private static JSONObject execute(Request.Builder request,JSONObject body,boolean arrayAllowed) throws Exception {return execute(HTTP,request,body,arrayAllowed);}
     /**
@@ -373,7 +416,15 @@ final class BotAccount {
             };
             try(Response response=client.newCall(request.post(payload).build()).execute()) {
                 // A 4xx is the service refusing; a 5xx may or may not have taken effect.
-                if(response.code()!=200)throw new GrokCore.Failure("Grok request failed (HTTP "+response.code()+").",response.code()<500,errorCode(response),response.code());
+                if(response.code()!=200){
+                    byte[] raw=null;
+                    try{if(response.body()!=null)raw=GrokVault.readBounded(response.body().byteStream(),16384);}catch(Exception unreadable){raw=null;}
+                    try{
+                        String hint=response.header(ServiceRefusal.HINT_HEADER);if(hint==null)hint=response.header("trailer-"+ServiceRefusal.HINT_HEADER);
+                        GrokCore.Failure refused=new GrokCore.Failure("Grok request failed (HTTP "+response.code()+").",response.code()<500,errorCode(raw),response.code());
+                        refused.refusal=ServiceRefusal.parse(response.code(),hint,raw);throw refused;
+                    }finally{if(raw!=null)java.util.Arrays.fill(raw,(byte)0);}
+                }
                 if(response.body()==null)throw new java.io.IOException();
                 long started=System.nanoTime();
                 long[] raw={-1};

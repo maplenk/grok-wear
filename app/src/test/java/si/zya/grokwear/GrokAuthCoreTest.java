@@ -19,26 +19,33 @@ public class GrokAuthCoreTest {
     }
     static final class Fixture {
         final Memory memory=new Memory();long now=NOW;final List<String> calls=new ArrayList<>();
-        GrokAuthCore.Reply poll=new GrokAuthCore.Reply(404,new JSONObject()),refresh,bootstrap;
+        GrokAuthCore.Reply poll=new GrokAuthCore.Reply(404,new JSONObject()),refresh,bootstrap,access;
+        /** Bootstrap replies to give first, in order, before falling back to bootstrap. */
+        final java.util.ArrayDeque<GrokAuthCore.Reply> bootstraps=new java.util.ArrayDeque<>();
+        final List<JSONObject> requests=new ArrayList<>();final List<String> lines=new ArrayList<>();
         JSONObject lastRequest;boolean interrupt,failAfterResponse;Runnable inFlight;
         GrokAuthCore core;
         Fixture()throws Exception {
             bootstrap=new GrokAuthCore.Reply(200,new JSONObject().put("gatewayUrl","https://watch.cursorvm.com")
                     .put("gatewayToken","synthetic-gateway").put("networkToken","synthetic-route"));
             refresh=new GrokAuthCore.Reply(200,new JSONObject().put("access_token",token("owner",now+3_600_000)).put("refresh_token","rotated-secret"));
+            GrokAuthCore.forgetRecoveries();
             core=new GrokAuthCore(memory,(operation,input)->{
-                assertTrue(memory.value.has("operation"));calls.add(operation);lastRequest=new JSONObject(input.toString());
+                // The access check is read-only and marks no operation.
+                if(!operation.equals(GrokAuthCore.ACCESS))assertTrue(memory.value.has("operation"));
+                calls.add(operation);lastRequest=new JSONObject(input.toString());requests.add(lastRequest);
                 if(inFlight!=null)inFlight.run();
                 if(interrupt)throw new java.io.IOException("synthetic-secret");
                 if(failAfterResponse)memory.failWrite=true;
                 if(operation.equals(GrokAuthCore.POLL))return poll;
                 if(operation.equals(GrokAuthCore.REFRESH))return refresh;
-                if(operation.equals(GrokAuthCore.BOOTSTRAP))return bootstrap;
+                if(operation.equals(GrokAuthCore.BOOTSTRAP))return bootstraps.isEmpty()?bootstrap:bootstraps.poll();
+                if(operation.equals(GrokAuthCore.ACCESS)&&access!=null)return access;
                 throw new AssertionError(operation);
-            },()->now);
+            },()->now,lines::add);
         }
         void signIn(long expires)throws Exception {
-            core.begin();poll=new GrokAuthCore.Reply(200,login("owner",expires));core.poll();calls.clear();
+            core.begin();poll=new GrokAuthCore.Reply(200,login("owner",expires));core.poll();calls.clear();requests.clear();
         }
     }
     static String token(String sub,long expiry)throws Exception {
@@ -354,9 +361,89 @@ public class GrokAuthCoreTest {
         Fixture f=new Fixture();f.signIn(NOW+3_600_000);f.core.currentConfig();
         f.memory.value.getJSONObject("config").put("gatewayToken",token("gateway",NOW+1000));f.core.currentConfig();assertEquals(2,f.calls.size());
     }
-    @Test public void bootstrapRefusalDoesNotRotateOrRetry()throws Exception {
-        Fixture f=new Fixture();f.signIn(NOW+3_600_000);f.bootstrap=new GrokAuthCore.Reply(401,new JSONObject());refused(()->f.core.currentConfig());
+    @Test public void bootstrapServerErrorDoesNotRotateOrRetry()throws Exception {
+        Fixture f=new Fixture();f.signIn(NOW+3_600_000);f.bootstrap=new GrokAuthCore.Reply(503,new JSONObject());refused(()->f.core.currentConfig());
         assertEquals(List.of(GrokAuthCore.BOOTSTRAP),f.calls);assertEquals("ready",f.core.state().getString("status"));
+    }
+    static GrokAuthCore.Reply refusal(int status,String hint,String scope){
+        return new GrokAuthCore.Reply(status,new JSONObject(),new ServiceRefusal(status,status==401?"unauthenticated":"permission_denied",hint,scope));
+    }
+    static GrokAuthCore.Reply accessReply(String state,String reason,String href)throws Exception {
+        JSONObject body=new JSONObject().put("state","SAND_ACCESS_STATE_"+state).put("blockReason","SAND_ACCESS_BLOCK_REASON_"+reason);
+        if(href!=null)body.put("unifiedAccessPaywall",new JSONObject().put("title","Get Grok Bot").put("body","Subscribe").put("actionLabel","Subscribe").put("href",href));
+        return new GrokAuthCore.Reply(200,body);
+    }
+    @Test public void staleTeamIsDroppedAndAskedAgainWithoutIt()throws Exception {
+        Fixture f=new Fixture();f.core.begin();f.poll=new GrokAuthCore.Reply(200,login("owner",NOW+3_600_000).put("selectedTeamId",42));f.core.poll();f.calls.clear();f.requests.clear();
+        String before=f.core.state().getString("account_key"),generation=f.core.state().getString("auth_generation");
+        f.bootstraps.add(refusal(401,"","stale_team"));
+        JSONObject config=f.core.currentConfig();
+        assertEquals("synthetic-gateway",config.getString("gatewayToken"));
+        assertEquals(List.of(GrokAuthCore.BOOTSTRAP,GrokAuthCore.BOOTSTRAP),f.calls);
+        assertEquals(42,f.requests.get(0).getLong("selectedTeamId"));assertFalse(f.requests.get(1).has("selectedTeamId"));
+        assertFalse(f.memory.value.getJSONObject("tokens").has("team"));
+        // Same sign-in, new account binding: callers relink like a new account.
+        assertNotEquals(before,f.core.state().getString("account_key"));assertEquals(generation,f.core.state().getString("auth_generation"));
+        assertFalse(f.core.state().getBoolean("team"));
+        assertTrue(f.lines.contains("Bot sandbox start: ok after dropping a stale team"));
+    }
+    @Test public void anotherRefusedTokenIsRenewedOnceAndAskedAgain()throws Exception {
+        Fixture f=new Fixture();f.signIn(NOW+3_600_000);
+        f.refresh=new GrokAuthCore.Reply(200,new JSONObject().put("access_token",token("owner",NOW+7_200_000)).put("refresh_token","rotated-secret"));
+        f.bootstraps.add(refusal(401,"",""));
+        f.core.currentConfig();
+        assertEquals(List.of(GrokAuthCore.BOOTSTRAP,GrokAuthCore.REFRESH,GrokAuthCore.BOOTSTRAP),f.calls);
+        assertEquals(token("owner",NOW+7_200_000),f.requests.get(2).getString("accessToken"));
+        assertEquals("rotated-secret",f.memory.value.getJSONObject("tokens").getString("refresh"));
+        assertEquals("ready",f.core.state().getString("status"));
+    }
+    @Test public void aStillRefusedAccountIsExplainedByItsAccessAndHeld()throws Exception {
+        Fixture f=new Fixture();f.signIn(NOW+3_600_000);
+        f.refresh=new GrokAuthCore.Reply(200,new JSONObject().put("access_token",token("owner",NOW+7_200_000)).put("refresh_token","rotated-secret"));
+        f.bootstrap=refusal(401,"","");f.access=accessReply("PAYMENT_REQUIRED","PAYWALL_INDIVIDUAL","https://cursor.com/bot/subscribe?from=watch");
+        try{f.core.currentConfig();fail();}
+        catch(GrokCore.Failure refused){
+            assertEquals("Grok Bot needs a plan on this account. Subscribe on your phone, then try again.",refused.getMessage());
+            assertEquals("https://cursor.com/bot/subscribe?from=watch",refused.link);assertEquals("paywall_individual",refused.code);assertEquals(401,refused.status);
+        }
+        assertEquals(List.of(GrokAuthCore.BOOTSTRAP,GrokAuthCore.REFRESH,GrokAuthCore.BOOTSTRAP,GrokAuthCore.ACCESS),f.calls);
+        assertTrue(f.lines.contains("Access: payment_required paywall_individual"));
+        assertEquals("ready",f.core.state().getString("status"));
+        // Background callers get the same answer for a while without asking Grok again.
+        f.calls.clear();refused(()->f.core.currentConfig());assertTrue(f.calls.isEmpty());
+        // Try again releases it, and a token renewed once isn't renewed again for the same refusal.
+        GrokAuthCore.releaseHold();refused(()->f.core.currentConfig());
+        assertEquals(List.of(GrokAuthCore.BOOTSTRAP,GrokAuthCore.ACCESS),f.calls);
+    }
+    @Test public void aGrantedAccountStillRefusedSaysSignInWasRefused()throws Exception {
+        Fixture f=new Fixture();f.signIn(NOW+3_600_000);
+        f.refresh=new GrokAuthCore.Reply(200,new JSONObject().put("access_token",token("owner",NOW+7_200_000)).put("refresh_token","rotated-secret"));
+        f.bootstrap=refusal(403,"","");f.access=accessReply("GRANTED","NONE",null);
+        try{f.core.currentConfig();fail();}
+        catch(GrokCore.Failure refused){assertEquals("Grok refused this sign-in. No message was sent.",refused.getMessage());assertEquals("",refused.link);}
+        // A 403 isn't a rejected token: no renewal.
+        assertEquals(List.of(GrokAuthCore.BOOTSTRAP,GrokAuthCore.ACCESS),f.calls);
+    }
+    @Test public void aFailureHintIsExplainedWithoutAnAccessCheck()throws Exception {
+        Fixture f=new Fixture();f.signIn(NOW+3_600_000);
+        f.bootstrap=refusal(403,"SAND_CLIENT_UPDATE_REQUIRED","");
+        try{f.core.currentConfig();fail();}
+        catch(GrokCore.Failure refused){assertEquals("Grok needs a newer Grok Wear. Update the app, then try again.",refused.getMessage());assertEquals("sand_client_update_required",refused.code);}
+        assertEquals(List.of(GrokAuthCore.BOOTSTRAP),f.calls);
+    }
+    @Test public void otherRequestsRecoverLikeTheSandboxStart()throws Exception {
+        Fixture f=new Fixture();f.core.begin();f.poll=new GrokAuthCore.Reply(200,login("owner",NOW+3_600_000).put("selectedTeamId",7));f.core.poll();f.calls.clear();
+        JSONObject used=f.core.backendContext();
+        assertEquals(GrokAuthCore.TEAM_DROPPED,f.core.recoverRejected(used,new ServiceRefusal(401,"unauthenticated","","stale_team")));
+        assertFalse(f.core.backendContext().has("selectedTeamId"));
+        f.refresh=new GrokAuthCore.Reply(200,new JSONObject().put("access_token",token("owner",NOW+7_200_000)).put("refresh_token","rotated-secret"));
+        JSONObject current=f.core.backendContext();
+        assertEquals(GrokAuthCore.RENEWED,f.core.recoverRejected(current,new ServiceRefusal(401,"unauthenticated","","")));
+        assertEquals(token("owner",NOW+7_200_000),f.core.backendContext().getString("accessToken"));
+        // The renewed token refused again: renewing won't help.
+        assertEquals(GrokAuthCore.NOT_RECOVERED,f.core.recoverRejected(f.core.backendContext(),new ServiceRefusal(401,"unauthenticated","","")));
+        assertEquals(GrokAuthCore.NOT_RECOVERED,f.core.recoverRejected(f.core.backendContext(),new ServiceRefusal(403,"permission_denied","","")));
+        assertEquals(List.of(GrokAuthCore.REFRESH),f.calls);
     }
     @Test public void bootstrapCannotSendCredentialsToForeignHost()throws Exception {
         Fixture f=new Fixture();f.signIn(NOW+3_600_000);f.bootstrap.body.put("gatewayUrl","https://cursorvm.com.evil.test");

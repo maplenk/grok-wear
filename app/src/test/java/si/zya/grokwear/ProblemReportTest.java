@@ -6,13 +6,34 @@ import java.net.URLDecoder;
 import org.junit.Test;
 
 public class ProblemReportTest {
-    @Test public void keepsTheNewestFifteenOnOneLineEach() {
+    @Test public void keepsTheNewestSixtyOnOneLineEach() {
         String recent="";
-        for(int i=1;i<=17;i++)recent=ProblemReport.add(recent,"event "+i+"\nsecond line");
+        for(int i=1;i<=62;i++)recent=ProblemReport.add(recent,"event "+i+"\nsecond line");
         String[] lines=recent.split("\n");
-        assertEquals(15,lines.length);
-        assertEquals("event 17 second line",lines[0]);
-        assertEquals("event 3 second line",lines[14]);
+        assertEquals(60,lines.length);
+        assertEquals("event 62 second line",lines[0]);
+        assertEquals("event 3 second line",lines[59]);
+    }
+
+    @Test public void aLogIdLeadsTheReportAndTheFullTextKeepsEveryLine() throws Exception {
+        StringBuilder log=new StringBuilder();
+        for(int i=0;i<60;i++)log.append("11-03 14:").append(i<10?"0":"").append(i).append("Z Bot sandbox start: HTTP 401 unauthenticated · 0.4 s · via phone 1.6 Mbps\n");
+        String url=ProblemReport.url("samsung SM-R920","16 (API 36)","0.6.3 (35)",false,"via phone","0 Bots","Needs attention: x","",log.toString(),true,"9ec79c33");
+        String body=URLDecoder.decode(url.substring(url.indexOf("&body=")+6).replace("+","%2B"),"UTF-8");
+        assertTrue(body.startsWith("Log ID: 9ec79c33\n"));
+        assertTrue(url.length()<=ProblemReport.LINK_BUDGET);
+        String full=ProblemReport.fullText("samsung SM-R920","16 (API 36)","0.6.3 (35)",false,"via phone","0 Bots","Needs attention: x","",log.toString(),"9ec79c33");
+        assertTrue(full.startsWith("Log ID: 9ec79c33\nWhere: Needs attention: x\nWatch: samsung SM-R920"));
+        assertEquals(60,full.split("Bot sandbox start").length-1);
+        assertTrue(full.contains("Log (UTC, newest first):\n11-03 14:00Z"));
+    }
+    @Test public void refusalsAreShortAndKeepNoMessage() {
+        ServiceRefusal why=ServiceRefusal.parse(401,"",("{\"code\":\"unauthenticated\",\"message\":\"user private@example.com has no access\","
+            +"\"details\":[{\"type\":\"aiserver.v1.ErrorDetails\",\"debug\":{\"details\":{\"additionalInfo\":{\"sandUsageScopeError\":\"stale_team\"}}}}]}").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        GrokCore.Failure failure=new GrokCore.Failure("Grok refused this sign-in.",true,why.failureCode(),401);
+        assertEquals("HTTP 401 stale_team",ProblemReport.describe(failure));
+        assertEquals("HTTP 401 unauthenticated stale_team",why.summary());
+        assertFalse(why.summary().contains("private"));
     }
 
     @Test public void aRepeatedSuccessKeepsOneLineAndFailuresStay() {

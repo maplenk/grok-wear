@@ -76,7 +76,7 @@ public final class MainActivity extends Activity {
     private boolean pendingAssist,previewButton;private int assistNavigation;private long assistUntil;
     // pickToCall: the assistant button with no main or open Bot, so the next Bot tapped is called.
     // preferencesKnown: the account's main Bot and pins arrived, so "no main Bot" is a fact, not a gap.
-    private boolean pickToCall,preferencesKnown;private long rosterStartedElapsed;private TextView loadingLine;private String reportReturnScreen="settings",reportWhere="";private boolean reportByEmail=true;
+    private boolean pickToCall,preferencesKnown;private long rosterStartedElapsed;private TextView loadingLine;private String reportReturnScreen="settings",reportWhere="",accountLink="",authSummary="",logId="",logUploadNote="";private boolean sendLogs,logUploading;private boolean reportByEmail=true;
     private final Runnable loadingTick=()->tickLoading();
     private final Runnable assistTalk=()->continueAssist();
     private FrameLayout root;
@@ -113,7 +113,10 @@ public final class MainActivity extends Activity {
             // A notification tap opens its Bot once; reopening from recents or after a restart doesn't replay it.
             if(state==null&&(getIntent().getFlags()&Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY)==0){pendingOpenBot=openBotExtra(getIntent());noteAssist(getIntent());}
             // Debug builds: emulator tests open Settings without touching Home, whose Talk button starts a real call.
-            if(BuildConfig.DEBUG&&"settings".equals(getIntent().getStringExtra("debug_screen"))){screen="settings";settingsReturnScreen="bots";}}
+            if(BuildConfig.DEBUG&&"settings".equals(getIntent().getStringExtra("debug_screen"))){screen="settings";settingsReturnScreen="bots";}
+            // Debug builds: asks GetSandAccessStatus with this sign-in and logs its answer ("Access: granted none").
+            if(BuildConfig.DEBUG&&getIntent().getBooleanExtra("access_probe",false)){final BotAccount probing=account;final android.content.Context app=getApplicationContext();
+                worker.execute(()->{try{if(probing.accessProbe()==null)ProblemReport.event(app,"Access check: no answer");}catch(Exception failure){ProblemReport.note(app,"Access check",failure);}});}}
         side=(int)(getResources().getDisplayMetrics().widthPixels/getResources().getDisplayMetrics().density);
         if(android.os.Build.VERSION.SDK_INT>=33){modernBack=this::handleBack;getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,modernBack);}
         if(preview&&!openBotExtra(getIntent()).isEmpty())openPreviewReply(getIntent().getStringExtra("preview_bot"));
@@ -257,7 +260,8 @@ public final class MainActivity extends Activity {
             case "launch":break;
             case "dropped":message("Call dropped",safeError.isEmpty()?"The call ended unexpectedly.":safeError,"Talk again",()->talkAgain());break;
             case "attention":task();break;
-            case "account_error":message("Needs attention",safeError,"Try again",()->recover());break;
+            case "account_error":accountError();break;
+            case "access_link":accessLink();break;
             case "settings":settings();break;
             case "alerts_setup":alertsSetup();break;
             case "button_setup":buttonSetup();break;
@@ -1115,10 +1119,31 @@ public final class MainActivity extends Activity {
     private String reportState(){
         if(preview)return "";
         return bots.length()+" Bots"+(botsCached?"":" (none loaded)")+" · main Bot "+(primaryBot()!=null?"set":preferencesKnown?"none":"unknown")
-            +" · loaded "+(botsFetchedAtMs>0?ago(botsFetchedAtMs):"never")+" · reply alerts "+(replyAlerts()?"on":"off");
+            +" · loaded "+(botsFetchedAtMs>0?ago(botsFetchedAtMs):"never")+" · reply alerts "+(replyAlerts()?"on":"off")
+            +(authSummary.isEmpty()?"":" · "+authSummary);
+    }
+    /** For reports: the sign-in's status, whether a team is chosen and how long its token lasts. No identifiers. */
+    static String authSummary(JSONObject state){
+        String status=state.optString("status","unknown");if(!state.optBoolean("linked"))return "sign-in "+status;
+        long minutes=(state.optLong("expires_at_ms")-System.currentTimeMillis())/60000;
+        return "sign-in "+status+", team "+(state.optBoolean("team")?"yes":"no")+", token "+(minutes<0?"expired":minutes+" min");
     }
     /** Report a problem from where it happened: the issue names the place, and Back returns there. */
-    private void openReport(String where,String returnTo){reportWhere=where;reportReturnScreen=returnTo;reportByEmail=true;screen="report";render();}
+    private void openReport(String where,String returnTo){reportWhere=where;reportReturnScreen=returnTo;reportByEmail=true;
+        // Send logs starts off every time: nothing leaves the watch unless it's turned on for this report.
+        sendLogs=false;logId="";logUploadNote="";screen="report";render();}
+    /** Uploads this report's details and full log to Sentry, then shows the Log ID in the code. Never blocks the code. */
+    private void sendReportLogs(){
+        if(logUploading||!sendLogs||preview)return;logUploading=true;logUploadNote="";render();
+        final String where=reportWhere,state=reportState();final android.content.Context app=getApplicationContext();
+        new Thread(()->{String id="",note;
+            try{id=LogUpload.send(app,where,state);note="";}
+            catch(GrokCore.Failure failure){note=failure.getMessage()+" The code above still works.";}
+            catch(Exception failure){note="Couldn’t send logs. The code above still works.";}
+            final String sent=id,why=note;
+            main.post(()->{logUploading=false;if(!sent.isEmpty())logId=sent;logUploadNote=why;if(visible&&screen.equals("report"))render();});
+        },"grok-send-logs").start();
+    }
     /** After 5 s the wait and the network show, so a stuck list says how long and over what. */
     private String loadingText(){
         long seconds=(android.os.SystemClock.elapsedRealtime()-rosterStartedElapsed)/1000;
@@ -1160,13 +1185,22 @@ public final class MainActivity extends Activity {
         android.util.DisplayMetrics screenSize=getResources().getDisplayMetrics();int tall=screenSize.heightPixels;
         TextView scan=label("Scan with your phone",12,WHITE);scan.measure(0,0);
         ImageView code=new ImageView(this);code.setContentDescription("QR code for a new GitHub issue");
-        int size=drawDenseQr(code,ProblemReport.url(this,reportWhere,reportState(),reportByEmail),(int)(Math.min(tall,screenSize.widthPixels)*.70f));
+        int size=drawDenseQr(code,ProblemReport.url(this,reportWhere,reportState(),reportByEmail,logId),(int)(Math.min(tall,screenSize.widthPixels)*.70f));
         // The scroll view starts 23 dp down and the body adds 3 dp.
         LinearLayout.LayoutParams at=new LinearLayout.LayoutParams(size,size);at.topMargin=Math.max(0,(tall-size)/2-dp(26)-scan.getMeasuredHeight());at.bottomMargin=Math.max(dp(8),(tall-size)/2-dp(23));
         body.addView(code,at);
         title("Report a problem");
         label(reportByEmail?"Your phone opens an email to Grok Wear’s developer with the details filled in. Say what happened, then send it.":"Your phone opens a new GitHub issue with the details filled in. Say what happened, then submit it. GitHub issues are public.",12,SECONDARY);
         label("It includes your watch model, the app version and a short log of recent loads and calls: times, networks and errors. Nothing from your chats or account.",12,SECONDARY);
+        if(!logId.isEmpty())label("Log ID "+logId+" is in the message, so the developer can find the logs you sent.",12,WHITE);
+        if(LogUpload.available()&&!preview){
+            gap(6);label("Send logs to the developer (Sentry)",13,WHITE);
+            label("Off by default. When on, Send logs uploads these details and the full recent log (up to 60 lines of times, networks and errors) to Sentry, the developer’s error service, and adds a Log ID to the message. Never your chats, Bot names, account or sign-in. Kept up to 30 days.",12,SECONDARY);
+            Button toggle=action("Send logs: "+(sendLogs?"On":"Off"),()->{sendLogs=!sendLogs;logUploadNote="";render();});
+            toggle.setContentDescription("Send logs to the developer through Sentry, "+(sendLogs?"on":"off")+". Off by default. Double-tap to turn "+(sendLogs?"off":"on"));
+            if(sendLogs&&logId.isEmpty()){Button send=action(logUploading?"Sending logs…":"Send logs now",()->sendReportLogs());send.setEnabled(!logUploading);}
+            if(!logUploadNote.isEmpty())label(logUploadNote,12,0xffff7a72);
+        }
         action(reportByEmail?"Use a GitHub issue instead":"Use email instead",()->{reportByEmail=!reportByEmail;render();});
         action("Back",()->{screen=reportReturnScreen;render();});
     }
@@ -1264,7 +1298,40 @@ public final class MainActivity extends Activity {
     private void toggleMute(){if(preview){previewEpoch++;simulated=false;if(screen.equals("paused")){screen="listening";previewMuted=false;}else{previewMuted=!previewMuted;screen=previewMuted?"muted":"listening";}render();}else VoiceService.toggleMute(this);}
     private void endCall(){root.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);if(preview){previewEpoch++;simulated=false;previewMuted=false;caption="";screen="done";render();}else{VoiceService.stop(this);screen="ready";render();}}
     private void demo(){int mine=++previewEpoch;simulated=true;previewMuted=false;previewCallStartMs=0;screen="connecting";caption="";render();String[] states={"listening","thinking","speaking","listening","thinking","speaking","listening","thinking","speaking","speaking","done"};for(int i=0;i<states.length;i++){final int turn=i;main.postDelayed(()->{if(!visible||!preview||mine!=previewEpoch)return;screen=states[turn];if(previewCallStartMs==0&&screen.equals("listening"))previewCallStartMs=android.os.SystemClock.elapsedRealtime();caption=turn==states.length-2?"Goodbye, talk soon.":screen.equals("thinking")?"What is next on my calendar?":screen.equals("speaking")?"Your next meeting is at ten.":"";speaker=screen.equals("thinking")?"You":botName;render();},1300L+i*1400L);}}  // Listening at 1.3 s: the measured warm Talk to Listening, not faster.
-    private void recover(){if(preview){setPreviewScreen("ready");}else{safeError="";loadAccount();}}
+    private void recover(){if(preview){setPreviewScreen("ready");}else{safeError="";accountLink="";GrokAuthCore.releaseHold();loadAccount();}}
+    /** Needs attention: what Grok said, where to fix it on the phone, and a way to start over. */
+    private void accountError(){
+        title("Needs attention");label(safeError,14,SECONDARY);gap(9);
+        if(!accountLink.isEmpty())action("Open on phone",()->{screen="access_link";render();});
+        if(!preview)action("Sign in again",()->signInAgain());
+        String detail=safeError;action("Report a problem",()->openReport("Needs attention: "+detail,"account_error"));
+        action("Back",()->goHome());edgeAction("Try again",()->recover());
+    }
+    /** Where the account's access can be fixed, as a code for the phone: the watch has no browser. */
+    private void accessLink(){
+        android.util.DisplayMetrics screenSize=getResources().getDisplayMetrics();int tall=screenSize.heightPixels;
+        TextView scan=label("Scan with your phone",12,WHITE);scan.measure(0,0);
+        ImageView code=new ImageView(this);code.setContentDescription("QR code for Grok Bot on your phone");
+        int size=drawDenseQr(code,accountLink,(int)(Math.min(tall,screenSize.widthPixels)*.70f));
+        LinearLayout.LayoutParams at=new LinearLayout.LayoutParams(size,size);at.topMargin=Math.max(0,(tall-size)/2-dp(26)-scan.getMeasuredHeight());at.bottomMargin=Math.max(dp(8),(tall-size)/2-dp(23));
+        body.addView(code,at);
+        title("Open on your phone");label(safeError,12,SECONDARY);
+        label("Your phone opens Grok’s page for this. Then come back and tap Try again.",12,SECONDARY);
+        action("Back",()->{screen="account_error";render();});
+    }
+    /** Starts a new sign-in from Needs attention: removes this watch's sign-in, keeps the problem log. */
+    private void signInAgain(){
+        if(!SIGN_OUT_ACTIVE.compareAndSet(false,true))return;
+        epoch++;polling=false;main.removeCallbacks(pollTick);clearBotCache();GrokAuthCore.releaseHold();accountLink="";
+        ProblemReport.event(getApplicationContext(),"Account: sign in again");
+        final BotAccount leaving=account;final android.content.Context app=getApplicationContext();
+        ReplyAlertService.forget(app);
+        new Thread(()->{boolean ok=true;
+            try{VoiceService.stop(app);leaving.unlink();}catch(Exception failure){ok=false;ProblemReport.note(app,"Sign in again",failure);}
+            finally{SIGN_OUT_ACTIVE.set(false);final boolean done=ok;main.post(()->{if(!visible||isDestroyed())return;EventStream.restart();
+                if(done)beginLogin();else{safeError="Couldn’t remove the old sign-in. Try again, or sign out from Settings.";screen="account_error";render();}});}
+        },"grok-sign-in-again").start();
+    }
     private void renderVoice(){if(preview)return;VoiceService.Snapshot s=VoiceService.snapshot();String previous=screen;
         if(s.active){if(!micTicked&&!s.state.equals("Connecting")&&!s.state.equals("Ending")){micTicked=true;root.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK);}botName=s.botName.isEmpty()?botName:s.botName;caption=s.caption;captionLine=s.captionLine;speaker=s.speaker;screen=s.muted?"muted":s.state.toLowerCase(java.util.Locale.ROOT);if(!isCall())screen="connecting";}
         else{safeError=s.error;screen="Call dropped".equals(s.state)?"dropped":s.error.isEmpty()?(java.util.Set.of("connecting","listening","thinking","speaking","muted","paused","reconnecting","done").contains(previous)?"ready":"ready"):"error";caption="";captionLine="";}
@@ -1275,8 +1342,22 @@ public final class MainActivity extends Activity {
     private boolean isCallScreen(String value){return java.util.Set.of("connecting","listening","thinking","speaking","muted","paused","reconnecting").contains(value);}
     private interface Fetch{JSONObject run()throws Exception;}
     private interface Result{void apply(JSONObject value)throws Exception;}
-    private void task(Fetch fetch,Result result){int mine=epoch,route=navigation;worker.execute(()->{try{JSONObject value=fetch.run();main.post(()->{if(!visible||mine!=epoch||route!=navigation)return;if(VoiceService.snapshot().active){renderVoice();return;}try{result.apply(value);}catch(Exception ignored){showSafeError();}});}catch(Exception ignored){main.post(()->{if(visible&&mine==epoch&&route==navigation){if(VoiceService.snapshot().active)renderVoice();else showSafeError();}});}});}
-    private void showSafeError(){polling=false;main.removeCallbacks(pollTick);safeError="Couldn’t connect to Grok. Check your connection or start a new sign-in.";screen="account_error";render();}
+    private void task(Fetch fetch,Result result){int mine=epoch,route=navigation;String where=taskPlace();worker.execute(()->{try{JSONObject value=fetch.run();main.post(()->{if(!visible||mine!=epoch||route!=navigation)return;if(VoiceService.snapshot().active){renderVoice();return;}try{result.apply(value);}catch(Exception failure){ProblemReport.note(getApplicationContext(),where,failure);showSafeError(failure);}});}catch(Exception failure){ProblemReport.note(getApplicationContext(),where,failure,ProblemReport.network(getApplicationContext()));main.post(()->{if(visible&&mine==epoch&&route==navigation){if(VoiceService.snapshot().active)renderVoice();else showSafeError(failure);}});}});}
+    /** Where a background step failed, for the log: sign-in, the account or the screen it ran for. */
+    private String taskPlace(){
+        switch(screen){case "qr":case "welcome":return "Sign-in";case "launch":case "account_error":case "ready":return "Account";case "bots":return "Bot list";default:return "Step on "+screen;}
+    }
+    /**
+     * The failure's own words when the app wrote them (a refusal, a paywall, a sign-in problem) and where the
+     * phone can fix it; a generic line only for errors from the platform or the network stack.
+     */
+    private void showSafeError(){showSafeError(null);}
+    private void showSafeError(Throwable failure){polling=false;main.removeCallbacks(pollTick);
+        GrokCore.Failure refused=failure instanceof GrokCore.Failure?(GrokCore.Failure)failure:null;
+        accountLink=refused==null?"":refused.link;
+        safeError=refused!=null&&refused.getMessage()!=null&&!refused.getMessage().isEmpty()?refused.getMessage()
+            :"Couldn’t reach Grok. Check the watch’s connection, then try again.";
+        screen="account_error";render();}
     private boolean accountResultCurrent(int route){
         if(route!=navigation)return false;
         if(VoiceService.snapshot().active){renderVoice();return false;}
@@ -1294,7 +1375,7 @@ public final class MainActivity extends Activity {
         selectedMetadata=bot;botName=bot.optString("name","Your Bot");
     }
     private void loadAccount(){int route=navigation;task(()->account.authState(),state->{
-        if(!accountResultCurrent(route))return;String status=state.optString("status","unlinked");
+        if(!accountResultCurrent(route))return;String status=state.optString("status","unlinked");authSummary=authSummary(state);
         if(status.equals("ready")){
             String binding=state.optString("account_key","")+"/"+state.optString("auth_generation","");
             if(!binding.equals(botsAccountBinding)){clearBotCache();botsAccountBinding=binding;}
@@ -1367,7 +1448,14 @@ public final class MainActivity extends Activity {
                 if(!expected.equals(accountIdentity(account.authState())))return;
                 main.post(()->applyBotPreferences(request,expected,prefs));
             }catch(Exception optionalUnavailable){}});
-        }catch(Exception failure){ProblemReport.note(getApplicationContext(),"Bot list",failure,"after "+ProblemReport.seconds(android.os.SystemClock.elapsedRealtime()-elapsed)+" · "+ProblemReport.network(getApplicationContext()));String why=ProblemReport.code(failure);main.post(()->{if(activeRosterRequest==request)rosterFetchActive=false;applyBotRefreshFailure(request,expected,why);});}});
+        }catch(Exception failure){ProblemReport.note(getApplicationContext(),"Bot list",failure,"after "+ProblemReport.seconds(android.os.SystemClock.elapsedRealtime()-elapsed)+" · "+ProblemReport.network(getApplicationContext()));String why=ProblemReport.code(failure);
+            GrokCore.Failure refused=failure instanceof GrokCore.Failure?(GrokCore.Failure)failure:null;
+            main.post(()->{if(activeRosterRequest==request)rosterFetchActive=false;
+                // A dropped stale team changed the account binding: load the account again under the new one.
+                if(refused!=null&&BotAccount.TEAM_CHANGED.equals(refused.code)){if(visible&&!VoiceService.snapshot().active)loadAccount();return;}
+                // Grok explained why this account can't use Bots: say so, with where to fix it.
+                if(refused!=null&&!refused.link.isEmpty()&&!botsCached&&visible&&screen.equals("bots")&&!VoiceService.snapshot().active){showSafeError(refused);return;}
+                applyBotRefreshFailure(request,expected,why);});}});
     }
     private boolean currentBotRefresh(int request,String expected){return request==botRequest&&!expected.isEmpty()&&expected.equals(botsAccountBinding);}
     private void applyBotRefresh(int request,String expected,JSONArray found){
@@ -1410,7 +1498,7 @@ public final class MainActivity extends Activity {
         }catch(Exception ignored){main.post(()->{botSelectionPending=false;if(!visible||mine!=epoch)return;
             if(VoiceService.snapshot().active){renderVoice();return;}botListError="Couldn’t switch Bots. Try again.";render();});}});
     }
-    private void beginLogin(){if(preview){setPreviewScreen("qr");return;}clearBotCache();epoch++;polling=false;main.removeCallbacks(pollTick);task(()->account.beginLogin(),value->{loginAttempt=value.optString("login_attempt","");screen="qr";render();schedulePoll();});}
+    private void beginLogin(){if(preview){setPreviewScreen("qr");return;}GrokAuthCore.releaseHold();clearBotCache();epoch++;polling=false;main.removeCallbacks(pollTick);task(()->account.beginLogin(),value->{loginAttempt=value.optString("login_attempt","");screen="qr";render();schedulePoll();});}
     private void cancelLogin(){if(preview){setPreviewScreen("welcome");return;}final String attempt=loginAttempt;if(attempt.isEmpty())return;epoch++;polling=false;main.removeCallbacks(pollTick);task(()->{account.cancelLogin(attempt);return new JSONObject();},value->{screen="welcome";render();});}
     private void schedulePoll(){if(!visible||preview||!screen.equals("qr"))return;polling=true;main.removeCallbacks(pollTick);main.postDelayed(pollTick,3000);}
     private void pollLogin(){if(preview||!visible||!polling||!screen.equals("qr"))return;task(()->account.pollLogin(),value->{if("waiting".equals(value.optString("status")))schedulePoll();else{polling=false;if("ready".equals(value.optString("status"))){setAlertsSetupPending(true);AssistantRole.setSetupPending(this,true);}loadAccount();}});}
