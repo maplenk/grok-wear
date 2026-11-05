@@ -32,6 +32,8 @@ public final class VoiceService extends Service {
         public final float inputLevel,outputLevel;
         /** Current call duration, measured on the monotonic clock. */
         public final long elapsedMs;
+        /** Monotonic start of a live call. Zero before audio starts and after the call finishes. */
+        public final long liveStartedAt;
         /** Absolute monotonic deadline, including connection/setup time; zero when no call is active. */
         public final long deadlineElapsedMs;
         Snapshot(String state,String caption,String speaker,String error,String botName,boolean active,boolean muted,float inputLevel,float outputLevel){
@@ -43,7 +45,9 @@ public final class VoiceService extends Service {
         Snapshot(String state,String caption,String speaker,String error,String botName,boolean active,boolean muted,float inputLevel,float outputLevel,long elapsedMs,String syncStatus,long deadlineElapsedMs){
             this(state,caption,speaker,error,botName,active,muted,inputLevel,outputLevel,elapsedMs,syncStatus,deadlineElapsedMs,caption);}
         Snapshot(String state,String caption,String speaker,String error,String botName,boolean active,boolean muted,float inputLevel,float outputLevel,long elapsedMs,String syncStatus,long deadlineElapsedMs,String captionLine){
-            this.captionLine=captionLine==null?caption:captionLine;this.deadlineElapsedMs=deadlineElapsedMs;this.syncStatus=syncStatus;this.state=state;this.caption=caption;this.speaker=speaker;this.error=error;this.botName=botName;this.active=active;this.muted=muted;this.inputLevel=inputLevel;this.outputLevel=outputLevel;this.elapsedMs=elapsedMs;}
+            this(state,caption,speaker,error,botName,active,muted,inputLevel,outputLevel,elapsedMs,syncStatus,deadlineElapsedMs,captionLine,0);}
+        Snapshot(String state,String caption,String speaker,String error,String botName,boolean active,boolean muted,float inputLevel,float outputLevel,long elapsedMs,String syncStatus,long deadlineElapsedMs,String captionLine,long liveStartedAt){
+            this.captionLine=captionLine==null?caption:captionLine;this.deadlineElapsedMs=deadlineElapsedMs;this.syncStatus=syncStatus;this.state=state;this.caption=caption;this.speaker=speaker;this.error=error;this.botName=botName;this.active=active;this.muted=muted;this.inputLevel=inputLevel;this.outputLevel=outputLevel;this.elapsedMs=elapsedMs;this.liveStartedAt=liveStartedAt;}
     }
     private static volatile Snapshot current=new Snapshot("Ready","","","","",false,false,0,0);
     private static String ticket;private static long ticketTime;
@@ -235,7 +239,7 @@ public final class VoiceService extends Service {
     }
     private void meter(long mine,float level,boolean input){long now=SystemClock.elapsedRealtime();synchronized(this){if(now-lastMeter<70&&level!=0)return;lastMeter=now;}post(mine,()->{if(input)inputLevel=muted?0:level;else outputLevel=level;emit();});}
     private void emit(){long elapsed=liveStartedAt==0?finishedElapsed:Math.max(0,SystemClock.elapsedRealtime()-liveStartedAt);
-        publish(new Snapshot(state,caption,speaker,error,botName,running,muted,inputLevel,outputLevel,elapsed,syncStatus,running?callDeadlineElapsed:0,spokenLine()));}
+        publish(new Snapshot(state,caption,speaker,error,botName,running,muted,inputLevel,outputLevel,elapsed,syncStatus,running?callDeadlineElapsed:0,spokenLine(),liveStartedAt));}
     /** Sentence of the Bot's answer at the current playback position, so captions follow the voice. */
     private String spokenLine(){
         String text=replyText;NativeAudio playing=audio;
