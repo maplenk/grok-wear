@@ -86,7 +86,7 @@ public final class MainActivity extends Activity {
     private final java.util.ArrayList<BotAvatarView> avatars=new java.util.ArrayList<>();
     private ScrollView currentScroll;
     private final CrownSteps crownSteps=new CrownSteps();
-    private boolean callStream;
+    private boolean callStream;private int volumeControlStream=AudioManager.USE_DEFAULT_STREAM_TYPE;
     private TextView callBot,callCaption,callHint;
     private Button callMute,qrCancel;
     private WaveformView waveform;private TextView callStatus;private FrameLayout callStage;private CallVolumeArc volumeArc;private boolean callCompact;private long previewCallAt;
@@ -946,19 +946,20 @@ public final class MainActivity extends Activity {
     private void adjustCallVolume(float axisScroll){
         int steps=crownSteps.consume(-axisScroll);if(steps==0)return;
         AudioManager audio=(AudioManager)getSystemService(AUDIO_SERVICE);if(audio==null)return;
+        int stream=VoiceService.snapshot().volumeStream;
         int direction=steps>0?AudioManager.ADJUST_RAISE:AudioManager.ADJUST_LOWER;
         for(int i=0,n=Math.abs(steps);i<n;i++){
-            audio.adjustStreamVolume(AudioManager.STREAM_VOICE_CALL,direction,0);
+            audio.adjustStreamVolume(stream,direction,0);
             currentScroll.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK);
         }
-        int min=audio.getStreamMinVolume(AudioManager.STREAM_VOICE_CALL),max=audio.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL),volume=audio.getStreamVolume(AudioManager.STREAM_VOICE_CALL);
+        int min=audio.getStreamMinVolume(stream),max=audio.getStreamMaxVolume(stream),volume=audio.getStreamVolume(stream);
         if(volumeArc!=null)volumeArc.show(CallVolume.fraction(volume,min,max),volume,max);
     }
-    /** Voice-call stream while the call screen is up; the default stream again when that screen or the call is gone. */
+    /** Match side keys and crown to the Bot playback stream; voice-call is the connecting default. */
     private void syncCallVolume(){
-        boolean onCall=isCall();if(onCall==callStream)return;callStream=onCall;
-        setVolumeControlStream(onCall?AudioManager.STREAM_VOICE_CALL:AudioManager.USE_DEFAULT_STREAM_TYPE);
-        if(!onCall)crownSteps.reset();
+        boolean onCall=isCall();int stream=onCall?VoiceService.snapshot().volumeStream:AudioManager.USE_DEFAULT_STREAM_TYPE;
+        if(onCall!=callStream){callStream=onCall;if(!onCall)crownSteps.reset();}
+        if(stream!=volumeControlStream){volumeControlStream=stream;setVolumeControlStream(stream);}
     }
     private void showCaption(){String full=caption;if(full.isEmpty())return;ScrollView scroll=new ScrollView(this);TextView t=text(MessageText.plain(full),14,"You".equalsIgnoreCase(speaker)?SECONDARY:WHITE);t.setPadding(dp(18),dp(12),dp(18),dp(12));scroll.addView(t);new android.app.AlertDialog.Builder(this).setTitle(speaker.isEmpty()?"Caption":speaker).setView(scroll).setPositiveButton("Close",(d,w)->{}).show();}
     private void message(String heading,String detail,String action,Runnable run){
@@ -1367,7 +1368,7 @@ public final class MainActivity extends Activity {
         if(s.active){if(!micTicked&&!s.state.equals("Connecting")&&!s.state.equals("Ending")){micTicked=true;root.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK);}botName=s.botName.isEmpty()?botName:s.botName;caption=s.caption;captionLine=s.captionLine;speaker=s.speaker;screen=s.muted?"muted":s.state.toLowerCase(java.util.Locale.ROOT);if(!isCall())screen="connecting";}
         else{safeError=s.error;screen="Call dropped".equals(s.state)?"dropped":s.error.isEmpty()?(java.util.Set.of("connecting","listening","thinking","speaking","muted","paused","reconnecting","done").contains(previous)?"ready":"ready"):"error";caption="";captionLine="";}
         if(isCall()&&isCallScreen(previous)&&orb!=null){
-            orb.state(screen,accent(),screen.equals("speaking")?s.outputLevel:s.inputLevel);updateCallText();
+            syncCallVolume();orb.state(screen,accent(),screen.equals("speaking")?s.outputLevel:s.inputLevel);updateCallText();
         }else render();
     }
     private boolean isCallScreen(String value){return java.util.Set.of("connecting","listening","thinking","speaking","muted","paused","reconnecting").contains(value);}

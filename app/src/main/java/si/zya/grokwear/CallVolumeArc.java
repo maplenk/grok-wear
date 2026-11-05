@@ -33,7 +33,7 @@ public final class CallVolumeArc extends View {
         fraction=level<=0?0:level>=1?1:level;
         animate().cancel();removeCallbacks(startFade);removeCallbacks(finishFade);
         setAlpha(1);setVisibility(VISIBLE);setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
-        setStateDescription("Call volume "+volume+" of "+max);invalidate();
+        setStateDescription("Voice volume "+volume+" of "+max);invalidate();
         postDelayed(startFade,HOLD_MS);
     }
     @Override protected void onDetachedFromWindow(){

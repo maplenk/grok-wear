@@ -31,6 +31,10 @@ public class NativeAudioPolicyTest {
             assertFalse(NativeAudio.voiceAsMedia(new int[]{speaker,headset},7));
         assertFalse(NativeAudio.voiceAsMedia(new int[]{speaker},0));
     }
+    @Test public void volumeStreamMatchesAudioTrackUsage() {
+        assertEquals(android.media.AudioManager.STREAM_MUSIC,NativeAudio.volumeStream(true));
+        assertEquals(android.media.AudioManager.STREAM_VOICE_CALL,NativeAudio.volumeStream(false));
+    }
     @Test public void pcmMeterHandlesSignedLittleEndianSilenceAndClipping() {
         assertEquals(0,NativeAudio.level(new byte[20]),0);
         assertEquals(0,NativeAudio.level(new byte[0]),0);
