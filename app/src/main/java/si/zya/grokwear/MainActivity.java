@@ -8,6 +8,7 @@ import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.media.AudioManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -84,9 +85,11 @@ public final class MainActivity extends Activity {
     private BotAvatarView orb;
     private final java.util.ArrayList<BotAvatarView> avatars=new java.util.ArrayList<>();
     private ScrollView currentScroll;
+    private final CrownSteps crownSteps=new CrownSteps();
+    private boolean callStream;private int volumeControlStream=AudioManager.USE_DEFAULT_STREAM_TYPE;
     private TextView callBot,callCaption,callHint;
     private Button callMute,qrCancel;
-    private WaveformView waveform;private TextView callStatus;private FrameLayout callStage;private boolean callCompact;private long previewCallAt;
+    private WaveformView waveform;private TextView callStatus;private FrameLayout callStage;private CallVolumeArc volumeArc;private boolean callCompact;private long previewCallAt;
     private String captionLine="",shownCaption,renderedScreen="";private int shownMuteColor;private float shownStatusSize;private boolean bottomAction;
     private final java.util.ArrayList<String> transcript=new java.util.ArrayList<>();private String transcriptLast="";
     private final Runnable callClock=new Runnable(){public void run(){if(visible&&isCall()){updateCallText();main.postDelayed(this,1000);}}};
@@ -219,12 +222,13 @@ public final class MainActivity extends Activity {
     private int dp(float value){return Math.round(value*getResources().getDisplayMetrics().density);}
     private GradientDrawable shape(int color,float radius){GradientDrawable d=new GradientDrawable();d.setColor(color);d.setCornerRadius(dp(radius));return d;}
     private void render(){
+        syncCallVolume();
         // Re-rendering the same screen (history refresh, sync status) keeps the reader's place.
         final int keepY=currentScroll!=null&&screen.equals(renderedScreen)&&!isCall()?currentScroll.getScrollY():0;renderedScreen=screen;bottomAction=false;
         if(!screen.equals("bots"))pickToCall=false;loadingLine=null;
         String chat=visible&&!preview&&screen.equals("ready")?selectedMetadata.optString("id",""):"";
         if(!chat.equals(openChat)){openChat=chat;if(!chat.isEmpty())ReplyAlertService.dismiss(this,chat);}
-        for(BotAvatarView face:avatars)face.running(false);avatars.clear();orb=null;if(waveform!=null)waveform.running(false);waveform=null;transcriptBody=null;callStatus=null;main.removeCallbacks(callClock);
+        for(BotAvatarView face:avatars)face.running(false);avatars.clear();orb=null;if(waveform!=null)waveform.running(false);waveform=null;volumeArc=null;transcriptBody=null;callStatus=null;main.removeCallbacks(callClock);
         root=new FrameLayout(this);root.setBackgroundColor(Color.BLACK);setContentView(root);
         TextView top=text(preview&&!previewMedia?"UI preview":"",10,SECONDARY);top.setLetterSpacing(.08f);
         FrameLayout.LayoutParams tp=new FrameLayout.LayoutParams(-1,dp(18),Gravity.TOP|Gravity.CENTER_HORIZONTAL);tp.topMargin=dp(9);root.addView(top,tp);if(!preview||screen.equals("ready")||screen.equals("done")||isCall())top.setVisibility(View.GONE);
@@ -874,6 +878,8 @@ public final class MainActivity extends Activity {
         boolean muted=preview?previewMuted:VoiceService.snapshot().muted;callMute=button(muted?"Unmute":"Mute",()->toggleMute());callMute.setText("");callMute.setPadding(0,0,0,0);callMute.setForeground(new MicGlyph(muted,false));callMute.setForegroundGravity(Gravity.CENTER);callMute.setBackground(shape(GLASS,24));controls.addView(callMute,new LinearLayout.LayoutParams(dp(48),dp(48)));
         Button end=button("Hang up",()->endCall());end.setText("×");end.setTextSize(28);end.setPadding(0,0,0,0);end.setBackground(shape(RED,24));LinearLayout.LayoutParams ep=new LinearLayout.LayoutParams(dp(48),dp(48));ep.leftMargin=dp(12);controls.addView(end,ep);
         LinearLayout extra=new LinearLayout(this);extra.setOrientation(LinearLayout.VERTICAL);extra.setPadding(dp(side*.12f),dp(12),dp(side*.12f),0);body.addView(extra,new LinearLayout.LayoutParams(-1,-2));TextView heading=text("Voice chat transcript",15,WHITE);extra.addView(heading);transcriptBody=new LinearLayout(this);transcriptBody.setOrientation(LinearLayout.VERTICAL);extra.addView(transcriptBody);renderTranscript();extra.addView(text("Voice call settings",15,WHITE));extra.addView(text("Voice settings are managed on your phone or Mac.",12,SECONDARY));extra.addView(text("Hang up to switch Bots.",12,SECONDARY));updateCallText();main.postDelayed(callClock,1000);
+        // On the screen, not the padded stage, so the arc follows the bezel beside the crown.
+        volumeArc=new CallVolumeArc(this);volumeArc.setAccent(accent());root.addView(volumeArc,new FrameLayout.LayoutParams(-1,-1));
     }
     private void placeCall(View view,float at,int height){FrameLayout.LayoutParams p=new FrameLayout.LayoutParams(dp(side*.76f),dp(height),Gravity.TOP|Gravity.CENTER_HORIZONTAL);p.topMargin=dp(side*at-height/2f);callStage.addView(view,p);}
     private final class VoiceGlyph extends android.graphics.drawable.Drawable {
@@ -922,12 +928,38 @@ public final class MainActivity extends Activity {
         if(!caption.isEmpty()&&!callCompact&&orb!=null){callCompact=true;FrameLayout.LayoutParams p=(FrameLayout.LayoutParams)orb.getLayoutParams();p.width=dp(44);p.height=dp(44);p.topMargin=dp(side*.25f-22);orb.setLayoutParams(p);orb.setScaleX(64f/44);orb.setScaleY(64f/44);orb.animate().scaleX(1).scaleY(1).setDuration(android.animation.ValueAnimator.areAnimatorsEnabled()?520:0).start();moveCall(callBot,.385f);if(callStatus!=null)moveCall((View)callStatus.getParent(),.47f);}
     }
     private void moveCall(View v,float at){FrameLayout.LayoutParams p=(FrameLayout.LayoutParams)v.getLayoutParams();p.topMargin=dp(side*at-11);v.setLayoutParams(p);}
+    // The focused ScrollView consumes a crown turn on API 26+ before onGenericMotionEvent runs.
+    @Override public boolean dispatchGenericMotionEvent(android.view.MotionEvent event){
+        if(event.getAction()==android.view.MotionEvent.ACTION_SCROLL&&event.isFromSource(android.view.InputDevice.SOURCE_ROTARY_ENCODER)&&isCall()){
+            adjustCallVolume(event.getAxisValue(android.view.MotionEvent.AXIS_SCROLL));return true;
+        }
+        return super.dispatchGenericMotionEvent(event);
+    }
     @Override public boolean onGenericMotionEvent(android.view.MotionEvent event){
         if(event.getAction()==android.view.MotionEvent.ACTION_SCROLL&&event.isFromSource(android.view.InputDevice.SOURCE_ROTARY_ENCODER)&&currentScroll!=null){
             float factor=android.view.ViewConfiguration.get(this).getScaledVerticalScrollFactor();
             currentScroll.scrollBy(0,-Math.round(event.getAxisValue(android.view.MotionEvent.AXIS_SCROLL)*factor));return true;
         }
         return super.onGenericMotionEvent(event);
+    }
+    /** Clockwise raises the call. Scrolling down is scrollBy(0, -AXIS_SCROLL), and that downward turn is clockwise. */
+    private void adjustCallVolume(float axisScroll){
+        int steps=crownSteps.consume(-axisScroll);if(steps==0)return;
+        AudioManager audio=(AudioManager)getSystemService(AUDIO_SERVICE);if(audio==null)return;
+        int stream=VoiceService.snapshot().volumeStream;
+        int direction=steps>0?AudioManager.ADJUST_RAISE:AudioManager.ADJUST_LOWER;
+        for(int i=0,n=Math.abs(steps);i<n;i++){
+            audio.adjustStreamVolume(stream,direction,0);
+            currentScroll.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK);
+        }
+        int min=audio.getStreamMinVolume(stream),max=audio.getStreamMaxVolume(stream),volume=audio.getStreamVolume(stream);
+        if(volumeArc!=null)volumeArc.show(CallVolume.fraction(volume,min,max),volume,max);
+    }
+    /** Match side keys and crown to the Bot playback stream; voice-call is the connecting default. */
+    private void syncCallVolume(){
+        boolean onCall=isCall();int stream=onCall?VoiceService.snapshot().volumeStream:AudioManager.USE_DEFAULT_STREAM_TYPE;
+        if(onCall!=callStream){callStream=onCall;if(!onCall)crownSteps.reset();}
+        if(stream!=volumeControlStream){volumeControlStream=stream;setVolumeControlStream(stream);}
     }
     private void showCaption(){String full=caption;if(full.isEmpty())return;ScrollView scroll=new ScrollView(this);TextView t=text(MessageText.plain(full),14,"You".equalsIgnoreCase(speaker)?SECONDARY:WHITE);t.setPadding(dp(18),dp(12),dp(18),dp(12));scroll.addView(t);new android.app.AlertDialog.Builder(this).setTitle(speaker.isEmpty()?"Caption":speaker).setView(scroll).setPositiveButton("Close",(d,w)->{}).show();}
     private void message(String heading,String detail,String action,Runnable run){
@@ -1336,7 +1368,7 @@ public final class MainActivity extends Activity {
         if(s.active){if(!micTicked&&!s.state.equals("Connecting")&&!s.state.equals("Ending")){micTicked=true;root.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK);}botName=s.botName.isEmpty()?botName:s.botName;caption=s.caption;captionLine=s.captionLine;speaker=s.speaker;screen=s.muted?"muted":s.state.toLowerCase(java.util.Locale.ROOT);if(!isCall())screen="connecting";}
         else{safeError=s.error;screen="Call dropped".equals(s.state)?"dropped":s.error.isEmpty()?(java.util.Set.of("connecting","listening","thinking","speaking","muted","paused","reconnecting","done").contains(previous)?"ready":"ready"):"error";caption="";captionLine="";}
         if(isCall()&&isCallScreen(previous)&&orb!=null){
-            orb.state(screen,accent(),screen.equals("speaking")?s.outputLevel:s.inputLevel);updateCallText();
+            syncCallVolume();orb.state(screen,accent(),screen.equals("speaking")?s.outputLevel:s.inputLevel);updateCallText();
         }else render();
     }
     private boolean isCallScreen(String value){return java.util.Set.of("connecting","listening","thinking","speaking","muted","paused","reconnecting").contains(value);}
