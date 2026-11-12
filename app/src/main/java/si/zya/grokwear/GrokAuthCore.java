@@ -35,6 +35,30 @@ final class GrokAuthCore {
     static final String POLL="poll", REFRESH="refresh", BOOTSTRAP="bootstrap", ACCESS="access";
     static final long LOGIN_MS=5*60_000L, POLL_MS=3_000L, REFRESH_LEAD_MS=300_000L, CONFIG_CACHE_MS=300_000L;
     static final String WEBSITE="https://cursor.com", BACKEND="https://api2.cursor.sh";
+    /**
+     * The Grok Bot desktop version Grok Wear's backend requests match (x-cursor-client-version). The backend
+     * refuses versions it no longer supports with SAND_CLIENT_UPDATE_REQUIRED (0.71.2 was refused from
+     * 2026-11-11, about three weeks after its release), so when that happens the watch asks the desktop app's
+     * own update feed (VERSION) for the newest version and uses that instead.
+     */
+    static final String CLIENT_VERSION="1.0.1";
+    /** VERSION: Grok Bot desktop's update check, read-only and without credentials. Reply body: {"version":"x.y.z"}. */
+    static final String VERSION="version";
+    private static volatile String clientVersion=CLIENT_VERSION;
+    /** The version requests send: CLIENT_VERSION, or a newer one from Grok's update feed. */
+    static String clientVersion(){return clientVersion;}
+    /** Moves to version when it's a plain x.y.z newer than the one in use; never back. */
+    static synchronized boolean useClientVersion(String version){
+        if(!newer(version,clientVersion))return false;
+        clientVersion=version;return true;
+    }
+    static boolean newer(String version,String than){
+        String plain="\\d{1,4}\\.\\d{1,4}\\.\\d{1,6}";
+        if(version==null||than==null||!version.matches(plain)||!than.matches(plain))return false;
+        String[] a=version.split("\\."),b=than.split("\\.");
+        for(int i=0;i<3;i++){long x=Long.parseLong(a[i]),y=Long.parseLong(b[i]);if(x!=y)return x>y;}
+        return false;
+    }
     // Public client identifier shipped in the native app, not a client secret.
     static final String CLIENT_ID="KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
     static final Object LOCK=new Object();
@@ -47,6 +71,8 @@ final class GrokAuthCore {
     private static final class BootstrapFlight {
         final Thread owner=Thread.currentThread();
         boolean finished,succeeded;
+        /** A refusal that explains itself (a failure hint), for callers who waited on this request. */
+        GrokCore.Failure failure;
     }
     private final Store store;
     private final Transport transport;
@@ -64,8 +90,8 @@ final class GrokAuthCore {
         Hold(String access,long until,GrokCore.Failure failure){this.access=access;this.until=until;this.failure=failure;} }
     private static volatile Hold HOLD;
     static void releaseHold(){HOLD=null;}
-    /** Tests only: forgets this process's access hold and forced renewal. */
-    static void forgetRecoveries(){HOLD=null;FORCED_TO="";}
+    /** Tests only: forgets this process's access hold, forced renewal and newer client version. */
+    static void forgetRecoveries(){HOLD=null;FORCED_TO="";clientVersion=CLIENT_VERSION;}
     /** Digest of the token a forced renewal produced: if Grok refuses that one too, renewing again won't help. */
     private static volatile String FORCED_TO="";
 
@@ -155,22 +181,28 @@ final class GrokAuthCore {
      * Called before a new request, never in response to an uncertain prompt submission.
      * A refused EnsureSandBox is handled like Grok Bot Android 1.18.0 (postWithScopeRecovery): a stale team is
      * dropped and asked again without it, any other 401 renews the sign-in once and asks again, and a refusal
-     * that is still about access is explained by GetSandAccessStatus.
+     * that is still about access is explained by GetSandAccessStatus. A client version Grok calls too old is
+     * replaced by the newest one from Grok's update feed and asked again.
      */
     JSONObject currentConfig() throws Exception {
         renewIfDue(false,null);
-        boolean teamCleared=false,renewed=false;
+        boolean teamCleared=false,renewed=false,versionChecked=false;String recovered="";
         while(true){
             Attempt attempt=bootstrapOnce();
             if(attempt.config!=null){
-                if(teamCleared||renewed)log.line("Bot sandbox start: ok after "+(teamCleared?"dropping a stale team":"renewing sign-in"));
+                if(!recovered.isEmpty())log.line("Bot sandbox start: ok after "+recovered);
                 return attempt.config;
             }
             ServiceRefusal refused=attempt.refusal;
-            if(refused.staleTeam()&&!teamCleared&&attempt.team>0){
-                clearTeam(attempt.team);teamCleared=true;log.line("Bot sandbox start: stale team, asking again without it");continue;
+            if(refused.updateRequired()&&!versionChecked){
+                versionChecked=true;if(newerVersion()){recovered="updating the client version";continue;}
             }
-            if(refused.status==401&&!renewed&&!digest(attempt.access).equals(FORCED_TO)){
+            if(refused.staleTeam()&&!teamCleared&&attempt.team>0){
+                clearTeam(attempt.team);teamCleared=true;recovered="dropping a stale team";log.line("Bot sandbox start: stale team, asking again without it");continue;
+            }
+            // A failure hint says what's wrong, and it isn't the token: renewing it wouldn't help.
+            if(refused.status==401&&refused.hint.isEmpty()&&!renewed&&!digest(attempt.access).equals(FORCED_TO)){
+                recovered="renewing sign-in";
                 renewIfDue(true,attempt.access);renewed=true;continue;
             }
             throw refusalFailure(refused,"Grok refused this sign-in. No message was sent.");
@@ -203,7 +235,11 @@ final class GrokAuthCore {
             JSONObject root=active(epoch,id);
             // This operation is read/bootstrap, not a rotating-token request: it may be asked again.
             root.remove("operation");store.write(root);
-            if(response.status!=200){attempt.refusal=response.refusal;return attempt;}
+            if(response.status!=200){attempt.refusal=response.refusal;
+                // Callers waiting on this request get a refusal that explains itself; one this caller may still
+                // recover from (a client version to update) reads to them as still connecting.
+                if(!response.refusal.hintMessage().isEmpty()&&!response.refusal.updateRequired())flight.failure=hintFailure(response.refusal);
+                return attempt;}
             JSONObject config=configFrom(response.body);
             root.put("config",config).put("config_saved_ms",clock.now());store.write(root);
             flight.succeeded=true;
@@ -222,14 +258,18 @@ final class GrokAuthCore {
         }
     }
 
-    static final int NOT_RECOVERED=0,RENEWED=1,TEAM_DROPPED=2;
+    static final int NOT_RECOVERED=0,RENEWED=1,TEAM_DROPPED=2,VERSION_UPDATED=3;
     /**
-     * For other backend requests refused with a 401 (call setup and tools): drop a stale team, or renew the
-     * sign-in once, so the caller can ask once more. NOT_RECOVERED when neither applies.
+     * For other backend requests refused with a 401 (call setup and tools): update a client version Grok calls
+     * too old, drop a stale team, or renew the sign-in once, so the caller can ask once more. NOT_RECOVERED when
+     * none applies.
      */
     int recoverRejected(JSONObject used,ServiceRefusal refused) throws Exception {
-        if(refused==null||refused.status!=401)return NOT_RECOVERED;
+        if(refused==null)return NOT_RECOVERED;
+        if(refused.updateRequired())return newerVersion()?VERSION_UPDATED:NOT_RECOVERED;
+        if(refused.status!=401)return NOT_RECOVERED;
         if(refused.staleTeam()&&used.optLong("selectedTeamId",0)>0){clearTeam(used.getLong("selectedTeamId"));log.line("Grok: stale team dropped");return TEAM_DROPPED;}
+        if(!refused.hint.isEmpty())return NOT_RECOVERED;
         String access=used.optString("accessToken","");
         if(access.isEmpty()||digest(access).equals(FORCED_TO))return NOT_RECOVERED;
         renewIfDue(true,access);return RENEWED;
@@ -240,10 +280,9 @@ final class GrokAuthCore {
      * refusal is about access (with where to fix it), or the plain fallback.
      */
     GrokCore.Failure refusalFailure(ServiceRefusal refused,String fallback) throws Exception {
-        String hinted=refused.hintMessage();
+        if(!refused.hintMessage().isEmpty())return hintFailure(refused);
         GrokCore.Failure failure;
-        if(!hinted.isEmpty())failure=new GrokCore.Failure(hinted,true,refused.failureCode(),refused.status);
-        else{
+        {
             SandAccess access=refused.accessRefusal()?accessStatus():null;
             if(access!=null&&!access.granted()){
                 failure=new GrokCore.Failure(access.message(),true,access.reason.equals("unspecified")?access.state:access.reason,refused.status,access.link());
@@ -253,6 +292,24 @@ final class GrokAuthCore {
                     :"Could not connect to Grok (HTTP "+refused.status+"). No message was sent.",true,refused.failureCode(),refused.status);
         }
         failure.refusal=refused;return failure;
+    }
+    /** A refusal whose failure hint says what's wrong, in the hint's own wording. */
+    private static GrokCore.Failure hintFailure(ServiceRefusal refused){
+        GrokCore.Failure failure=new GrokCore.Failure(refused.hintMessage(),true,refused.failureCode(),refused.status);
+        failure.refusal=refused;return failure;
+    }
+    /**
+     * After Grok called this client version too old: asks Grok's update feed for the newest Grok Bot version and
+     * uses it when it's newer. Logs one line either way.
+     */
+    private boolean newerVersion(){
+        String before=clientVersion();Reply reply;
+        try{reply=transport.request(VERSION,new JSONObject().put("current",before));}
+        catch(Exception unavailable){log.line("Client version check: failed");return false;}
+        String latest=reply.status==200?reply.body.optString("version",""):"";
+        if(useClientVersion(latest)){log.line("Client version: "+before+" to "+latest+" from Grok's update feed");return true;}
+        log.line("Client version check: "+(reply.status==200||reply.status==204?"nothing newer than "+before:"HTTP "+reply.status));
+        return false;
     }
     /** GetSandAccessStatus with the current sign-in, or null when it can't be read. Logs one line. */
     SandAccess accessStatus() throws Exception {
@@ -442,7 +499,7 @@ final class GrokAuthCore {
             catch(InterruptedException interrupted) {Thread.currentThread().interrupt();throw bootstrapBusy();}
         }
         // A joining caller must not replay a failed bootstrap automatically.
-        if(!flight.succeeded)throw bootstrapBusy();
+        if(!flight.succeeded)throw flight.failure!=null?copyFailure(flight.failure):bootstrapBusy();
         return pendingRoot();
     }
     private static GrokCore.Failure bootstrapBusy() {

@@ -13,6 +13,7 @@ Signing out removes all of this from the watch. It does not delete anything from
 ## What is sent, and where
 
 - **To Grok Bot's servers:** sign-in, your Bot list, recent chat for the Bot you open, and the final text of each voice call, which is saved to that Bot's history as the official apps do. When Grok refuses your account, the watch asks Grok's access status (whether this account can use Grok Bot, and why not), as the official apps do, and shows the answer with a QR code to Grok's own page for fixing it.
+- **When Grok says the app's version is too old:** the watch asks Grok's update server (the same Grok server it signs in with) for the newest Grok Bot version, the way the Grok Bot desktop app checks for updates, and uses that version from then on. This request carries no sign-in or account details, only the version in use and a random ID that is different every time.
 - **When you pin or unpin a Bot:** your account's pinned-Bot list, as the official apps save it.
 - **When you send a text message:** the text you reviewed, to that Bot's chat, and a "read" mark when you open the chat, as the official apps do. The watch keeps your last few messages and their delivery state until you sign out.
 - **Live updates:** while the app is open, and for up to ten minutes after you send a message, the watch keeps a connection open to your Grok Bot gateway with the same sign-in, to hear about Bot list changes and new chat messages as they happen, as the official apps do. Nothing extra is sent over it.

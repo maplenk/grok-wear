@@ -131,7 +131,7 @@ final class BotAccount {
         Request.Builder request=new Request.Builder().url(GrokAuthCore.BACKEND+"/aiserver.v1.GrokBotService/"+method)
             .header("Authorization","Bearer "+context.getString("accessToken"))
             .header("connect-protocol-version","1").header("x-cursor-client-type","sand")
-            .header("x-cursor-client-version","0.71.2").header("x-sand-box-namespace","prod");
+            .header("x-cursor-client-version",GrokAuthCore.clientVersion()).header("x-sand-box-namespace","prod");
         if(context.has("selectedTeamId"))request.header("x-cursor-team-id",Long.toString(context.getLong("selectedTeamId")));
         return request;
     }
@@ -149,7 +149,7 @@ final class BotAccount {
                 JSONObject state=auth.state();relink(auth.currentConfig(),state.optString("auth_generation"));
                 throw new GrokCore.Failure("Grok dropped an old team from this sign-in. Start again.",true,TEAM_CHANGED,401);
             }
-            if(recovered==GrokAuthCore.RENEWED){
+            if(recovered==GrokAuthCore.RENEWED||recovered==GrokAuthCore.VERSION_UPDATED){
                 JSONObject fresh=auth.core.backendContext();check.run();
                 try{return execute(client,backendRequest(method,fresh),body,false);}
                 catch(GrokCore.Failure again){throw explained(again);}
@@ -213,7 +213,7 @@ final class BotAccount {
         Request.Builder request=new Request.Builder().url(GrokAuthCore.BACKEND+"/aiserver.v1.GrokBotService/"+method)
             .header("Authorization","Bearer "+context.getString("accessToken"))
             .header("connect-protocol-version","1").header("x-cursor-client-type","sand")
-            .header("x-cursor-client-version","0.72.0").header("x-sand-box-namespace","prod");
+            .header("x-cursor-client-version",GrokAuthCore.clientVersion()).header("x-sand-box-namespace","prod");
         if(context.has("selectedTeamId"))request.header("x-cursor-team-id",Long.toString(context.getLong("selectedTeamId")));
         return request;
     }

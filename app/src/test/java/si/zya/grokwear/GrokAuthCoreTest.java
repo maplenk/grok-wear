@@ -20,6 +20,8 @@ public class GrokAuthCoreTest {
     static final class Fixture {
         final Memory memory=new Memory();long now=NOW;final List<String> calls=new ArrayList<>();
         GrokAuthCore.Reply poll=new GrokAuthCore.Reply(404,new JSONObject()),refresh,bootstrap,access;
+        /** Grok's update feed: nothing newer unless a test says otherwise. */
+        GrokAuthCore.Reply version=new GrokAuthCore.Reply(204,new JSONObject());
         /** Bootstrap replies to give first, in order, before falling back to bootstrap. */
         final java.util.ArrayDeque<GrokAuthCore.Reply> bootstraps=new java.util.ArrayDeque<>();
         final List<JSONObject> requests=new ArrayList<>();final List<String> lines=new ArrayList<>();
@@ -32,7 +34,7 @@ public class GrokAuthCoreTest {
             GrokAuthCore.forgetRecoveries();
             core=new GrokAuthCore(memory,(operation,input)->{
                 // The access check is read-only and marks no operation.
-                if(!operation.equals(GrokAuthCore.ACCESS))assertTrue(memory.value.has("operation"));
+                if(!operation.equals(GrokAuthCore.ACCESS)&&!operation.equals(GrokAuthCore.VERSION))assertTrue(memory.value.has("operation"));
                 calls.add(operation);lastRequest=new JSONObject(input.toString());requests.add(lastRequest);
                 if(inFlight!=null)inFlight.run();
                 if(interrupt)throw new java.io.IOException("synthetic-secret");
@@ -41,6 +43,7 @@ public class GrokAuthCoreTest {
                 if(operation.equals(GrokAuthCore.REFRESH))return refresh;
                 if(operation.equals(GrokAuthCore.BOOTSTRAP))return bootstraps.isEmpty()?bootstrap:bootstraps.poll();
                 if(operation.equals(GrokAuthCore.ACCESS)&&access!=null)return access;
+                if(operation.equals(GrokAuthCore.VERSION))return version;
                 throw new AssertionError(operation);
             },()->now,lines::add);
         }
@@ -429,7 +432,74 @@ public class GrokAuthCoreTest {
         f.bootstrap=refusal(403,"SAND_CLIENT_UPDATE_REQUIRED","");
         try{f.core.currentConfig();fail();}
         catch(GrokCore.Failure refused){assertEquals("Grok needs a newer Grok Wear. Update the app, then try again.",refused.getMessage());assertEquals("sand_client_update_required",refused.code);}
-        assertEquals(List.of(GrokAuthCore.BOOTSTRAP),f.calls);
+        // The update feed had nothing newer, so the app itself needs updating.
+        assertEquals(List.of(GrokAuthCore.BOOTSTRAP,GrokAuthCore.VERSION),f.calls);
+        assertTrue(f.lines.contains("Client version check: nothing newer than "+GrokAuthCore.CLIENT_VERSION));
+    }
+    @Test public void aClientVersionGrokCallsTooOldIsUpdatedFromTheFeedAndAskedAgain()throws Exception {
+        Fixture f=new Fixture();f.signIn(NOW+3_600_000);
+        f.bootstraps.add(refusal(401,"SAND_CLIENT_UPDATE_REQUIRED",""));
+        f.version=new GrokAuthCore.Reply(200,new JSONObject().put("version","9.4.2").put("url","https://downloads.cursor.com/x"));
+        assertEquals("synthetic-gateway",f.core.currentConfig().getString("gatewayToken"));
+        // Not a token problem: no renewal, just the feed and the same request again.
+        assertEquals(List.of(GrokAuthCore.BOOTSTRAP,GrokAuthCore.VERSION,GrokAuthCore.BOOTSTRAP),f.calls);
+        assertEquals(GrokAuthCore.CLIENT_VERSION,f.requests.get(1).getString("current"));
+        assertEquals("9.4.2",GrokAuthCore.clientVersion());
+        assertTrue(f.lines.contains("Client version: "+GrokAuthCore.CLIENT_VERSION+" to 9.4.2 from Grok's update feed"));
+        assertTrue(f.lines.contains("Bot sandbox start: ok after updating the client version"));
+    }
+    @Test public void stillTooOldAfterTheFeedIsAskedOnceAndExplained()throws Exception {
+        Fixture f=new Fixture();f.signIn(NOW+3_600_000);
+        f.bootstrap=refusal(401,"SAND_CLIENT_UPDATE_REQUIRED","");
+        f.version=new GrokAuthCore.Reply(200,new JSONObject().put("version","9.4.2"));
+        try{f.core.currentConfig();fail();}
+        catch(GrokCore.Failure refused){assertEquals("Grok needs a newer Grok Wear. Update the app, then try again.",refused.getMessage());}
+        assertEquals(List.of(GrokAuthCore.BOOTSTRAP,GrokAuthCore.VERSION,GrokAuthCore.BOOTSTRAP),f.calls);
+    }
+    @Test public void onlyANewerPlainVersionIsUsed()throws Exception {
+        GrokAuthCore.forgetRecoveries();
+        assertTrue(GrokAuthCore.newer("1.0.2","1.0.1"));assertTrue(GrokAuthCore.newer("1.10.0","1.9.9"));assertTrue(GrokAuthCore.newer("2.0.0","1.99.99"));
+        assertFalse(GrokAuthCore.newer("1.0.1","1.0.1"));assertFalse(GrokAuthCore.newer("0.79.3","1.0.1"));
+        for(String odd:new String[]{"","1.0","1.0.2-beta","1.0.2 ","../1.0.2","1.0.2\nx","99999.0.0",null})
+            assertFalse(String.valueOf(odd),GrokAuthCore.useClientVersion(odd));
+        assertEquals(GrokAuthCore.CLIENT_VERSION,GrokAuthCore.clientVersion());
+        Fixture f=new Fixture();f.signIn(NOW+3_600_000);
+        f.bootstrap=refusal(401,"SAND_CLIENT_UPDATE_REQUIRED","");f.version=new GrokAuthCore.Reply(200,new JSONObject().put("version","0.9.0"));
+        refused(()->f.core.currentConfig());assertEquals(GrokAuthCore.CLIENT_VERSION,GrokAuthCore.clientVersion());
+        assertTrue(f.lines.contains("Client version check: nothing newer than "+GrokAuthCore.CLIENT_VERSION));
+    }
+    @Test public void otherRequestsUpdateATooOldClientVersion()throws Exception {
+        Fixture f=new Fixture();f.signIn(NOW+3_600_000);JSONObject used=f.core.backendContext();
+        f.version=new GrokAuthCore.Reply(200,new JSONObject().put("version","9.4.2"));
+        ServiceRefusal tooOld=new ServiceRefusal(401,"unauthenticated","SAND_CLIENT_UPDATE_REQUIRED","");
+        assertEquals(GrokAuthCore.VERSION_UPDATED,f.core.recoverRejected(used,tooOld));
+        assertEquals(GrokAuthCore.NOT_RECOVERED,f.core.recoverRejected(used,tooOld));
+        // Another failure hint isn't about the token: no renewal.
+        assertEquals(GrokAuthCore.NOT_RECOVERED,f.core.recoverRejected(used,new ServiceRefusal(401,"unauthenticated","USER_BLOCKED","")));
+        assertEquals(List.of(GrokAuthCore.VERSION,GrokAuthCore.VERSION),f.calls);
+    }
+    @Test public void aCallerWaitingOnARefusedStartGetsItsReasonNotStillConnecting()throws Exception {
+        Fixture f=new Fixture();f.signIn(NOW+3_600_000);
+        java.util.concurrent.CountDownLatch entered=new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release=new java.util.concurrent.CountDownLatch(1);
+        GrokAuthCore leader=new GrokAuthCore(f.memory,(op,input)->{
+            if(!op.equals(GrokAuthCore.BOOTSTRAP))throw new AssertionError(op);
+            entered.countDown();assertTrue(release.await(5,java.util.concurrent.TimeUnit.SECONDS));
+            return refusal(401,"USER_BLOCKED","");
+        },()->f.now);
+        GrokAuthCore follower=new GrokAuthCore(f.memory,(op,input)->{throw new AssertionError("Must not replay");},()->f.now);
+        java.util.concurrent.atomic.AtomicReference<Throwable> followerError=new java.util.concurrent.atomic.AtomicReference<>();
+        Thread first=new Thread(()->{try{leader.currentConfig();}catch(Throwable ignored){}});
+        Thread second=new Thread(()->{try{follower.poll();}catch(Throwable e){followerError.set(e);}});
+        first.start();assertTrue(entered.await(5,java.util.concurrent.TimeUnit.SECONDS));second.start();
+        try {
+            long deadline=System.nanoTime()+5_000_000_000L;
+            while(second.getState()!=Thread.State.TIMED_WAITING&&System.nanoTime()<deadline)Thread.yield();
+            assertEquals(Thread.State.TIMED_WAITING,second.getState());
+        }finally{release.countDown();}
+        first.join(5000);second.join(5000);assertFalse(first.isAlive());assertFalse(second.isAlive());
+        assertTrue(String.valueOf(followerError.get()),followerError.get() instanceof GrokCore.Failure);
+        assertEquals("Grok has blocked this account from Grok Bot. Check your account on your phone.",followerError.get().getMessage());
     }
     @Test public void otherRequestsRecoverLikeTheSandboxStart()throws Exception {
         Fixture f=new Fixture();f.core.begin();f.poll=new GrokAuthCore.Reply(200,login("owner",NOW+3_600_000).put("selectedTeamId",7));f.core.poll();f.calls.clear();
