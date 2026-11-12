@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Split bubble: a speech bubble cut in two, the lower half shifted left like a mouth mid-word, with two round eyes.
+     Built on u = 7.2dp (a tenth of the 72dp visible area): halves of radius 3u, offset u, mouth gap u, eyes u wide. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFFF7A1F" android:fillType="evenOdd"
+        android:pathData="M36,50.4 A21.6,21.6 0 0,1 79.2,50.4 Z M46.8,39.6 a3.6,3.6 0 1,0 7.2,0 a3.6,3.6 0 1,0 -7.2,0 Z M61.2,39.6 a3.6,3.6 0 1,0 7.2,0 a3.6,3.6 0 1,0 -7.2,0 Z M28.8,57.6 L72,57.6 A21.6,21.6 0 0,1 28.8,57.6 Z"/>
+</vector>

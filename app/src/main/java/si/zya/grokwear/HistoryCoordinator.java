@@ -159,7 +159,12 @@ final class HistoryCoordinator {
             if(e.opt("fromAgent")!=null&&e.opt("fromAgent")!=JSONObject.NULL||e.opt("toAgent")!=null&&e.opt("toAgent")!=JSONObject.NULL)continue;
             if(!e.optString("channel").isEmpty())continue;
             String kind=e.optString("kind"),text="",role="system",source="text",call="";
-            if(kind.equals("message")){if(e.opt("suppressed")!=null&&e.opt("suppressed")!=JSONObject.NULL||e.optBoolean("isStreaming"))continue;role=e.optString("role");if(!role.equals("user")&&!role.equals("assistant"))continue;if(role.equals("user")&&!ownUser(e,binding))continue;text=string(e,"content");call=voiceChannel(e.optString("channel"));}
+            // A Bot's request for your OK, or a phone call it places, becomes a card in the chat (Approvals,
+            // PhoneCalls), with what an answer or End call needs.
+            JSONObject approval=Approvals.of(e,binding.getString("agentId")),phoneCall=approval==null?PhoneCalls.of(e):null;
+            if(approval!=null){role="approval";text=approval.getString("line");if(text.isEmpty())text="Approval needed";}
+            else if(phoneCall!=null){role="call";text=phoneCall.getString("label").isEmpty()?"Phone call":"Phone call to "+phoneCall.getString("label");}
+            else if(kind.equals("message")){if(e.opt("suppressed")!=null&&e.opt("suppressed")!=JSONObject.NULL||e.optBoolean("isStreaming"))continue;role=e.optString("role");if(!role.equals("user")&&!role.equals("assistant"))continue;if(role.equals("user")&&!ownUser(e,binding))continue;text=string(e,"content");call=voiceChannel(e.optString("channel"));}
             else if(kind.equals("send-message")){JSONObject m=e.optJSONObject("message");if(m==null||!m.optString("type").equals("text")||!m.optString("channel").isEmpty()||e.optBoolean("streaming"))continue;role="assistant";text=string(m,"content");call=voiceChannel(m.optString("channel"));}
             else if(kind.equals("notice"))text=string(e,"text");
             else if(kind.equals("voice-call")){
@@ -171,7 +176,7 @@ final class HistoryCoordinator {
                 long seconds=Math.max(0,summary.optLong("durationMs")/1000);text=String.format(Locale.ROOT,"Voice chat · %d:%02d",seconds/60,seconds%60);
             }else continue;
             if(text.isEmpty()||!call.isEmpty()&&source.equals("text")&&cards.contains(call))continue;
-            if(!call.isEmpty())source="voice";String id=e.getString("id");if(seen.add(id+"@"+e.optString("seq")))result.put(row(id,e,role,text,e.optLong("timestampMs"),source,call));
+            if(!call.isEmpty())source="voice";String id=e.getString("id");if(seen.add(id+"@"+e.optString("seq"))){JSONObject made=row(id,e,role,text,e.optLong("timestampMs"),source,call);if(approval!=null)made.put("approval",approval);if(phoneCall!=null)made.put("call",phoneCall);result.put(made);}
         }
         return result;
         }finally{for(Future<Object> detail:details.values())detail.cancel(true);if(reads!=null)reads.shutdownNow();}

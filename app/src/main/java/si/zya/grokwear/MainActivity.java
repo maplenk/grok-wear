@@ -55,6 +55,20 @@ public final class MainActivity extends Activity {
     private Long historyBefore;
     private JSONObject historyBinding,historyDetail;
     private JSONArray historyEntries=new JSONArray();
+    // Approval requests answered from this chat: in flight, sent (until the chat says they're settled), refused in words,
+    // or ones only the phone can answer. Keyed by entry id; a new chat starts empty.
+    private final java.util.Set<String> approvalsSending=new java.util.HashSet<>(),approvalsSent=new java.util.HashSet<>(),approvalsElsewhere=new java.util.HashSet<>();
+    private final java.util.Map<String,String> approvalErrors=new java.util.HashMap<>();
+    // Phone calls changed from this chat: in flight, asked for (with how Grok's copy looked then, until it moves on),
+    // refused in words, and the one whose End call waits for a second tap. Keyed by call id; a new chat starts empty.
+    private final java.util.Set<String> callsSending=new java.util.HashSet<>();private final java.util.Map<String,String[]> callsAsked=new java.util.HashMap<>();
+    private final java.util.Map<String,String> callErrors=new java.util.HashMap<>();private String callArmed="";
+    // Each talking call's timer line, with when the call connected.
+    private final java.util.Map<TextView,Long> callTimers=new java.util.LinkedHashMap<>();
+    private final Runnable callTimer=new Runnable(){public void run(){
+        if(!visible||!screen.equals("ready")){callTimers.clear();return;}long now=System.currentTimeMillis();
+        for(java.util.Map.Entry<TextView,Long> t:callTimers.entrySet())t.getKey().setText(PhoneCalls.clock(now-t.getValue()));
+        if(!callTimers.isEmpty())main.postDelayed(this,1000);}};
     private android.window.OnBackInvokedCallback modernBack;
     private String screen="welcome",botName="Main Bot",caption="",speaker="",safeError="";
     private boolean previewMuted,previewSaving;private long previewElapsedMs=42000,previewCallStartMs;
@@ -116,7 +130,31 @@ public final class MainActivity extends Activity {
             if(BuildConfig.DEBUG&&"settings".equals(getIntent().getStringExtra("debug_screen"))){screen="settings";settingsReturnScreen="bots";}
             // Debug builds: asks GetSandAccessStatus with this sign-in and logs its answer ("Access: granted none").
             if(BuildConfig.DEBUG&&getIntent().getBooleanExtra("access_probe",false)){final BotAccount probing=account;final android.content.Context app=getApplicationContext();
-                worker.execute(()->{try{if(probing.accessProbe()==null)ProblemReport.event(app,"Access check: no answer");}catch(Exception failure){ProblemReport.note(app,"Access check",failure);}});}}
+                worker.execute(()->{try{if(probing.accessProbe()==null)ProblemReport.event(app,"Access check: no answer");}catch(Exception failure){ProblemReport.note(app,"Access check",failure);}});}
+            // Debug builds: one read-only GrokBotService List*/Get* request; logcat gets its reply's shape, never its values.
+            if(BuildConfig.DEBUG&&getIntent().hasExtra("gateway_probe")){final BotAccount probing=account;final String body=getIntent().getStringExtra("gateway_probe");
+                worker.execute(()->{try{android.util.Log.i("GrokWearProbe","gateway "+probing.gatewayProbe(new JSONObject(body)));}catch(Exception failure){android.util.Log.i("GrokWearProbe","gateway failed: "+failure.getMessage());}});}
+            if(BuildConfig.DEBUG&&getIntent().hasExtra("replay_rows"))ServerEvents.debugReplay=Math.max(0,Math.min(20,getIntent().getIntExtra("replay_rows",0)));
+            // Debug builds: open the selected Bot's chat once the account has loaded, with no taps.
+            if(BuildConfig.DEBUG&&"chat".equals(getIntent().getStringExtra("debug_screen")))main.postDelayed(()->{
+                if(!visible)return;if(!selectedMetadata.optString("id").isEmpty()){screen="ready";render();loadBotChat();}
+                else if(primaryBot()!=null)primaryAction(primaryBot(),false);},8000);
+            // Debug builds: send one message to the selected Bot through the normal path, then wait for its reply.
+            if(BuildConfig.DEBUG&&getIntent().hasExtra("debug_send")){final String text=getIntent().getStringExtra("debug_send");final BotAccount sending=account;
+                main.postDelayed(()->{String bot=selectedMetadata.optString("id");if(bot.isEmpty()&&primaryBot()!=null)bot=primaryBot().optString("id");
+                    android.util.Log.i("GrokWearProbe","debug_send bot="+(bot.isEmpty()?"none":"chosen"));if(bot.isEmpty()||text==null||text.isEmpty())return;final String target=bot;
+                    worker.execute(()->{long started=android.os.SystemClock.elapsedRealtime();
+                        try{sending.chooseBot(target);String id=sending.prepareMessage(text,target);JSONObject sent=sending.sendMessage(id,()->true);
+                            android.util.Log.i("GrokWearProbe","send state="+sent.optString("state")+" notice="+sent.optString("notice")+" after_ms="+(android.os.SystemClock.elapsedRealtime()-started));
+                            if("unknown".equals(sent.optString("state"))){JSONObject polled=sending.confirmMessage(id);android.util.Log.i("GrokWearProbe","confirm state="+polled.optString("state"));}
+                            for(int i=0;i<40;i++){Thread.sleep(3000);JSONObject reply=sending.replyAfter(id);
+                                if(reply!=null){String said=reply.optString("text");android.util.Log.i("GrokWearProbe","reply after_ms="+(android.os.SystemClock.elapsedRealtime()-started)+" text="+said.substring(0,Math.min(80,said.length())));break;}}
+                        }catch(Exception failure){android.util.Log.i("GrokWearProbe","send failed: "+failure.getMessage());}});},9000);}
+            String probeMethod=BuildConfig.DEBUG?getIntent().getStringExtra("backend_probe"):null;
+            if(probeMethod!=null&&probeMethod.matches("(List|Get)[A-Za-z]{3,60}")){final BotAccount probing=account;final String body=getIntent().getStringExtra("probe_body");
+                worker.execute(()->{try{String shape=probing.serverRosterProbe(probeMethod,new JSONObject(body==null?"{}":body));
+                    for(int i=0;i<shape.length();i+=3000)android.util.Log.i("GrokWearProbe",probeMethod+" "+shape.substring(i,Math.min(shape.length(),i+3000)));}
+                catch(Exception failure){android.util.Log.i("GrokWearProbe",probeMethod+" failed: "+failure.getMessage()+(failure instanceof GrokCore.Failure&&((GrokCore.Failure)failure).refusal!=null?" "+((GrokCore.Failure)failure).refusal.summary():""));}});}}
         side=(int)(getResources().getDisplayMetrics().widthPixels/getResources().getDisplayMetrics().density);
         if(android.os.Build.VERSION.SDK_INT>=33){modernBack=this::handleBack;getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,modernBack);}
         if(preview&&!openBotExtra(getIntent()).isEmpty())openPreviewReply(getIntent().getStringExtra("preview_bot"));
@@ -595,6 +633,7 @@ public final class MainActivity extends Activity {
         FrameLayout.LayoutParams ep=new FrameLayout.LayoutParams(dp(side*.62f),dp(54),Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);ep.bottomMargin=dp(12);root.addView(talk,ep);
     }
     private void ready(){
+        callTimers.clear();main.removeCallbacks(callTimer);
         FrameLayout.LayoutParams sp=(FrameLayout.LayoutParams)currentScroll.getLayoutParams();sp.topMargin=0;sp.bottomMargin=dp(67);currentScroll.setLayoutParams(sp);body.setPadding(0,0,0,dp(28));
         // A Bot other than the Primary gets a compact hero with its pin control under the name.
         JSONObject pinBot=currentPinBot();View[] pin=pinBot==null?null:pinViews(pinBot,false);boolean caption=pin!=null&&pin[0]!=null;
@@ -611,10 +650,13 @@ public final class MainActivity extends Activity {
         LinearLayout chat=new LinearLayout(this);chat.setOrientation(LinearLayout.VERTICAL);chat.setPadding(dp(side*.12f),dp(10),dp(side*.12f),0);body.addView(chat,new LinearLayout.LayoutParams(-1,-2));body=chat;label("Chat",17,WHITE);messageButton();if(historyLoading&&historyEntries.length()==0)label("Loading history…",12,SECONDARY);if(historyStale)label("Showing last loaded messages",12,SECONDARY);if(!historyError.isEmpty())label(historyError,12,SECONDARY);
         if(historyEntries.length()==0&&!historyLoading)label("No messages loaded",12,SECONDARY);
         chat.setTag("chat");boolean newest=newestFirst();int count=historyEntries.length();
+        // Grok's usage-limit notice takes the delivery line of the message it answers, else sits at the chat's newest end.
+        JSONObject usage=usageTray();int newestEnd=body.getChildCount();
         // Newest first: messages still sending come first, then the chat from its newest message back.
-        if(newest)outgoingBubbles();
-        for(int k=0;k<count;k++){JSONObject e=historyEntries.optJSONObject(newest?count-1-k:k);if(e==null)continue;chatBubble(e);}
-        if(!newest)outgoingBubbles();
+        boolean noticed=newest&&outgoingBubbles(usage);
+        for(int k=0;k<count;k++){JSONObject e=historyEntries.optJSONObject(newest?count-1-k:k);if(e==null)continue;if(e.has("approval"))approvalCard(e.optJSONObject("approval"));else if(e.has("call"))phoneCallCard(e.optJSONObject("call"));else chatBubble(e);}
+        if(!newest)noticed=outgoingBubbles(usage);
+        if(usage!=null&&!noticed)usageNotice(usage,newest?newestEnd:body.getChildCount(),false);
         if(historyHasMore&&historyPages<5){Button older=action("Load older messages",()->loadHistory(true));older.setEnabled(!historyLoading);}
         if(screen.equals("done")||(!preview&&hasCurrentReceipt()&&receiptElapsed>0)){long ms=preview?102000:receiptElapsed;label("Voice chat · "+duration(ms),12,SECONDARY);}
         String sync=preview?(previewSaving?"Saving shared history":""):hasCurrentReceipt()?receiptSync:"";if(!sync.isEmpty())label(sync.equals("Saving shared history")?"Saving shared history…":sync.equals("synced")?"Shared history saved":sync.equals("pending")||sync.equals("uncertain")?"Voice sync pending":sync.equals("rejected")?"History could not be saved":sync,12,SECONDARY);
@@ -732,20 +774,71 @@ public final class MainActivity extends Activity {
                 if(sent!=null&&("sent".equals(sent.optString("state"))||"unknown".equals(sent.optString("state"))))alertReply(botId,sent.optString("id"));});
         });
     }
-    /** The watch's own messages that the chat doesn't show yet, with their delivery state. */
-    private void outgoingBubbles(){
-        long now=System.currentTimeMillis();
-        for(int i=0;i<botMessages.length();i++){JSONObject job=botMessages.optJSONObject(i);if(job==null)continue;
-            String state=job.optString("state"),text=job.optString("text");long created=job.optLong("created");
-            if(inHistory(text,created))continue;
-            if(state.equals("sent")&&now-created>10*60_000L)continue;
+    /**
+     * The watch's own messages that the chat doesn't show yet, with their delivery state. Returns whether Grok's
+     * usage-limit notice took the place of one's "Sent".
+     */
+    private boolean outgoingBubbles(JSONObject usage){
+        long now=System.currentTimeMillis();String answered=usage==null?"":answeredBy(usage,now);
+        for(int i=0;i<botMessages.length();i++){JSONObject job=botMessages.optJSONObject(i);if(job==null||!outgoing(job,now))continue;
+            String state=job.optString("state"),text=job.optString("text");
             TextView bubble=label(text,14,WHITE);bubble.setGravity(Gravity.START);bubble.setPadding(dp(10),dp(8),dp(10),dp(8));bubble.setBackground(shape(userBubble(),14));
             LinearLayout.LayoutParams bp=(LinearLayout.LayoutParams)bubble.getLayoutParams();bp.topMargin=dp(6);bubble.setLayoutParams(bp);
-            String status=state.equals("sent")?"Sent":state.equals("failed")?job.optString("notice","Not sent"):state.equals("unknown")?"Not confirmed · Tap to try again":"Sending…";
-            TextView line=label(status,11,state.equals("failed")?0xffff7a72:SECONDARY);line.setGravity(Gravity.END);
-            if(state.equals("unknown")){final String id=job.optString("id");line.setClickable(true);line.setOnClickListener(v->retryMessage(id));bubble.setOnClickListener(v->retryMessage(id));}
+            boolean out=job.optString("id").equals(answered);
+            String status=out?BotEvents.Waits.USAGE_TITLE:state.equals("sent")?"Sent":state.equals("failed")?job.optString("notice","Not sent"):state.equals("unknown")?"Not confirmed · Tap to try again":"Sending…";
+            if(out)usageNotice(usage,body.getChildCount(),true);
+            else{TextView line=label(status,11,state.equals("failed")?0xffff7a72:SECONDARY);line.setGravity(Gravity.END);
+                if(state.equals("unknown")){final String id=job.optString("id");line.setClickable(true);line.setOnClickListener(v->retryMessage(id));}}
+            if(state.equals("unknown")){final String id=job.optString("id");bubble.setOnClickListener(v->retryMessage(id));}
             bubble.setContentDescription("You: "+text+". "+status);
         }
+        return !answered.isEmpty();
+    }
+    /** A watch message still shown as its own bubble: not in the chat yet, and a sent one for ten minutes at most. */
+    private boolean outgoing(JSONObject job,long now){
+        long created=job.optLong("created");
+        return !inHistory(job.optString("text"),created)&&!(job.optString("state").equals("sent")&&now-created>10*60_000L);
+    }
+    /** The newest shown message that went out (or may have) before Grok's usage notice, with two minutes' grace for clocks; "" if none. */
+    private String answeredBy(JSONObject usage,long now){
+        String id="";long newest=Long.MIN_VALUE,at=usage.optLong("createdAt");
+        for(int i=0;i<botMessages.length();i++){JSONObject job=botMessages.optJSONObject(i);if(job==null||!outgoing(job,now))continue;
+            String state=job.optString("state");long created=job.optLong("created");
+            if((state.equals("sent")||state.equals("unknown"))&&(at<=0||created<=at+BotEvents.Waits.CLOCK_GRACE_MS)&&created>=newest){newest=created;id=job.optString("id");}}
+        return id;
+    }
+    /**
+     * Grok's usage-limit notice for the open Bot (UsageTrays), unless the chat shows the Bot writing since: then its
+     * usage is back, even if the phone hasn't dismissed the notice yet.
+     */
+    private JSONObject usageTray(){
+        if(preview)return null;JSONObject tray=UsageTrays.ALL.latest(botsAccountBinding,selectedMetadata.optString("id",""));if(tray==null)return null;
+        long at=tray.optLong("createdAt");
+        if(at>0)for(int i=historyEntries.length()-1;i>=0;i--){JSONObject e=historyEntries.optJSONObject(i);if(e!=null&&"assistant".equals(e.optString("role"))&&e.optLong("atMs")>at)return null;}
+        return tray;
+    }
+    /**
+     * The out-of-usage notice in the official app's words, at this place in the chat: under a message (attached, in
+     * place of its "Sent") or on its own. The reset time is your own usage, so a teammate's Bot never shows it.
+     */
+    private void usageNotice(JSONObject tray,int at,boolean attached){
+        boolean teammate=selectedMetadata.has("viewerIsOwner")&&!selectedMetadata.optBoolean("viewerIsOwner",true);
+        String detail=teammate?"This Bot's owner is out of usage.":BotEvents.Waits.USAGE_TEXT;
+        if(!teammate){String id=tray.optString("id");long reset=UsageTrays.ALL.resetAt(id);
+            if(reset<=0)askReset(id);
+            else{String line=UsageTrays.resetLine(reset,System.currentTimeMillis(),java.time.ZoneId.systemDefault(),java.util.Locale.getDefault(),android.text.format.DateFormat.is24HourFormat(this));if(!line.isEmpty())detail+=" "+line+".";}}
+        int gravity=attached?Gravity.END:Gravity.CENTER;
+        TextView title=text(BotEvents.Waits.USAGE_TITLE,12,0xffff7a72),note=text(detail,12,SECONDARY);title.setGravity(gravity);note.setGravity(gravity);
+        title.setTag("usage_notice");title.setContentDescription(BotEvents.Waits.USAGE_TITLE+". "+detail);note.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        LinearLayout.LayoutParams tp=new LinearLayout.LayoutParams(-1,-2);if(!attached)tp.topMargin=dp(8);
+        body.addView(title,at,tp);body.addView(note,at+1,new LinearLayout.LayoutParams(-1,-2));
+    }
+    /** Asks Grok once per notice when usage resets, off the main thread; no answer only leaves the time out. */
+    private void askReset(String trayId){
+        if(!UsageTrays.ALL.claimReset(trayId))return;final BotAccount asking=account;final String botId=selectedMetadata.optString("id","");
+        preferencesWorker.execute(()->{long reset=0;try{reset=UsageTrays.resetMs(asking.usageStatus());}catch(Exception optional){}
+            UsageTrays.ALL.reset(trayId,reset);
+            if(reset>0)main.post(()->{if(visible&&screen.equals("ready")&&botId.equals(selectedMetadata.optString("id")))render();});});
     }
     private boolean inHistory(String text,long created){
         for(int i=historyEntries.length()-1;i>=0;i--){JSONObject e=historyEntries.optJSONObject(i);
@@ -801,10 +894,13 @@ public final class MainActivity extends Activity {
     private final EventStream.Listener live=new EventStream.Listener(){
         public void bot(String identity,JSONObject row){if(liveCurrent(identity))liveBot(row);}
         // Your message or the Bot's reply; tool steps and other entries don't change the chat.
-        public void entry(String identity,String botId,JSONObject entry){if(liveCurrent(identity)&&(entry.optBoolean("reply")||entry.optBoolean("user")))liveEntry(botId);}
+        public void entry(String identity,String botId,JSONObject entry){if(liveCurrent(identity)&&(entry.optBoolean("reply")||entry.optBoolean("user")||entry.has("approval")||entry.has("call")))liveEntry(botId);}
         public void connected(String identity,boolean again){
             // Events from the gap are gone: read once the usual way.
             if(!again||!liveCurrent(identity))return;if(screen.equals("ready"))liveEntry(selectedMetadata.optString("id",""));else if(screen.equals("bots"))refreshBots(true);}
+        // Grok's usage-limit notice came or went: the open chat shows or drops it.
+        public void usage(String identity,JSONObject pushed){
+            if(liveCurrent(identity)&&screen.equals("ready")&&(pushed==null||pushed.optString("agentId").equals(selectedMetadata.optString("id"))))render();}
     };
     private boolean liveCurrent(String identity){return visible&&!preview&&!identity.isEmpty()&&identity.equals(botsAccountBinding)&&!VoiceService.snapshot().active&&!isCall();}
     private static final String[] LIVE_KEYS={"name","title","avatarShape","avatarColor","hasUnread","unreadCount","isRunning","isRunningTurn","isComposingMessage","lastMessagePreview","lastActivityAt","lastViewedAt"};
@@ -834,6 +930,103 @@ public final class MainActivity extends Activity {
     }
     private final Runnable liveChat=new Runnable(){public void run(){
         if(!visible||!screen.equals("ready"))return;if(historyLoading){main.postDelayed(this,500);return;}loadBotChat();}};
+    /**
+     * A Bot's request for your OK, as a compact card in the chat: its question, one line, and two big answers when the
+     * watch can give them (never "always": that writes a standing rule). Settled requests show how they ended.
+     */
+    private void approvalCard(JSONObject approval){
+        if(approval==null)return;String entryId=approval.optString("entryId");
+        LinearLayout card=new LinearLayout(this);card.setOrientation(LinearLayout.VERTICAL);card.setPadding(dp(10),dp(8),dp(10),dp(10));card.setBackground(shape(CARD,14));card.setTag("approval");
+        LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(-1,-2);cp.topMargin=dp(6);body.addView(card,cp);
+        LinearLayout outer=body;body=card;
+        try{
+            String question=Approvals.headline(approval,botName),line=approval.optString("line");
+            TextView head=label(question,13,WHITE);head.setTypeface(Typeface.create(Typeface.DEFAULT,600,false));head.setGravity(Gravity.START);
+            if(!line.isEmpty()){gap(3);TextView detail=label(line,12,SECONDARY);detail.setGravity(Gravity.START);detail.setMaxLines(4);detail.setEllipsize(android.text.TextUtils.TruncateAt.END);}
+            String[] choices=Approvals.choices(approval);boolean pending="pending".equals(approval.optString("status"));
+            // The watch answers only for your own Bots (FEATURES-SPEC §2.4); a teammate's goes through the phone.
+            boolean teammate=selectedMetadata.has("viewerIsOwner")&&!selectedMetadata.optBoolean("viewerIsOwner",true);
+            String error=approvalErrors.containsKey(entryId)?approvalErrors.get(entryId):"",status;
+            if(!pending)status=Approvals.settled(approval);
+            else if(approvalsSent.contains(entryId))status="Sent";
+            else if(choices==null||teammate||approvalsElsewhere.contains(entryId))status=Approvals.elsewhere(approval);
+            else{status="";boolean sending=approvalsSending.contains(entryId);
+                Button yes=action(sending?"Sending…":choices[0],()->answerApproval(approval,true));yes.setTextColor(Color.BLACK);yes.setBackground(shape(WHITE,24));yes.setEnabled(!sending&&!preview);
+                yes.setContentDescription(choices[0]+": "+question);
+                Button no=action(choices[1],()->answerApproval(approval,false));no.setEnabled(!sending&&!preview);no.setContentDescription(choices[1]+": "+question);}
+            if(!status.isEmpty()){gap(4);TextView done=label(status,11,SECONDARY);done.setGravity(Gravity.START);}
+            if(pending&&!error.isEmpty()){gap(4);TextView problem=label(error,11,0xffff7a72);problem.setGravity(Gravity.START);}
+        }finally{body=outer;}
+    }
+    /** Sends one answer, off the main thread, then reads the chat again. Never retried on its own. */
+    private void answerApproval(JSONObject approval,boolean approved){
+        final String entryId=approval.optString("entryId"),botId=selectedMetadata.optString("id","");
+        if(preview||botId.isEmpty()||approvalsSending.contains(entryId)||approvalsSent.contains(entryId))return;
+        approvalsSending.add(entryId);approvalErrors.remove(entryId);render();final BotAccount answering=account;
+        worker.execute(()->{String problem="";boolean elsewhere=false;
+            try{answering.resolveApproval(botId,approval,approved);}
+            catch(Exception failed){problem=failed instanceof GrokCore.Failure&&failed.getMessage()!=null?failed.getMessage():"Couldn't answer. Open on phone.";
+                elsewhere=failed instanceof GrokCore.Failure&&Approvals.ELSEWHERE.equals(((GrokCore.Failure)failed).code);}
+            final String said=problem;final boolean phone=elsewhere;
+            main.post(()->{approvalsSending.remove(entryId);if(!botId.equals(selectedMetadata.optString("id")))return;
+                if(said.isEmpty()){approvalsSent.add(entryId);root.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM);}
+                else{approvalErrors.put(entryId,said);if(phone)approvalsElsewhere.add(entryId);}
+                if(screen.equals("ready")){render();liveEntry(botId);}});
+        });
+    }
+    /**
+     * A phone call the Bot places, as a compact card: who it calls (name, else the number as Grok formats it), the
+     * status line or a live timer, and while it lasts End call and, when Grok offers it, Take over. Ended calls are
+     * one line. Only your own Bots' calls can be changed, as in the official app.
+     */
+    private void phoneCallCard(JSONObject call){
+        if(call==null)return;String callId=call.optString("callId");
+        // Grok's copy of the call moved on since the watch asked: that request is done.
+        String[] asked=callsAsked.get(callId);if(asked!=null&&!asked[1].equals(PhoneCalls.state(call))){callsAsked.remove(callId);asked=null;}
+        String pending=asked==null?"":asked[0];
+        boolean own=!(selectedMetadata.has("viewerIsOwner")&&!selectedMetadata.optBoolean("viewerIsOwner",true)),ended=PhoneCalls.ended(call);
+        LinearLayout card=new LinearLayout(this);card.setOrientation(LinearLayout.VERTICAL);card.setPadding(dp(10),dp(8),dp(10),dp(ended?8:10));card.setBackground(shape(CARD,14));card.setTag("phone_call");
+        LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(-1,-2);cp.topMargin=dp(6);body.addView(card,cp);
+        LinearLayout outer=body;body=card;
+        try{
+            String who=PhoneCalls.headline(call,botName),line=PhoneCalls.status(call,pending);
+            TextView head=label(who,13,WHITE);head.setTypeface(Typeface.create(Typeface.DEFAULT,600,false));head.setGravity(Gravity.START);gap(3);
+            TextView status=label(line==null?PhoneCalls.timer(call,System.currentTimeMillis()):line,12,SECONDARY);status.setGravity(Gravity.START);
+            if(line==null){if(callTimers.isEmpty())main.postDelayed(callTimer,1000);callTimers.put(status,call.optLong("connectedAtMs"));}
+            if(ended||!pending.isEmpty())return;
+            boolean sending=callsSending.contains(callId);
+            if(PhoneCalls.canTakeOver(call,own)){Button take=action("Take over",()->controlCall(call,true));take.setTextColor(Color.BLACK);take.setBackground(shape(WHITE,24));take.setEnabled(!sending&&!preview);
+                take.setContentDescription("Take over the call to "+call.optString("label"));}
+            // Ending a call can't be undone, and a wrist brushes buttons: the first tap asks for a second (FEATURES-SPEC §3.5).
+            if(PhoneCalls.canEnd(call,own)){boolean armed=callId.equals(callArmed);
+                Button end=action(armed?"Tap again to end":"End call",()->endCall(call));end.setTextColor(RED);end.setEnabled(!sending&&!preview);}
+            String error=callErrors.containsKey(callId)?callErrors.get(callId):"";
+            if(!error.isEmpty()){gap(4);TextView problem=label(error,11,0xffff7a72);problem.setGravity(Gravity.START);}
+        }finally{body=outer;}
+    }
+    private void endCall(JSONObject call){
+        final String callId=call.optString("callId");
+        if(callId.equals(callArmed)){controlCall(call,false);return;}
+        callArmed=callId;render();
+        main.postDelayed(()->{if(callId.equals(callArmed)){callArmed="";if(visible&&screen.equals("ready"))render();}},4000);
+    }
+    /** End call or Take over, once, off the main thread; the card says "Ending call…" or "Connecting you…" until Grok's copy changes. */
+    private void controlCall(JSONObject call,boolean takeOver){
+        final String callId=call.optString("callId"),botId=selectedMetadata.optString("id",""),before=PhoneCalls.state(call);
+        callArmed="";if(preview||botId.isEmpty()||callsSending.contains(callId))return;
+        callsSending.add(callId);callErrors.remove(callId);render();final BotAccount asking=account;
+        worker.execute(()->{String problem="";
+            try{asking.controlCall(botId,call,takeOver);}
+            catch(Exception failed){problem=failed instanceof GrokCore.Failure&&failed.getMessage()!=null?failed.getMessage():PhoneCalls.failed(takeOver);}
+            final String said=problem;
+            main.post(()->{callsSending.remove(callId);if(!botId.equals(selectedMetadata.optString("id")))return;
+                if(said.isEmpty()){callsAsked.put(callId,new String[]{takeOver?"transfer":"hangup",before});root.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM);}
+                else callErrors.put(callId,said);
+                if(!screen.equals("ready"))return;render();liveEntry(botId);
+                // A server-run Bot's call reaches the watch only on a read: look again shortly.
+                main.postDelayed(()->liveEntry(botId),4000);});
+        });
+    }
     /** Marks the Bot's chat read on open (and when a reply arrives), as the official apps do. */
     private void markRead(String botId,boolean force){
         if(preview||botId.isEmpty())return;
@@ -963,7 +1156,7 @@ public final class MainActivity extends Activity {
     }
     private boolean historyStaging(){return preview?previewSaving:VoiceService.historyStaging();}
     private boolean isHistory(){return screen.equals("history")||screen.equals("history_detail");}
-    private void clearHistory(){historyRequest++;historyLoading=false;historyStale=false;historyHasMore=false;historyBefore=null;historyBinding=null;historyDetail=null;
+    private void clearHistory(){approvalsSending.clear();approvalsSent.clear();approvalsElsewhere.clear();approvalErrors.clear();callsSending.clear();callsAsked.clear();callErrors.clear();callArmed="";historyRequest++;historyLoading=false;historyStale=false;historyHasMore=false;historyBefore=null;historyBinding=null;historyDetail=null;
         historyEntries=new JSONArray();historyError="";historyAgent="";historyAccount="";historyPages=0;pendingHistory=0;}
     private void openHistory(){
         if(!preview&&VoiceService.snapshot().active){renderVoice();return;}

@@ -20,7 +20,7 @@ import java.util.concurrent.Executors;
 
 /**
  * After you send a Bot a message from the watch, keeps the live event stream open in the background and
- * buzzes when the Bot replies, unless that chat is on screen. Grok Bot's own pushes go to its phone app
+ * buzzes when the Bot replies (or Grok says it's out of usage), unless that chat is on screen. Grok Bot's own pushes go to its phone app
  * only, so this is the watch's way to hear back. Waits end as BotEvents.Waits says, at most ten minutes.
  */
 public final class ReplyAlertService extends Service {
@@ -52,7 +52,9 @@ public final class ReplyAlertService extends Service {
     }
     private static String tag(String botId){return "reply:"+botId;}
     /** Posts a Bot's reply; tapping it starts open (MainActivity) for that Bot. Also used by the debug preview. */
-    static void notifyReply(Context context,String botId,String name,String text,Intent open){
+    static void notifyReply(Context context,String botId,String name,String text,Intent open){post(context,botId,name,text,"New reply",open);}
+    /** The Bot's notice, with name as its title; hidden is all the lock screen shows. */
+    private static void post(Context context,String botId,String name,String text,String hidden,Intent open){
         NotificationManager manager=context.getSystemService(NotificationManager.class);if(manager==null)return;
         // A watch buzzes rather than rings, so the channel asks for vibration outright.
         NotificationChannel channel=new NotificationChannel(REPLIES,"Bot replies",NotificationManager.IMPORTANCE_HIGH);channel.enableVibration(true);
@@ -60,12 +62,12 @@ public final class ReplyAlertService extends Service {
         text=MessageText.plain(text);if(text.isEmpty())text="New message";
         PendingIntent tap=PendingIntent.getActivity(context,botId.hashCode(),open.setAction("open:"+botId).putExtra(OPEN_BOT,botId)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_SINGLE_TOP),PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);
-        // The lock screen shows that a reply came, not what it says.
-        Notification hidden=new NotificationCompat.Builder(context,REPLIES).setSmallIcon(R.drawable.ic_reply_status).setContentTitle("Grok Wear").setContentText("New reply").build();
+        // The lock screen shows that something came, not what it says.
+        Notification neutral=new NotificationCompat.Builder(context,REPLIES).setSmallIcon(R.drawable.ic_reply_status).setContentTitle("Grok Wear").setContentText(hidden).build();
         manager.notify(tag(botId),REPLY,new NotificationCompat.Builder(context,REPLIES).setSmallIcon(R.drawable.ic_reply_status)
             .setContentTitle(name).setContentText(text).setStyle(new NotificationCompat.BigTextStyle().bigText(text))
             .setCategory(NotificationCompat.CATEGORY_MESSAGE).setPriority(NotificationCompat.PRIORITY_HIGH).setDefaults(Notification.DEFAULT_ALL)
-            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(hidden).setContentIntent(tap).setAutoCancel(true).build());
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(neutral).setContentIntent(tap).setAutoCancel(true).build());
     }
 
     private final Handler main=new Handler(Looper.getMainLooper());
@@ -78,6 +80,8 @@ public final class ReplyAlertService extends Service {
         public void entry(String account,String botId,JSONObject entry){if(account.equals(identity))handle(()->waits.entry(botId,entry));}
         // The stream had a gap: replies in it never arrive as events.
         public void connected(String account,boolean again){if(again&&account.equals(identity))catchUp();}
+        // Grok took the message but the Bot is out of usage: no reply is coming, so say that instead.
+        public void usage(String account,JSONObject pushed){if(pushed!=null&&account.equals(identity))handle(()->waits.usage(pushed,SystemClock.elapsedRealtime(),System.currentTimeMillis()));}
     };
     private interface Check{JSONObject run()throws Exception;}
     private void handle(Check check){
@@ -133,6 +137,10 @@ public final class ReplyAlertService extends Service {
         String botId=alert.optString("bot");
         // That chat is on screen: the app already shows the reply. Alerts turned off since: say nothing.
         if(botId.equals(MainActivity.openChat)||!enabled(this))return;
+        // Out of usage: Grok's own words in place of a reply; the lock screen still names nothing.
+        if(alert.optBoolean("usage")){post(this,botId,BotEvents.Waits.USAGE_TITLE,BotEvents.Waits.USAGE_TEXT,"New notice",new Intent(this,MainActivity.class));return;}
+        // The Bot asks for your OK first: tapping opens its chat, where the request can be answered.
+        if(alert.optBoolean("approval")){String line=alert.optString("text");post(this,botId,"Needs your OK",line.isEmpty()?"Approval needed":line,"New notice",new Intent(this,MainActivity.class));return;}
         notifyReply(this,botId,alert.optString("name"),alert.optString("text"),new Intent(this,MainActivity.class));
     }
     private Notification waitingNotification(String name){
