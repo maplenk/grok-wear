@@ -195,16 +195,40 @@ final class ProblemReport {
     static String url(String watch,String android,String version,boolean button,String network,String state,String where,String error,String log,boolean email,String logId){
         String place=where.isEmpty()?"":clean(where.split(":",2)[0]);
         // "←" and " · " read well on the watch but take 9 and 8 characters in a link; " < " and " - " take 3.
-        String head=(logId.isEmpty()?"":"Log ID: "+clean(logId)+"\n")+(where.isEmpty()?"":"Where: "+clean(where)+"\n")+"Watch: "+clean(watch)+"\nAndroid: "+clean(android)+"\nGrok Wear: "+clean(version)+"\nAssistant button: "+(button?"on":"off")
-            +"\nNetwork: "+clean(network)+(state.isEmpty()?"":"\nState: "+clean(state,160))+(error.isEmpty()?"":"\nError: "+clean(error,TRACE).replace(" ← "," < ").replace(" · "," - "))
-            +"\nLog (UTC, newest first):\n",tail="\nWhat happened?\n",title=(place.isEmpty()?"Problem":place+" problem")+" on "+clean(watch);
+        String said=where.isEmpty()?"":clean(where),
+            trace=error.isEmpty()?"":clean(error,TRACE).replace(" ← "," < ").replace(" · "," - "),
+            logHead="\nLog (UTC, newest first):\n",tail="\nWhat happened?\n",title=(place.isEmpty()?"Problem":place+" problem")+" on "+clean(watch);
+        String head=head(logId,said,watch,android,version,button,network,state,trace)+logHead;
         StringBuilder lines=new StringBuilder();
         // " · " reads well on the watch but takes 8 characters in a link; " - " takes 3.
         for(String line:log.split("\n")){if(line.isEmpty())continue;
             String more=lines+line.replace(" · "," - ")+"\n";
             if(link(email,title,head+more+tail).length()>LINK_BUDGET)break;
             lines.setLength(0);lines.append(more);}
+        if(lines.length()==0){
+            String newest="";for(String line:log.split("\n"))if(!line.isEmpty()){newest=line.replace(" · "," - ");break;}
+            // The newest log line says more than the outer frames of a long trace or the end of a long Where:
+            // shorten the trace to its first frames, then Where, then the rest of the trace, until it fits.
+            while(!newest.isEmpty()){
+                if(trace.contains(" < "))trace=fewerFrames(trace);
+                else if(said.length()>place.length()+24)said=shorter(said);
+                else if(!trace.isEmpty())trace="";
+                else break;
+                head=head(logId,said,watch,android,version,button,network,state,trace)+logHead;
+                if(link(email,title,head+newest+"\n"+tail).length()<=LINK_BUDGET){lines.append(newest).append('\n');break;}
+            }
+        }
         return link(email,title,head+(lines.length()==0?"none\n":lines.toString())+tail);
+    }
+    private static String head(String logId,String said,String watch,String android,String version,boolean button,String network,String state,String trace){
+        return (logId.isEmpty()?"":"Log ID: "+clean(logId)+"\n")+(said.isEmpty()?"":"Where: "+said+"\n")+"Watch: "+clean(watch)+"\nAndroid: "+clean(android)+"\nGrok Wear: "+clean(version)+"\nAssistant button: "+(button?"on":"off")
+            +"\nNetwork: "+clean(network)+(state.isEmpty()?"":"\nState: "+clean(state,160).replace(" · "," - "))+(trace.isEmpty()?"":"\nError: "+trace);
+    }
+    private static String shorter(String text){return text.length()>24?text.substring(0,text.length()-24).trim()+"..":"";}
+    /** The trace without its outermost frame: "a < b < c" becomes "a < b <..". */
+    private static String fewerFrames(String trace){
+        String rest=trace.endsWith(" <..")?trace.substring(0,trace.length()-4):trace;
+        int at=rest.lastIndexOf(" < ");return at>0?rest.substring(0,at)+" <..":rest;
     }
     /** Mail apps read a space only as %20 (RFC 6068); GitHub also takes "+", which is shorter. */
     private static String link(boolean email,String title,String body){

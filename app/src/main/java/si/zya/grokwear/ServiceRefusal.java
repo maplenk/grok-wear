@@ -43,6 +43,8 @@ final class ServiceRefusal {
 
     /** A team that was chosen at sign-in and no longer applies: Android drops it and asks again without it. */
     boolean staleTeam(){return status==401&&STALE_TEAM.equals(scope);}
+    /** Grok no longer supports this client version (x-cursor-client-version). */
+    boolean updateRequired(){return "SAND_CLIENT_UPDATE_REQUIRED".equals(hint);}
     /**
      * Like the desktop client: an unauthenticated or permission-denied refusal that carries no failure hint
      * is about the account's access to Grok Bot, which GetSandAccessStatus explains.

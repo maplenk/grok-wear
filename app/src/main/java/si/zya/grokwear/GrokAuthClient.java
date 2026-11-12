@@ -22,8 +22,13 @@ final class GrokAuthClient {
     private static final OkHttpClient ACCESS=HTTP.newBuilder().callTimeout(10,TimeUnit.SECONDS).build();
     static void networkChanged(){try{HTTP.connectionPool().evictAll();}catch(RuntimeException ignored){}}
     final GrokAuthCore core;
+    // A newer client version learned from Grok's update feed, kept across restarts. Not account data, so
+    // signing out keeps it; an app update with a newer built-in version replaces it.
+    private static final String CLIENT_PREFS="grokwear_client",CLIENT_VERSION="client_version";
     GrokAuthClient(Context context) {
         Context app=context.getApplicationContext()==null?context:context.getApplicationContext();
+        try{GrokAuthCore.useClientVersion(app.getSharedPreferences(CLIENT_PREFS,Context.MODE_PRIVATE).getString(CLIENT_VERSION,""));}
+        catch(RuntimeException unavailable){}
         core=new GrokAuthCore(new GrokAuthVault(context),(operation,input)->timed(app,operation,input),System::currentTimeMillis,
                 text->ProblemReport.event(app,text));
     }
@@ -42,8 +47,11 @@ final class GrokAuthClient {
      */
     private static GrokAuthCore.Reply timed(Context context,String operation,JSONObject input)throws Exception {
         long started=android.os.SystemClock.elapsedRealtime();String what=what(operation);boolean poll=GrokAuthCore.POLL.equals(operation);
+        boolean version=GrokAuthCore.VERSION.equals(operation);
         try{GrokAuthCore.Reply reply=request(operation,input);long took=android.os.SystemClock.elapsedRealtime()-started;
-            boolean failed=reply.status!=200&&!(poll&&reply.status==404);
+            if(version&&reply.status==200)remember(context,reply.body.optString("version",""));
+            // The update feed answers 204 when there's nothing newer.
+            boolean failed=reply.status!=200&&!(poll&&reply.status==404)&&!(version&&reply.status==204);
             if(failed||(!poll&&took>=3000))
                 ProblemReport.event(context,what+": "+(reply.status==200?"ok":reply.refusal.summary())+" · "+ProblemReport.seconds(took)+" · "+ProblemReport.network(context));
             return reply;}
@@ -51,10 +59,17 @@ final class GrokAuthClient {
             ProblemReport.note(context,what,failed,"after "+ProblemReport.seconds(android.os.SystemClock.elapsedRealtime()-started)+" · "+ProblemReport.network(context));
             throw failed;}
     }
+    /** Keeps a newer client version from the update feed for the next start; the core decides whether to use it. */
+    private static void remember(Context context,String latest){
+        if(!GrokAuthCore.newer(latest,GrokAuthCore.clientVersion()))return;
+        try{context.getSharedPreferences(CLIENT_PREFS,Context.MODE_PRIVATE).edit().putString(CLIENT_VERSION,latest).apply();}
+        catch(RuntimeException unavailable){}
+    }
     private static String what(String operation){
         switch(operation){
             case GrokAuthCore.BOOTSTRAP:return "Bot sandbox start";
             case GrokAuthCore.ACCESS:return "Access check";
+            case GrokAuthCore.VERSION:return "Client version check";
             case GrokAuthCore.POLL:return "Sign-in check";
             default:return "Sign-in renewal";
         }
@@ -69,12 +84,20 @@ final class GrokAuthClient {
             JSONObject body=new JSONObject().put("client_id",GrokAuthCore.CLIENT_ID).put("grant_type","refresh_token")
                     .put("refresh_token",input.getString("refreshToken"));
             request.url(GrokAuthCore.BACKEND+"/oauth/token").post(json(body));
+        } else if(GrokAuthCore.VERSION.equals(operation)) {
+            // Grok Bot desktop's own update check (api2.cursor.sh/updates), for the Linux build because its reply
+            // names the version. No credentials; the install ID it asks for is random each time.
+            String current=input.getString("current");
+            if(!current.matches("\\d{1,4}\\.\\d{1,4}\\.\\d{1,6}"))throw new GrokCore.Failure("Unexpected client version.",true);
+            HttpUrl url=HttpUrl.get(GrokAuthCore.BACKEND+"/updates/api/update/linux-x64/sand").newBuilder()
+                    .addPathSegment(current).addPathSegment(java.util.UUID.randomUUID().toString()).addPathSegment("stable").build();
+            request=new Request.Builder().url(url).get();
         } else if(GrokAuthCore.BOOTSTRAP.equals(operation)||GrokAuthCore.ACCESS.equals(operation)) {
             String path=GrokAuthCore.BOOTSTRAP.equals(operation)?"/aiserver.v1.GrokBotService/EnsureSandBox":"/aiserver.v1.DashboardService/GetSandAccessStatus";
             request.url(GrokAuthCore.BACKEND+path).post(json(new JSONObject()))
                     .header("Authorization","Bearer "+input.getString("accessToken"))
                     .header("connect-protocol-version","1").header("x-cursor-client-type","sand")
-                    .header("x-cursor-client-version","0.71.2").header("x-sand-box-namespace","prod");
+                    .header("x-cursor-client-version",GrokAuthCore.clientVersion()).header("x-sand-box-namespace","prod");
             if(input.has("selectedTeamId"))request.header("x-cursor-team-id",Long.toString(input.getLong("selectedTeamId")));
         } else throw new GrokCore.Failure("This Grok sign-in operation is not enabled.",true);
         OkHttpClient client=GrokAuthCore.BOOTSTRAP.equals(operation)?SANDBOX:GrokAuthCore.ACCESS.equals(operation)?ACCESS:HTTP;

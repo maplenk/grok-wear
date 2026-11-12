@@ -98,7 +98,7 @@ public class ProblemReportTest {
         assertFalse("mail apps show + literally",url.contains("+"));
         assertTrue(url.length()<=ProblemReport.LINK_BUDGET);
         String body=URLDecoder.decode(url.substring(url.indexOf("&body=")+6),"UTF-8");
-        assertTrue(body.contains("Network: Wi-Fi\nState: 7 Bots · main Bot set · loaded 2 min ago · reply alerts on · battery 54%\nLog (UTC, newest first):\n10-29 14:02Z Bot list: HTTP 503 - after 0.8 s - Wi-Fi\n"));
+        assertTrue(body.contains("Network: Wi-Fi\nState: 7 Bots - main Bot set - loaded 2 min ago - reply alerts on - battery 54%\nLog (UTC, newest first):\n10-29 14:02Z Bot list: HTTP 503 - after 0.8 s - Wi-Fi\n"));
     }
 
     @Test public void encodingLeavesQueryCharactersAndDecodesBack() throws Exception {
@@ -141,5 +141,17 @@ public class ProblemReportTest {
         String decoded=URLDecoder.decode(ProblemReport.url("samsung SM-L300","14 (API 34)","0.6.2 (33)",true,"Wi-Fi","","Bot list: Bots aren’t available yet",error,
             "11-01 16:18Z Bot list: ResponseTooLarge · after 5.4 s · Wi-Fi 30 Mbps",false),"UTF-8");
         assertTrue(decoded,decoded.contains("\nError: 11-01 16:18Z Bot list: ResponseTooLarge (reply over 1 MB) at GrokVault.readBounded:121 < BotAccount.execute:380 - via Failure\nLog (UTC, newest first):\n11-01 16:18Z Bot list"));
+    }
+    @Test public void clintsReportKeepsItsNewestLogLineByShorteningTheTrace() throws Exception {
+        // 0.6.3 (2026-11-11): a long Where and trace left no room, and the report said "Log: none".
+        String where="Needs attention: Grok is still connecting or could not finish connecting. Try again shortly. No message was sent.";
+        String error="11-11 20:20Z Account: Failure at GrokAuthCore.failure:488 ← GrokAuthCore.bootstrapBusy:449 ← GrokAuthCore.pendingRoot:445 ← GrokAuthCore.poll:101";
+        String state="0 Bots (none loaded) · main Bot unknown · loaded never · reply alerts off · sign-in ready, team no, token 86399 min · battery 81%";
+        String log="11-11 20:20Z Bot sandbox start: HTTP 401 unauthenticated sand_client_update_required · 0.8 s · Wi-Fi 16 Mbps\n11-11 20:19Z Sign-in check: ok\n";
+        String url=ProblemReport.url("samsung SM-L715U","17 (API 37)","0.6.3 (35)",false,"Wi-Fi, est. 16 Mbps down, 12 Mbps up, signal -62 dBm",state,where,error,log,true,"");
+        assertTrue(url.length()<=ProblemReport.LINK_BUDGET);
+        String body=URLDecoder.decode(url.substring(url.indexOf("&body=")+6).replace("+","%2B"),"UTF-8");
+        assertTrue(body,body.contains("Log (UTC, newest first):\n11-11 20:20Z Bot sandbox start: HTTP 401 unauthenticated sand_client_update_required"));
+        assertTrue(body,body.contains("\nError: 11-11 20:20Z Account: Failure at GrokAuthCore.failure:488"));
     }
 }
