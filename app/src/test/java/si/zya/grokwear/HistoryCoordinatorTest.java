@@ -46,6 +46,25 @@ public class HistoryCoordinatorTest {
         raw.put(new JSONObject().put("id","suppressed-card").put("kind","send-message").put("suppressed",true).put("message",new JSONObject().put("type","text").put("content","hidden")));
         f.page.put("entries",raw);JSONArray result=f.core.page(f.current,null,20).getJSONArray("entries");assertEquals(2,result.length());assertEquals("user",result.getJSONObject(0).getString("role"));assertEquals("Hello",result.getJSONObject(1).getString("text"));assertFalse(result.toString().contains("do-not-render"));
     }
+    @Test public void approvalRequestsBecomeCardsWithTheirIds()throws Exception {
+        Fixture f=new Fixture();JSONObject request=ApprovalsTest.entry("pending",ApprovalsTest.phoneCall()).put("seq",7);request.remove("author");
+        f.page.put("entries",new JSONArray().put(text("u","user","Book dinner",1)).put(request)
+            .put(ApprovalsTest.entry("pending",null).put("id","hidden").put("suppressed",true)));
+        JSONArray result=f.core.page(f.current,null,20).getJSONArray("entries");assertEquals(2,result.length());
+        JSONObject card=result.getJSONObject(1);assertEquals("approval",card.getString("role"));assertEquals("Book a table for 2 at 7pm tonight",card.getString("text"));
+        JSONObject approval=card.getJSONObject("approval");assertEquals("req_9",approval.getString("requestId"));assertEquals("ent_123",approval.getString("entryId"));
+        assertEquals("no author: the chat's Bot","bot-a",approval.getString("agentId"));
+        // A voice call's context skips it: only what was said counts.
+        JSONArray turns=f.core.prepare(f.current).turns();assertEquals(1,turns.length());assertEquals("u",turns.getJSONObject(0).getString("id"));
+    }
+    @Test public void phoneCallsBecomeCardsWithTheirCallId()throws Exception {
+        Fixture f=new Fixture();
+        f.page.put("entries",new JSONArray().put(text("u","user","Book dinner",1)).put(PhoneCallsTest.entry(PhoneCallsTest.call()).put("seq",8).put("timestampMs",2)));
+        JSONArray result=f.core.page(f.current,null,20).getJSONArray("entries");assertEquals(2,result.length());
+        JSONObject card=result.getJSONObject(1);assertEquals("call",card.getString("role"));assertEquals("Phone call to Luigi's Trattoria",card.getString("text"));
+        assertEquals("oc_77",card.getJSONObject("call").getString("callId"));assertFalse(card.has("approval"));
+        JSONArray turns=f.core.prepare(f.current).turns();assertEquals(1,turns.length());
+    }
     @Test public void paginationUsesReturnedCursorAndKnownSessionExactly()throws Exception {
         Fixture f=new Fixture();f.current.put("sessionId","dm:known");f.page.put("nextBeforeSeq",123).put("entries",new JSONArray().put(text("r","user","test",1).put("seq",124)));
         JSONObject first=f.core.page(f.current,null,20);assertTrue(first.getBoolean("hasMore"));assertEquals(123,first.getLong("nextBeforeSeq"));

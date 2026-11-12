@@ -5,7 +5,8 @@ import java.util.LinkedHashMap;
 
 /**
  * The gateway's live events, as Grok Bot Android 1.17.0 reads them from {gatewayUrl}/events: a roster row
- * whenever a Bot changes (agent-upserted) and each chat entry as it is appended (transcript). Framing,
+ * whenever a Bot changes (agent-upserted), each chat entry as it is appended (transcript) and, as 1.25.0 reads
+ * them, Grok's usage-limit notices (tray; see UsageTrays). Framing,
  * parsing and the reply-alert rules live here without Android, so they can be tested; EventStream connects.
  */
 final class BotEvents {
@@ -26,7 +27,7 @@ final class BotEvents {
         }
     }
 
-    /** One event the watch acts on: a sanitized roster row ("bot") or a reduced chat entry ("entry"). */
+    /** One event the watch acts on: a sanitized roster row ("bot"), a reduced chat entry ("entry") or a usage-limit notice change ("tray"). */
     static final class Event {
         final String kind,botId;final JSONObject value;
         Event(String kind,String botId,JSONObject value){this.kind=kind;this.botId=botId;this.value=value;}
@@ -39,16 +40,52 @@ final class BotEvents {
                 // The same reduction as listAgents rows. Live rows come without photos; callers keep the saved one.
                 JSONObject row=GrokCore.rosterRow(payload.optJSONObject("agent"),0);
                 return row==null?null:new Event("bot",row.getString("id"),row);}
-            if(channel.equals("transcript")&&"appended".equals(GrokCore.text(payload,"type"))){
+            String type=GrokCore.text(payload,"type");
+            if(channel.equals("transcript")&&(type.equals("appended")||type.equals("updated"))){
                 String botId=GrokCore.text(payload,"agentId");JSONObject entry=entry(payload.optJSONObject("entry"));
+                // A changed entry matters only as an approval request answered or expired elsewhere, or a phone call
+                // moving on (FEATURES-SPEC §0.3).
+                if(type.equals("updated")&&(entry==null||!entry.has("approval")&&!entry.has("call")))return null;
                 return botId.isEmpty()||botId.length()>512||entry==null?null:new Event("entry",botId,entry);}
+            if(channel.equals("tray"))return tray(payload);
         }catch(Exception malformed){}
         return null;
     }
     /**
+     * A tray event ("tray"), kept only as far as Grok's usage-limit notices go (kind "error", errorKind "usage_limit"):
+     * pushed {tray}, dismissed {id} or cleared, as the official app applies them. Another kind of tray pushed under an
+     * id reads as that id's dismissal, since an upsert replaces whatever it was. Snapshots and the rest are null.
+     */
+    static Event tray(JSONObject payload)throws Exception {
+        String type=GrokCore.text(payload,"type");
+        if(type.equals("cleared"))return new Event("tray","",new JSONObject().put("type","cleared"));
+        if(type.equals("dismissed")){String id=GrokCore.text(payload,"id");return key(id)?new Event("tray","",new JSONObject().put("type","dismissed").put("id",id)):null;}
+        JSONObject tray=type.equals("pushed")?payload.optJSONObject("tray"):null;if(tray==null)return null;
+        String id=GrokCore.text(tray,"id");if(!key(id))return null;
+        if(!"error".equals(GrokCore.text(tray,"kind"))||!"usage_limit".equals(GrokCore.text(tray,"errorKind")))
+            return new Event("tray","",new JSONObject().put("type","dismissed").put("id",id));
+        return usage(id,GrokCore.text(tray,"agentId"),tray.opt("createdAt"),GrokCore.text(tray,"title"),GrokCore.text(tray,"detail"));
+    }
+    /**
+     * A usage-limit notice as a pushed tray event: {type:"pushed", tray:{id, agentId, createdAt (epoch ms, 0 when
+     * unknown), title?, detail?}}. Also built from the server's turnFailed (ServerTranscripts). Null without both ids.
+     */
+    static Event usage(String id,String botId,Object createdAt,String title,String detail)throws Exception {
+        if(!key(id)||!key(botId))return null;
+        JSONObject tray=new JSONObject().put("id",id).put("agentId",botId).put("createdAt",ServerTranscripts.msOf(createdAt));
+        title=prose(title);detail=prose(detail);if(!title.isEmpty())tray.put("title",title);if(!detail.isEmpty())tray.put("detail",detail);
+        return new Event("tray",botId,new JSONObject().put("type","pushed").put("tray",tray));
+    }
+    /** An id fit to keep and send back: 1 to 512 characters, no control characters. */
+    static boolean key(String id){return id!=null&&!id.isEmpty()&&id.length()<=512&&!id.matches("(?s).*\\p{Cc}.*");}
+    /** Server text as one line of at most 300 characters. */
+    static String prose(String text){text=text==null?"":text.replaceAll("[\\s\\p{Cc}]+"," ").trim();return text.length()>300?text.substring(0,300):text;}
+    /**
      * A chat entry reduced to who wrote it and, for the Bot's own message, its text. Only what the chat shows
      * counts (the same rules as HistoryCoordinator): never suppressed, Bot-to-Bot, voice-channel or still
-     * streaming entries. A Bot writes to you with a text send-message entry, or an assistant message.
+     * streaming entries. A Bot writes to you with a text send-message entry, or an assistant message. A Bot's
+     * approval request also carries that approval (Approvals.of, without ids an answer would need), and a phone
+     * call it places its status.
      */
     static JSONObject entry(JSONObject e)throws Exception {
         if(e==null)return null;
@@ -61,13 +98,19 @@ final class BotEvents {
             if(message!=null&&"text".equals(message.optString("type"))&&message.optString("channel").isEmpty()){reply=true;text=GrokCore.text(message,"content");}}
         // Shown as the chat shows it: **bold** and other markdown marks never reach a notification.
         text=MessageText.plain(text).replaceAll("[\\s\\p{Cc}]+"," ").trim();if(text.length()>4096)text=text.substring(0,4096);
-        return new JSONObject().put("reply",reply).put("user",user).put("text",reply?text:"");
+        JSONObject out=new JSONObject().put("reply",reply).put("user",user).put("text",reply?text:"");
+        JSONObject approval=hidden||!kind.equals("send-message")?null:Approvals.of(e,"");
+        if(approval!=null)out.put("approval",new JSONObject().put("status",approval.getString("status")).put("kind",approval.getString("kind")).put("line",approval.getString("line")));
+        JSONObject call=hidden||approval!=null||!kind.equals("send-message")?null:PhoneCalls.of(e);
+        if(call!=null)out.put("call",new JSONObject().put("status",call.getString("status")));
+        return out;
     }
     private static boolean present(JSONObject e,String key){return e.opt(key)!=null&&e.opt(key)!=JSONObject.NULL;}
 
     /**
      * The Bots a reply alert is waiting on after you sent them a message. A wait ends at the Bot's next
-     * message, or, if the stream missed it, when its unread count goes up. It lapses ten minutes after the
+     * message, or, if the stream missed it, when its unread count goes up, or at Grok's notice that the Bot
+     * is out of usage. It lapses ten minutes after the
      * send, or once the Bot has been idle for two minutes without writing back.
      */
     static final class Waits {
@@ -90,9 +133,15 @@ final class BotEvents {
         boolean waiting(String botId){return waits.containsKey(botId);}
         String firstName(){return waits.isEmpty()?"":waits.values().iterator().next().name;}
         int size(){return waits.size();}
-        /** Returns the alert ({bot, name, text}) when this entry is the Bot's reply, else null. */
+        /**
+         * Returns the alert ({bot, name, text}) when this entry is the Bot's reply, else null. A Bot that asks for your
+         * OK first won't go on without it: that request ends the wait too ({…, approval:true}, its one line as text).
+         */
         JSONObject entry(String botId,JSONObject entry)throws Exception {
-            Wait wait=waits.get(botId);if(wait==null||!entry.optBoolean("reply"))return null;
+            Wait wait=waits.get(botId);if(wait==null)return null;
+            JSONObject approval=entry.optJSONObject("approval");
+            if(approval!=null&&"pending".equals(approval.optString("status"))){waits.remove(botId);return alert(botId,wait,approval.optString("line")).put("approval",true);}
+            if(!entry.optBoolean("reply"))return null;
             waits.remove(botId);return alert(botId,wait,entry.optString("text"));
         }
         /** Tracks the Bot's working state and unread count; returns the alert when the count went up. */
@@ -103,6 +152,21 @@ final class BotEvents {
             if(!row.has("unreadCount"))return null;long unread=row.optLong("unreadCount");
             if(wait.unread>=0&&unread>wait.unread){waits.remove(id);return alert(id,wait,row.optString("lastMessagePreview"));}
             wait.unread=unread;return null; // The first count seen is the baseline; reading elsewhere lowers it.
+        }
+        /** The words a usage-limit alert shows, as the official app words its notice. */
+        static final String USAGE_TITLE="Out of usage",USAGE_TEXT="This Bot is out of usage until it resets.";
+        /** Watch and server clocks differ: a notice stamped up to this long before the send still counts as after it. */
+        static final long CLOCK_GRACE_MS=2*60_000L;
+        /**
+         * Grok's usage-limit notice (a pushed tray) for a waited-on Bot, from after the watch's message: the reply won't
+         * come, so the wait ends with that notice ({bot, name, text, usage:true}). now is the wait's clock, wall the
+         * wall clock, to place the send against the notice's createdAt. An older notice repeated is not this message's.
+         */
+        JSONObject usage(JSONObject tray,long now,long wall)throws Exception {
+            String id=tray==null?"":tray.optString("agentId");Wait wait=waits.get(id);if(wait==null)return null;
+            long created=tray.optLong("createdAt"),sent=wall-(now-wait.since);
+            if(created>0&&created<sent-CLOCK_GRACE_MS)return null;
+            waits.remove(id);return alert(id,wait,USAGE_TEXT).put("usage",true);
         }
         void expire(long now){waits.values().removeIf(w->now-w.since>LIMIT_MS||(w.idleSince>0&&now-w.idleSince>QUIET_MS));}
         void clear(){waits.clear();}

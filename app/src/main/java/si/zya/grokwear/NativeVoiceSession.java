@@ -22,6 +22,13 @@ import okio.ByteString;
 
 /** One bounded voice call: lookups and tasks through the Bot's harness, reconnecting a dropped line. Never logs or persists audio/secrets. */
 public final class NativeVoiceSession {
+    /**
+     * The call's harness session request. Like Grok Bot Android 1.25.0 it says whether the caller has an in-call
+     * Speed control: the watch doesn't, so the Bot never points to one.
+     */
+    static JSONObject sessionRequest(String botId,String botName) throws org.json.JSONException {
+        return new JSONObject().put("agentId",botId).put("agentName",botName).put("hasSpeedSetting",false);
+    }
     public interface Listener {
         /** Content-free diagnostic line (counts, phases, fixed tokens only). */
         default void onDiagnostic(String line){}
@@ -321,17 +328,20 @@ public final class NativeVoiceSession {
             try {
                 if(terminal.get())return;
                 startupGuard.check();
-                plan=preparedPlan!=null?preparedPlan:backend.request("VoiceCallHarnessSession",new JSONObject().put("agentId",botId).put("agentName",botName));
+                plan=preparedPlan!=null?preparedPlan:backend.request("VoiceCallHarnessSession",sessionRequest(botId,botName));
                 preparedPlan=null;
                 if(terminal.get())return;
                 JSONArray tools=plan.optJSONArray("tools");
-                JSONArray filtered=new JSONArray();
+                JSONArray filtered=new JSONArray();StringBuilder dropped=new StringBuilder();
                 if(tools!=null)for(int i=0;i<tools.length();i++) {
                     JSONObject tool=tools.optJSONObject(i);
                     if(tool==null)continue;
                     String name=tool.optString("name","");
                     if(CALL_TOOLS.contains(name)){filtered.put(new JSONObject(tool.toString()));offered.add(name);}
+                    else if(name.matches("[a-z_]{1,40}"))dropped.append(dropped.length()>0?" ":"").append(name);
                 }
+                // Server tools the watch can't serve, by name only: shows when Grok starts offering new ones.
+                if(dropped.length()>0)android.util.Log.i("GrokWearVoice","call_tools dropped="+dropped);
                 plan.put("tools",filtered);
                 if(plan.optString("instructions","").isEmpty())throw new IllegalArgumentException();
                 if(terminal.get())return;

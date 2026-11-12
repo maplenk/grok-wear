@@ -21,8 +21,10 @@ final class EventStream {
         void entry(String identity,String botId,JSONObject entry);
         /** The stream opened; after a gap (again) events may have been missed, so read once the usual way. */
         default void connected(String identity,boolean again){}
+        /** Grok's usage-limit notices changed (UsageTrays, already applied): pushed is the new notice, or null when one went. */
+        default void usage(String identity,JSONObject pushed){}
     }
-    static final String CHANNELS="transcript,agent-upserted";
+    static final String CHANNELS="transcript,agent-upserted,tray";
     // Leaving the app for the message picker or a permission dialog shouldn't drop and redial the stream.
     private static final long LINGER_MS=20000;
     private static final long[] BACKOFF={1000,2000,5000,10000,30000,60000};
@@ -37,6 +39,8 @@ final class EventStream {
 
     static synchronized void add(Context context,Listener listener){
         LISTENERS.add(listener);MAIN.removeCallbacks(idleStop);
+        // Bots run on Grok's server get their state from the server's own stream, alongside this one.
+        ServerEvents.start(context);
         if(running){kick();return;} // A stream waiting out the linger dials again now.
         app=context.getApplicationContext();running=true;final long mine=++generation;
         watchNetwork();
@@ -47,7 +51,8 @@ final class EventStream {
         if(LISTENERS.isEmpty()){MAIN.removeCallbacks(idleStop);MAIN.postDelayed(idleStop,LINGER_MS);}
     }
     /** The account changed (say, signed out): drop this connection; the next attempt reads the new state. */
-    static void restart(){okhttp3.Call call=live;if(call!=null)call.cancel();kick();}
+    static void restart(){okhttp3.Call call=live;if(call!=null)call.cancel();kick();ServerEvents.restart();UsageTrays.ALL.clear();}
+    static Set<Listener> listeners(){return LISTENERS;}
     /** The app's account is this one: a stream still on another (signed out, then in again) starts over. */
     static void expect(String identity){String now=identityNow;if(!now.isEmpty()&&!now.equals(identity))restart();}
     /** True while the stream is connected, so polling can back off. */
@@ -55,7 +60,7 @@ final class EventStream {
     private static synchronized void stopIfIdle(){
         if(!LISTENERS.isEmpty()||!running)return;
         running=false;generation++;open=false;identityNow="";unwatchNetwork();
-        okhttp3.Call call=live;if(call!=null)call.cancel();kick();
+        okhttp3.Call call=live;if(call!=null)call.cancel();kick();ServerEvents.stop();
     }
     private static synchronized boolean current(long mine){return running&&generation==mine;}
     private static synchronized void stopSignedOut(long mine){if(!current(mine))return;running=false;generation++;open=false;identityNow="";unwatchNetwork();}
@@ -80,9 +85,16 @@ final class EventStream {
                 }
                 public boolean frame(String data){
                     if(!current(mine))return false;BotEvents.Event event=BotEvents.parse(data);if(event==null)return true;
+                    // While the server stream is up, a server Bot's state comes from there, not the gateway's copy.
+                    if(event.kind.equals("bot")&&ServerEvents.isOpen()&&GrokCore.SERVER_HARNESS.equals(event.value.optString("harness")))return true;
+                    // Likewise a chat the server stream follows: its entries come from there, so skip the gateway's copies.
+                    if(event.kind.equals("entry")&&ServerEvents.covers(event.botId))return true;
                     final String account=identity[0];
+                    // Usage notices are kept once for the process; listeners hear only a change.
+                    if(event.kind.equals("tray")&&!UsageTrays.ALL.apply(account,event))return true;
                     MAIN.post(()->{if(!current(mine))return;
-                        for(Listener l:LISTENERS){if(event.kind.equals("bot"))l.bot(account,event.value);else l.entry(account,event.botId,event.value);}});
+                        for(Listener l:LISTENERS){if(event.kind.equals("bot"))l.bot(account,event.value);
+                            else if(event.kind.equals("tray"))l.usage(account,event.value.optJSONObject("tray"));else l.entry(account,event.botId,event.value);}});
                     return true;
                 }
             });}
@@ -112,7 +124,7 @@ final class EventStream {
             @Override public void onAvailable(android.net.Network available){
                 // The first call reports the current network; a different one later means a switch (say Bluetooth to Wi-Fi).
                 boolean switched=defaultNetwork!=null&&!available.equals(defaultNetwork);defaultNetwork=available;
-                if(switched){okhttp3.Call call=live;if(call!=null)call.cancel();}kick();}
+                if(switched){okhttp3.Call call=live;if(call!=null)call.cancel();ServerEvents.restart();}kick();}
             @Override public void onLost(android.net.Network lost){
                 if(lost.equals(defaultNetwork))defaultNetwork=null;BotAccount.networkChanged();
                 okhttp3.Call call=live;if(call!=null)call.cancel();}

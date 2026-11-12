@@ -126,4 +126,101 @@ public class BotEventsTest {
         assertTrue(BotEvents.entry(reply("Shown").put("suppressed",JSONObject.NULL).put("toAgent",JSONObject.NULL)).getBoolean("reply"));
         assertFalse("a tool step is neither",BotEvents.entry(new JSONObject().put("kind","tool-call").put("role","assistant")).getBoolean("reply"));
     }
+
+    // Tray frames shaped like FEATURES-SPEC §1.2–1.3 (Grok Bot Android 1.25.0); all values synthetic.
+    private static String tray(JSONObject payload)throws Exception{return new JSONObject().put("channel","tray").put("payload",payload).toString();}
+    private static String pushed(JSONObject tray)throws Exception{return tray(new JSONObject().put("type","pushed").put("tray",tray));}
+    private static JSONObject usageTray(String id)throws Exception{
+        return new JSONObject().put("kind","error").put("id",id).put("agentId","bot-1").put("createdAt",1762958400123L).put("count",1)
+            .put("title","Usage limit reached").put("errorKind","usage_limit").put("detail","You've used this period's Bot allowance.")
+            .put("actions",new JSONArray().put(new JSONObject().put("kind","open-url").put("label","Manage usage").put("url","https://example.invalid/usage")));
+    }
+    @Test public void aPushedUsageTrayBecomesAUsageNotice()throws Exception{
+        BotEvents.Event event=BotEvents.parse(pushed(usageTray("tray_1")));
+        assertEquals("tray",event.kind);assertEquals("bot-1",event.botId);assertEquals("pushed",event.value.getString("type"));
+        JSONObject notice=event.value.getJSONObject("tray");
+        assertEquals("tray_1",notice.getString("id"));assertEquals("bot-1",notice.getString("agentId"));assertEquals(1762958400123L,notice.getLong("createdAt"));
+        assertEquals("Usage limit reached",notice.getString("title"));assertEquals("You've used this period's Bot allowance.",notice.getString("detail"));
+        assertFalse("actions (top-up links) are never kept",notice.has("actions"));
+        assertEquals("a string time reads too",5L,BotEvents.parse(pushed(usageTray("t").put("createdAt","5"))).value.getJSONObject("tray").getLong("createdAt"));
+        assertEquals("no time is 0",0L,BotEvents.parse(pushed(usageTray("t").put("createdAt",JSONObject.NULL))).value.getJSONObject("tray").getLong("createdAt"));
+    }
+    @Test public void trayTextIsBoundedAndOneLine()throws Exception{
+        char[] many=new char[513];java.util.Arrays.fill(many,'a');String long513=new String(many);
+        JSONObject notice=BotEvents.parse(pushed(usageTray("tray_1").put("title","  Usage\n\tlimit\u0007 reached ").put("detail",long513))).value.getJSONObject("tray");
+        assertEquals("Usage limit reached",notice.getString("title"));assertEquals(300,notice.getString("detail").length());
+        assertFalse("blank text is left out",BotEvents.parse(pushed(usageTray("t").put("title"," \n"))).value.getJSONObject("tray").has("title"));
+        assertNull("an id over 512 characters",BotEvents.parse(pushed(usageTray(long513))));
+        assertNotNull("512 is fine",BotEvents.parse(pushed(usageTray(long513.substring(1)))));
+        assertNull("a Bot id over 512 characters",BotEvents.parse(pushed(usageTray("t").put("agentId",long513))));
+        assertNull("no Bot",BotEvents.parse(pushed(usageTray("t").put("agentId",""))));
+        assertNull("a Bot id that isn't text",BotEvents.parse(pushed(usageTray("t").put("agentId",7))));
+        assertNull("a control character in an id",BotEvents.parse(pushed(usageTray("t\n1"))));
+        assertNull("no id",BotEvents.parse(pushed(usageTray(""))));
+    }
+    @Test public void onlyUsageLimitErrorTraysCount()throws Exception{
+        // Another tray pushed under an id replaces it: that id is no longer a usage notice.
+        BotEvents.Event other=BotEvents.parse(pushed(usageTray("tray_2").put("errorKind","provider_overloaded")));
+        assertEquals("tray",other.kind);assertEquals("dismissed",other.value.getString("type"));assertEquals("tray_2",other.value.getString("id"));
+        assertEquals("dismissed",BotEvents.parse(pushed(usageTray("tray_3").put("kind","info"))).value.getString("type"));
+        JSONObject noKind=usageTray("tray_4");noKind.remove("errorKind");
+        assertEquals("dismissed",BotEvents.parse(pushed(noKind)).value.getString("type"));
+        BotEvents.Event dismissed=BotEvents.parse(tray(new JSONObject().put("type","dismissed").put("id","tray_1")));
+        assertEquals("tray",dismissed.kind);assertEquals("dismissed",dismissed.value.getString("type"));assertEquals("tray_1",dismissed.value.getString("id"));
+        assertEquals("cleared",BotEvents.parse(tray(new JSONObject().put("type","cleared"))).value.getString("type"));
+        assertNull("snapshots are left to a reread",BotEvents.parse(tray(new JSONObject().put("type","snapshot").put("trays",new JSONArray().put(usageTray("tray_1"))))));
+        assertNull(BotEvents.parse(tray(new JSONObject().put("type","dismissed"))));
+        assertNull(BotEvents.parse(tray(new JSONObject().put("type","pushed"))));
+        assertNull(BotEvents.parse(tray(new JSONObject().put("type","pushed").put("tray","not an object"))));
+        assertNull(BotEvents.parse(new JSONObject().put("channel","tray").put("payload",JSONObject.NULL).toString()));
+    }
+    @Test public void aUsageNoticeAfterTheSendEndsTheWaitWithItsWords()throws Exception{
+        long wall=1_800_000_000_000L;
+        BotEvents.Waits waits=new BotEvents.Waits();waits.start("bot-1","Synthetic Bot","m1",1000);
+        JSONObject notice=BotEvents.parse(pushed(usageTray("tray_1").put("createdAt",wall))).value.getJSONObject("tray");
+        assertNull("other Bots don't end it",waits.usage(new JSONObject(notice.toString()).put("agentId","bot-2"),6000,wall));
+        // Sent five seconds before now: a notice from well before the send is an older one, repeated.
+        assertNull(waits.usage(new JSONObject(notice.toString()).put("createdAt",wall-5000-BotEvents.Waits.CLOCK_GRACE_MS-1),6000,wall));
+        assertTrue(waits.waiting("bot-1"));
+        JSONObject alert=waits.usage(new JSONObject(notice.toString()).put("createdAt",wall-5000-BotEvents.Waits.CLOCK_GRACE_MS),6000,wall);
+        assertEquals("a server clock a little behind still counts","bot-1",alert.getString("bot"));assertTrue(alert.getBoolean("usage"));
+        assertEquals("Synthetic Bot",alert.getString("name"));assertEquals("This Bot is out of usage until it resets.",alert.getString("text"));
+        assertTrue(waits.isEmpty());
+        waits.start("bot-1","Synthetic Bot","m2",1000);
+        assertNotNull("a notice without a time counts",waits.usage(new JSONObject(notice.toString()).put("createdAt",0),6000,wall));
+        assertNull("nothing left to end",waits.usage(notice,6000,wall));
+    }
+
+    private static String transcript(String type,String botId,JSONObject entry)throws Exception{
+        return new JSONObject().put("channel","transcript").put("payload",new JSONObject().put("type",type).put("agentId",botId).put("entry",entry)).toString();
+    }
+    @Test public void approvalRequestsComeLiveAndSoDoTheirAnswers()throws Exception{
+        JSONObject pending=ApprovalsTest.entry("pending",ApprovalsTest.phoneCall());
+        BotEvents.Event asked=BotEvents.parse(transcript("appended","agt_A",pending));
+        assertEquals("entry",asked.kind);assertFalse("not a reply",asked.value.getBoolean("reply"));
+        JSONObject approval=asked.value.getJSONObject("approval");
+        assertEquals("pending",approval.getString("status"));assertEquals("phone_call",approval.getString("kind"));assertEquals("Book a table for 2 at 7pm tonight",approval.getString("line"));
+        assertFalse("ids stay with the chat page, not the event",approval.has("requestId"));
+        // Answered or expired elsewhere: the same entry, changed.
+        BotEvents.Event expired=BotEvents.parse(transcript("updated","agt_A",ApprovalsTest.entry("expired",ApprovalsTest.phoneCall())));
+        assertEquals("expired",expired.value.getJSONObject("approval").getString("status"));
+        assertNull("other changed entries still don't count",BotEvents.parse(transcript("updated","bot-1",reply("x"))));
+        assertNull("a hidden one doesn't",BotEvents.parse(transcript("appended","agt_A",ApprovalsTest.entry("pending",null).put("toAgent","agt_B"))).value.optJSONObject("approval"));
+        assertNull(BotEvents.parse(transcript("removed","agt_A",pending)));
+    }
+    @Test public void aPhoneCallMovingOnComesLive()throws Exception{
+        BotEvents.Event placed=BotEvents.parse(transcript("appended","agt_A",PhoneCallsTest.entry(PhoneCallsTest.call().put("status","dialing"))));
+        assertEquals("dialing",placed.value.getJSONObject("call").getString("status"));assertFalse(placed.value.getBoolean("reply"));
+        BotEvents.Event ended=BotEvents.parse(transcript("updated","agt_A",PhoneCallsTest.entry(PhoneCallsTest.call().put("status","ended"))));
+        assertEquals("ended",ended.value.getJSONObject("call").getString("status"));assertFalse(ended.value.has("approval"));
+        assertNull("not a reply alert",new BotEvents.Waits().entry("agt_A",ended.value));
+    }
+    @Test public void aRequestForYourOkEndsTheWaitWithItsLine()throws Exception{
+        BotEvents.Waits waits=new BotEvents.Waits();waits.start("agt_A","Concierge","m1",0);
+        assertNull("a settled one doesn't",waits.entry("agt_A",BotEvents.entry(ApprovalsTest.entry("denied",ApprovalsTest.phoneCall()))));
+        assertNull("another Bot's doesn't",waits.entry("agt_B",BotEvents.entry(ApprovalsTest.entry("pending",ApprovalsTest.phoneCall()))));
+        JSONObject alert=waits.entry("agt_A",BotEvents.entry(ApprovalsTest.entry("pending",ApprovalsTest.phoneCall())));
+        assertTrue(alert.getBoolean("approval"));assertEquals("Concierge",alert.getString("name"));assertEquals("Book a table for 2 at 7pm tonight",alert.getString("text"));
+        assertTrue(waits.isEmpty());
+    }
 }

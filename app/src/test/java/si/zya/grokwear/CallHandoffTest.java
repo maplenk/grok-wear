@@ -75,4 +75,18 @@ public final class CallHandoffTest {
         assertEquals("failed",CallHandoff.send(body->{sent.add(body);throw new Exception("offline");},"bot-1","call-1",Arrays.asList(CallHandoff.CALL_ENDED,"Book it"),line));
         assertEquals("A failure is never retried",1,sent.size());
     }
+    @Test public void aLongLineIsNeverCutInsideAnEmoji() {
+        StringBuilder line=new StringBuilder();
+        for(int i=0;i<CallHandoff.MAX_REQUEST-1;i++)line.append('a');
+        line.append("\uD83D\uDE00 and more");
+        String request=CallHandoff.leftoverRequest(java.util.List.of(line.toString()));
+        org.junit.Assert.assertNotNull(request);
+        org.junit.Assert.assertEquals(CallHandoff.MAX_REQUEST-1,request.length());
+        org.junit.Assert.assertFalse(Character.isHighSurrogate(request.charAt(request.length()-1)));
+    }
+    @Test public void theSessionRequestSaysTheWatchHasNoSpeedControl() throws Exception {
+        org.json.JSONObject body=NativeVoiceSession.sessionRequest("bot-1","TheBot");
+        org.junit.Assert.assertEquals(3,body.length());org.junit.Assert.assertEquals("bot-1",body.getString("agentId"));
+        org.junit.Assert.assertEquals("TheBot",body.getString("agentName"));org.junit.Assert.assertFalse(body.getBoolean("hasSpeedSetting"));
+    }
 }

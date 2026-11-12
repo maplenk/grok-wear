@@ -115,7 +115,7 @@ public final class VoiceService extends Service {
             // instructions and its lookup tools carry context, and the microphone isn't held
             // behind history pages or per-message acknowledgements. The binding still saves the call.
             VoiceStartup.Result prepared=pipeline.prepare(()->new HistoryCoordinator.Context(binding,new org.json.JSONArray()),
-                ()->{JSONObject plan=lease.request("VoiceCallHarnessSession",new JSONObject().put("agentId",bot.getString("id")).put("agentName",bot.getString("name")));planMs=sinceTalk();return plan;},
+                ()->{JSONObject plan=lease.request("VoiceCallHarnessSession",NativeVoiceSession.sessionRequest(bot.getString("id"),bot.getString("name")));planMs=sinceTalk();return plan;},
                 ()->{JSONObject credential=lease.request("MintSandVoiceCallSecret",new JSONObject());mintMs=sinceTalk();return credential;},
                 (plan,credential)->post(mine,()->openPreparedSession(mine,account,bot,binding,plan,credential,pipeline)));
             account.verifyHistoryBinding(binding,true);

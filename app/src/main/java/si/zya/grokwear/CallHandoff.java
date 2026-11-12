@@ -48,7 +48,9 @@ final class CallHandoff {
         while(!remaining.isEmpty()){
             String request=leftover(remaining);if(request==null)return null;
             if(request.length()<=MAX_REQUEST)return request;
-            if(remaining.size()==1)return request.substring(0,MAX_REQUEST).replaceAll("\\s+$","");
+            // Cut on a character boundary, never inside an emoji, as the official app's grapheme-safe slice does.
+            if(remaining.size()==1){int end=MAX_REQUEST;if(Character.isLowSurrogate(request.charAt(end))&&Character.isHighSurrogate(request.charAt(end-1)))end--;
+                return request.substring(0,end).replaceAll("\\s+$","");}
             remaining.remove(0);
         }
         return null;

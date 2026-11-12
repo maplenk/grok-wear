@@ -464,6 +464,26 @@ final class GrokCore {
      */
     synchronized void markRead(String botId) throws Exception {
         JSONObject root=linked();post(root,"setAgentUnread",new JSONObject().put("id",botId).put("isUnread",false));
+        clearUnread(botId);
+    }
+    /**
+     * The harness Grok runs this Bot on, as the Bot list gave it ("temporal" for Bots run on Grok's server),
+     * or "" when it isn't known.
+     */
+    synchronized String harnessOf(String botId) throws Exception {
+        synchronized(ACCOUNT_STATE_LOCK){
+            JSONObject root=linked(),bot=root.optJSONObject("bot");
+            if(bot!=null&&botId.equals(bot.optString("id")))return bot.optString("harness","");
+            JSONArray rows=root.optJSONArray("candidates");
+            if(rows!=null)for(int i=0;i<rows.length();i++){JSONObject row=rows.optJSONObject(i);if(row!=null&&botId.equals(row.optString("id")))return row.optString("harness","");}
+            return "";
+        }
+    }
+    /** Bots on this harness keep their chat state on Grok's server (Grok Bot Android 1.25.0's server routing). */
+    static final String SERVER_HARNESS="temporal";
+    /** Clears the saved unread badge for this Bot, so it goes at once. Local only. */
+    synchronized void clearUnread(String botId) throws Exception {
+        JSONObject root;
         synchronized(ACCOUNT_STATE_LOCK){
             root=linked();JSONArray rows=root.optJSONArray("candidates");boolean changed=false;
             if(rows!=null)for(int i=0;i<rows.length();i++){JSONObject row=rows.optJSONObject(i);if(row!=null&&botId.equals(row.optString("id"))){row.put("hasUnread",false).put("unreadCount",0);changed=true;}}
