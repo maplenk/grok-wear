@@ -195,6 +195,12 @@ final class GrokCore {
             if(value instanceof Number){double n=((Number)value).doubleValue();
                 if(Double.isFinite(n)&&n>=0&&n<=9007199254740991d&&n==Math.floor(n))candidate.put(key,((Number)value).longValue());}
         }
+        // Like the official badge (countsAsUnread): unread follow-up threads make the Bot unread too.
+        Object threads=b.opt("unreadThreadCount");
+        if(threads instanceof Number&&((Number)threads).doubleValue()>=1)candidate.put("hasUnread",true);
+        // The Bot is waiting for you (a question, a request for your OK). Only that is kept, never its words; a server
+        // row's state (ServerTranscripts.States) already says it as awaiting.
+        if(b.optJSONObject("awaitingUserResponse")!=null||Boolean.TRUE.equals(b.opt("awaiting")))candidate.put("awaiting",true);
         String preview=text(b,"lastMessagePreview");
         if(!preview.isEmpty()&&preview.length()<=4096)
             candidate.put("lastMessagePreview",preview.replaceAll("[\\s\\p{Cc}]+"," ").trim());
@@ -364,13 +370,26 @@ final class GrokCore {
         return send(root,job,admitted);
     }
     /**
-     * Sends an unconfirmed message again with the same nonce and text, as the official Android client's
-     * retry does: the service keeps one copy per nonce. At most three attempts in all.
+     * Sends an unconfirmed message, or one Grok said it never got, again with the same nonce and text, as the
+     * official Android client's retry does: the service keeps one copy per nonce. At most three attempts in all.
      */
     synchronized JSONObject retry(String id) throws Exception {
+        JSONObject root=linked(),job=find(root,id);String state=job.getString("state");
+        if(!(state.equals("unknown")||state.equals("failed")&&job.optBoolean("resend"))||job.optInt("attempts",1)>=3)return copy(job);
+        job.remove("resend");return send(root,job,()->true);
+    }
+    /** The code of a message Grok says it never got: not sent, and the user may send it again (retry). */
+    static final String NOT_RECEIVED="send/not-received";
+    /**
+     * Settles an unconfirmed message from Grok's own answer about it (GetGrokBotSendStatus): sent when notSent is
+     * null, else not sent, in its words. Never sends.
+     */
+    synchronized JSONObject settle(String id,Failure notSent) throws Exception {
         JSONObject root=linked(),job=find(root,id);
-        if(!job.getString("state").equals("unknown")||job.optInt("attempts",1)>=3)return copy(job);
-        return send(root,job,()->true);
+        if(!job.getString("state").equals("unknown"))return copy(job);
+        if(notSent==null)job.put("state","sent").put("notice","Sent");
+        else{job.put("state","failed").put("notice",safe(notSent));if(NOT_RECEIVED.equals(notSent.code))job.put("resend",true);}
+        store.write(root);return copy(job);
     }
     private JSONObject send(JSONObject root,JSONObject job,BooleanSupplier admitted)throws Exception {
         job.put("state","submitting").put("attempts",job.optInt("attempts",0)+1);store.write(root); // Durable uncertainty before touching the network.

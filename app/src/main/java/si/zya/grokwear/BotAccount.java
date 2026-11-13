@@ -89,15 +89,19 @@ final class BotAccount {
         // "@bot" stands for the selected Bot's id (or the first Bot's), so a probe needs no ids typed in.
         if("@bot".equals(body.optString("agentId"))){String id=selectedBot().optString("id");if(id.isEmpty()){JSONArray rows=core.cachedRoster(auth.state().getString("account_key"),auth.state().getString("auth_generation")).optJSONArray("bots");if(rows!=null&&rows.length()>0)id=rows.getJSONObject(0).optString("id");}body.put("agentId",id);}
         JSONObject context=auth.core.backendContext();bound();
-        return shapeOf(execute(backendRequest(method,context),body,false),"");
+        JSONObject reply=execute(backendRequest(method,context),body,false);
+        // Transcript pages: show each entry's decoded shape rather than its base64 body.
+        JSONArray entries=reply.optJSONArray("entries");if(entries!=null)for(int i=0;i<entries.length();i++){JSONObject row=entries.optJSONObject(i);JSONObject entry=row==null?null:ServerTranscripts.entryOf(row);if(entry!=null)row.put("body",entry);}
+        return shapeOf(reply,"");
     }
-    private static final java.util.Set<String> SHOWN=new java.util.HashSet<>(java.util.Arrays.asList("harness","visibility","isGroup","viewerIsOwner","hiddenFromSidebar","removedFromSidebar","notifyOnUpdatesEnabled","kind","state","status","entryId","entryKind","seq","updatedSeq","role","id","nextBeforeSeq"));
+    private static final java.util.Set<String> SHOWN=new java.util.HashSet<>(java.util.Arrays.asList("harness","visibility","isGroup","viewerIsOwner","hiddenFromSidebar","removedFromSidebar","notifyOnUpdatesEnabled","kind","state","status","entryId","entryKind","seq","updatedSeq","role","id","nextBeforeSeq","awaitingUserResponse","unreadThreadCount","unreadCount","unread","awaitingReason","needsAttention","type","fieldType","mode","resolution","options"));
     /** Debug builds: the same shape for one read-only gateway history call (getAgentTranscriptTail). */
     String gatewayProbe(JSONObject body) throws Exception {
         if(!BuildConfig.DEBUG)throw new GrokCore.Failure("Debug only.",true);
         bound();if("@bot".equals(body.optString("id")))body.put("id",selectedBot().optString("id"));
         JSONObject config=GrokCore.validateConfig(auth.currentConfig());
-        return shapeOf(gateway(config,"getAgentTranscriptTail",body),"");
+        String op=body.has("op")?String.valueOf(body.remove("op")):"getAgentTranscriptTail";
+        return shapeOf(gateway(config,op,body),"");
     }
     static String shapeOf(Object value,String key){
         if(value instanceof JSONObject){JSONObject o=(JSONObject)value;StringBuilder out=new StringBuilder("{");
@@ -121,7 +125,39 @@ final class BotAccount {
     /** A text message reviewed for this Bot; refused if the account or selected Bot changed since. */
     String prepareMessage(String text,String botId) throws Exception {bound();String id=core.prepare(text,core.view().getString("profile"),botId);bound();return id;}
     JSONObject sendMessage(String id,java.util.function.BooleanSupplier admitted) throws Exception {bound();return core.submit(id,admitted);}
-    JSONObject confirmMessage(String id) throws Exception {bound();return core.poll(id);}
+    /**
+     * Settles an unconfirmed message without sending it. One whose send through Grok's server went unanswered is
+     * asked about there (GetGrokBotSendStatus, see SendStatus), one ask per call at most every 2 s; otherwise, and
+     * once that check gives up (or Grok lacks it), the chat is read for it.
+     */
+    JSONObject confirmMessage(String id) throws Exception {
+        bound();JSONObject job=core.job(id);String nonce=job.optString("nonce");SendStatus.Check check=SendStatus.ALL.get(nonce);
+        if(check!=null&&"unknown".equals(job.optString("state"))){
+            String step=check.next(System.currentTimeMillis()),result;
+            if(SendStatus.WAITING.equals(step))return job;
+            if(SendStatus.ASK.equals(step)){
+                try{result=SendStatus.answer(sendStatus(check.request));}
+                // A lost or failed ask counts towards giving up; a refusal (or no such method) leaves it to the chat.
+                catch(GrokCore.Failure failed){result=failed.rejected||serverPathMissing(failed)?SendStatus.GIVE_UP:SendStatus.UNREACHED;}
+                catch(Exception failed){result=SendStatus.UNREACHED;}
+                switch(check.answered(result,System.currentTimeMillis())){
+                    case SendStatus.WAITING:return core.job(id);
+                    case SendStatus.SENT:SendStatus.ALL.end(nonce);return core.settle(id,null);
+                    case SendStatus.REJECTED:SendStatus.ALL.end(nonce);return core.settle(id,sendRefused(""));
+                    // Never sent again on its own: the user may (GrokCore.retry), with the same nonce.
+                    case SendStatus.NOT_FOUND:SendStatus.ALL.end(nonce);return core.settle(id,new GrokCore.Failure("Grok never got this message. Nothing was sent.",true,GrokCore.NOT_RECEIVED));
+                    default:break;
+                }
+            }
+            SendStatus.ALL.end(nonce);
+        }
+        return core.poll(id);
+    }
+    /** True while Grok is still being asked about this unconfirmed message: confirm it again in SendStatus.POLL_MS. */
+    boolean checkingSend(JSONObject job){
+        SendStatus.Check check=SendStatus.ALL.get(job.optString("nonce"));
+        return check!=null&&"unknown".equals(job.optString("state"))&&check.open(System.currentTimeMillis());
+    }
     JSONObject retryMessage(String id) throws Exception {bound();return core.retry(id);}
     JSONArray messages(String botId) throws Exception {bound();return core.messages(botId);}
     JSONObject replyAfter(String messageId) throws Exception {bound();JSONObject reply=core.replyAfter(messageId);bound();return reply;}
@@ -151,6 +187,13 @@ final class BotAccount {
     private JSONObject serverCall(String method,JSONObject body) throws Exception {
         JSONObject context=auth.core.backendContext();bound();
         return recovering(HTTP,method,body,context,this::bound);
+    }
+    // Each send-status ask gets the official 5 s deadline.
+    private static final OkHttpClient SEND_STATUS=HTTP.newBuilder().callTimeout(SendStatus.DEADLINE_MS,TimeUnit.MILLISECONDS).build();
+    /** One GetGrokBotSendStatus ask: what became of a message ({agentId, messageId, sessionId?, taskId?}). Read-only. */
+    private JSONObject sendStatus(JSONObject request) throws Exception {
+        JSONObject context=auth.core.backendContext();bound();
+        return recovering(SEND_STATUS,"GetGrokBotSendStatus",request,context,this::bound);
     }
     /** Disk-only account-scoped roster; never renews credentials or contacts Grok. */
     JSONObject cachedRoster() throws Exception {
@@ -354,11 +397,59 @@ final class BotAccount {
         String problem=PhoneCalls.refused(reply,takeOver);
         if(problem!=null)throw new GrokCore.Failure(problem,true,"",409);
     }
-    JSONObject presence(JSONObject body) throws Exception {
-        bound();String selected=selectedBot().optString("id");
-        if(selected.isEmpty()||!selected.equals(body.optString("id")))
-            throw new GrokCore.Failure("Grok Bot changed. Start the call again.",true);
-        JSONObject config=auth.currentConfig();bound();return gateway(config,"setVoiceCallPresence",body);
+    /**
+     * Tells the Bot's gateway this watch's voice call is on the line or off it (setVoiceCallPresence {id, callId,
+     * isOnTheLine, acceptsOverheard}), as Grok Bot Android 1.25.0 does for every harness: that's how its finished work
+     * finds the call (CallNudges). For the call's own Bot, even if another is selected by the time it ends.
+     */
+    void presence(JSONObject binding,JSONObject body) throws Exception {
+        verifyHistoryBinding(binding,false);
+        if(!binding.optString("agentId").equals(body.optString("id")))throw new GrokCore.Failure("Grok Bot changed. Nothing was sent.",true);
+        JSONObject config=GrokCore.validateConfig(auth.currentConfig());verifyHistoryBinding(binding,false);gateway(config,"setVoiceCallPresence",body);
+    }
+    /**
+     * Answers (Send) or declines (Skip, answer null) a Bot's question during its phone call (CallQuestions), as Grok Bot
+     * Android 1.25.0 does: a Bot run on Grok's server through SubmitGrokBotUserForm or DismissGrokBotUserForm, a box Bot
+     * through the gateway's submitUserForm or dismissUserForm. Only your own Bots, from their open chat. Sent once,
+     * never again on its own.
+     */
+    void answerQuestion(String chatBot,JSONObject question,String answer) throws Exception {
+        bound();JSONObject bot=selectedBot();
+        if(chatBot.isEmpty()||!chatBot.equals(bot.optString("id"))||!chatBot.equals(question.optString("agentId")))throw new GrokCore.Failure("Grok Bot changed. Nothing was sent.",true);
+        if(!bot.optBoolean("viewerIsOwner",true))throw new GrokCore.Failure("Answer this on your phone.",true);
+        String harness=core.harnessOf(chatBot);
+        if(GrokCore.SERVER_HARNESS.equals(harness)){
+            JSONObject reply;
+            try{reply=serverCall(answer==null?"DismissGrokBotUserForm":"SubmitGrokBotUserForm",CallQuestions.serverBody(question,answer));}
+            catch(GrokCore.Failure refused){throw CallQuestions.problem(refused);}
+            String problem=CallQuestions.refused(reply);if(problem!=null)throw new GrokCore.Failure(problem,true,"",409);
+            return;
+        }
+        // Another kind of Bot has no answer lane in the official app either.
+        if(!harness.isEmpty()&&!harness.equals("box"))throw new GrokCore.Failure("Answer this on your phone.",true);
+        JSONObject body=CallQuestions.gatewayBody(question,answer),config=GrokCore.validateConfig(auth.currentConfig());bound();
+        try{gateway(config,answer==null?"dismissUserForm":"submitUserForm",body);}catch(GrokCore.Failure refused){throw CallQuestions.problem(refused);}
+    }
+    /**
+     * Answers a Bot's question with option buttons (Widgets) with an option's value, or dismisses it (value null), as
+     * Grok Bot Android 1.25.0 does: a Bot run on Grok's server through RespondGrokBotWidget or DismissGrokBotWidget, a box
+     * Bot through the gateway's respondToWidget or dismissWidget. Only your own Bots, from their open chat. Sent once,
+     * never again on its own; a refusal comes back in Grok's words.
+     */
+    void answerWidget(String chatBot,JSONObject widget,String value) throws Exception {
+        bound();JSONObject bot=selectedBot();
+        if(chatBot.isEmpty()||!chatBot.equals(bot.optString("id"))||!chatBot.equals(widget.optString("agentId")))throw new GrokCore.Failure("Grok Bot changed. Nothing was sent.",true);
+        if(!bot.optBoolean("viewerIsOwner",true))throw new GrokCore.Failure("Answer this on your phone.",true);
+        JSONObject body=Widgets.body(widget,value),reply;String harness=core.harnessOf(chatBot);boolean server=GrokCore.SERVER_HARNESS.equals(harness);
+        if(server){try{reply=serverCall(value==null?"DismissGrokBotWidget":"RespondGrokBotWidget",body);}catch(GrokCore.Failure refused){throw Widgets.problem(refused);}}
+        else{
+            // Another kind of Bot has no answer lane in the official app either.
+            if(!harness.isEmpty()&&!harness.equals("box"))throw new GrokCore.Failure("Answer this on your phone.",true);
+            JSONObject config=GrokCore.validateConfig(auth.currentConfig());bound();
+            try{reply=gateway(config,value==null?"dismissWidget":"respondToWidget",body);}catch(GrokCore.Failure refused){throw Widgets.problem(refused);}
+        }
+        String said=Widgets.refused(reply,server);
+        if(said!=null)throw new GrokCore.Failure(said.isEmpty()?Widgets.FAILED:said,true,"",409);
     }
     private static final String INTERRUPTED="History connection was interrupted. Sync may need attention.";
     JSONObject historyPage(JSONObject binding,Long beforeSeq,int limit)throws Exception{return continuity.page(binding,beforeSeq,limit);}
@@ -507,6 +598,21 @@ final class BotAccount {
             }
         }
     }
+    /**
+     * The gateway's current trays (getTrays, read-only, as the official app reads them on each connect), for this
+     * account ("account_key/auth_generation"): what the stream may have missed. Another account's sign-in refuses.
+     */
+    JSONArray trays(String identity) throws Exception {
+        signedInAs(identity);JSONObject reply=gateway(GrokCore.validateConfig(auth.currentConfig()),"getTrays",new JSONObject());signedInAs(identity);
+        // A bare array, as listAgents sends, comes back under "agents".
+        JSONArray trays=reply.optJSONArray("agents");if(trays==null)trays=reply.optJSONArray("trays");
+        if(trays==null)throw new GrokCore.Failure("Grok returned unsupported trays.",true);
+        return trays;
+    }
+    private void signedInAs(String identity) throws Exception {
+        JSONObject state=auth.state();
+        if(!state.optBoolean("linked")||!identity.equals(state.optString("account_key")+"/"+state.optString("auth_generation")))throw new GrokCore.Failure("Grok sign-in changed.",true);
+    }
     /** The service's own refusal codes for a message, in words; anything else stays a plain refusal. */
     static GrokCore.Failure sendRefused(String code){
         switch(code==null?"":code){
@@ -523,7 +629,7 @@ final class BotAccount {
     /** The live stream's per-Bot state (unread, preview, working), shared by the Bot list and ServerEvents. */
     static final ServerTranscripts.States SERVER_STATES=new ServerTranscripts.States();
     /** Gateway row fields a server row lacks: the photo the watch already shrank, the role line, a teammate's session. */
-    private static final String[] GATEWAY_EXTRAS={"avatarDataUrl","title","viewerSessionId","hasUnread","unreadCount","isRunning","isRunningTurn","isComposingMessage","lastMessagePreview","lastActivityAt","lastViewedAt"};
+    private static final String[] GATEWAY_EXTRAS={"avatarDataUrl","title","viewerSessionId","hasUnread","unreadCount","isRunning","isRunningTurn","isComposingMessage","lastMessagePreview","lastActivityAt","lastViewedAt","awaitingUserResponse"};
 
     /**
      * GrokCore's requests. Bots run on Grok's server are listed, read and messaged there, like the official app;
@@ -603,17 +709,28 @@ final class BotAccount {
     }
     /**
      * A message through the server (SendGrokBotUserMessage), from GrokCore's gateway body. A refusal comes back as
-     * the service's words; a lost reply stays uncertain for GrokCore, which never sends it again on its own.
+     * the service's words; a lost reply stays uncertain for GrokCore, which never sends it again on its own, and
+     * confirmMessage asks Grok what became of it (SendStatus).
      */
     private JSONObject serverSend(JSONObject body) throws Exception {
-        String session=body.optString("sessionId","");
-        JSONObject request=new JSONObject().put("agentId",body.getString("agentId")).put("messageId",body.getString("clientNonce"))
+        String session=body.optString("sessionId",""),nonce=body.getString("clientNonce");
+        JSONObject request=new JSONObject().put("agentId",body.getString("agentId")).put("messageId",nonce)
             .put("text",body.getString("prompt")).put("sentAtMs",Long.toString(body.optLong("firstSentAtMs",System.currentTimeMillis())))
             .put("isFork",false).put("attachmentPaths",new JSONArray()).put("attachmentNames",new JSONArray())
             .put("source","GROK_BOT_CLIENT_SURFACE_MOBILE").put("renderedCardKinds",new JSONArray()).put("sendSource","GROK_BOT_SEND_SOURCE_CHAT");
         if(!session.isEmpty()){request.put("sessionId",session);if(session.startsWith("task:"))request.put("taskId",session.substring(5));}
         String language=java.util.Locale.getDefault().getLanguage();if(language.matches("[a-z]{2,3}"))request.put("language",language);
-        JSONObject reply=serverCall("SendGrokBotUserMessage",request);
+        JSONObject reply;
+        try{reply=serverCall("SendGrokBotUserMessage",request);}
+        catch(GrokCore.Failure failed){
+            if(!failed.rejected&&!serverPathMissing(failed)){
+                JSONObject ask=new JSONObject().put("agentId",request.getString("agentId")).put("messageId",nonce);
+                for(String key:new String[]{"sessionId","taskId"})if(request.has(key))ask.put(key,request.getString(key));
+                SendStatus.ALL.start(nonce,ask,System.currentTimeMillis());
+            }else SendStatus.ALL.end(nonce);
+            throw failed;
+        }
+        SendStatus.ALL.end(nonce);
         if(BuildConfig.DEBUG)android.util.Log.i("GrokWearServer","send via server delivery="+reply.optString("delivery","(none)"));
         if("GROK_BOT_USER_MESSAGE_DELIVERY_REFUSED".equals(reply.optString("delivery"))){
             JSONObject refusal=reply.optJSONObject("refusal");throw sendRefused(refusal==null?"":refusal.optString("failureCode",""));
@@ -680,7 +797,7 @@ final class BotAccount {
         .connectionPool(new okhttp3.ConnectionPool(0,1,TimeUnit.SECONDS)).build();
 
     private static JSONObject gateway(JSONObject config,String method,JSONObject body) throws Exception {
-        if(!java.util.Arrays.asList("listAgents","setVoiceCallPresence","sendPrompt","getAgentTranscriptTail","setAgentUnread","resolveAutoReviewApproval").contains(method))throw new GrokCore.Failure("This Grok operation is not enabled.",true);
+        if(!java.util.Arrays.asList("listAgents","setVoiceCallPresence","sendPrompt","getAgentTranscriptTail","setAgentUnread","resolveAutoReviewApproval","getTrays","submitUserForm","dismissUserForm","respondToWidget","dismissWidget").contains(method))throw new GrokCore.Failure("This Grok operation is not enabled.",true);
         JSONObject valid=GrokCore.validateConfig(config);
         Request.Builder request=new Request.Builder().url(valid.getString("gatewayUrl")+"/api/"+method)
             .header("Authorization","Bearer "+valid.getString("gatewayToken"));

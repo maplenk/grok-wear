@@ -121,6 +121,12 @@ final class GrokAuthCore {
         }
     }
 
+    static final String SIGN_IN_REFUSED="Grok refused this sign-in. Check the account, or ask your organisation's admin.";
+    /**
+     * Grok Bot Android 1.25.0 reads a 401 or 403 from the sign-in poll as Grok refusing it (the credentials, or the
+     * organisation's sign-in policy), not as a failure to try again.
+     */
+    static boolean refusedSignIn(int status){return status==401||status==403;}
     JSONObject poll() throws Exception {
         JSONObject request;String epoch,id;
         synchronized(LOCK) {
@@ -142,7 +148,7 @@ final class GrokAuthCore {
             }
             if(response.status!=200) {
                 root.remove("operation");root.remove("login");store.write(root);
-                throw failure(response.status==403?"Grok sign-in was refused. Use an account allowed by your organization.":"Grok sign-in failed (HTTP "+response.status+"). Start a new sign-in.");
+                throw failure(refusedSignIn(response.status)?SIGN_IN_REFUSED:"Grok sign-in failed (HTTP "+response.status+"). Start a new sign-in.");
             }
             JSONObject tokens=readLoginTokens(response.body);
             root.put("tokens",tokens).put("generation",UUID.randomUUID().toString());

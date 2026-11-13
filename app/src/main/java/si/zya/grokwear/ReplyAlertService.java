@@ -20,7 +20,7 @@ import java.util.concurrent.Executors;
 
 /**
  * After you send a Bot a message from the watch, keeps the live event stream open in the background and
- * buzzes when the Bot replies (or Grok says it's out of usage), unless that chat is on screen. Grok Bot's own pushes go to its phone app
+ * buzzes when the Bot replies (or Grok says it's out of usage, or the Bot or someone on its phone call asks you something), unless that chat is on screen. Grok Bot's own pushes go to its phone app
  * only, so this is the watch's way to hear back. Waits end as BotEvents.Waits says, at most ten minutes.
  */
 public final class ReplyAlertService extends Service {
@@ -51,6 +51,20 @@ public final class ReplyAlertService extends Service {
         NotificationManager manager=context.getSystemService(NotificationManager.class);if(manager!=null)manager.cancel(tag(botId),REPLY);
     }
     private static String tag(String botId){return "reply:"+botId;}
+    // Each Bot's last view seen live, so only a new one looks through the shown notifications.
+    private static final java.util.Map<String,Long> VIEWED=new java.util.concurrent.ConcurrentHashMap<>();
+    /**
+     * A live Bot row says its chat was read (BotEvents.viewedAt), say on the phone: its notice goes, as the official
+     * app dismisses a viewed Bot's notifications. One posted after that read stays.
+     */
+    static void viewed(Context context,JSONObject row){
+        String botId=row==null?"":row.optString("id");long at=BotEvents.viewedAt(row);
+        if(botId.isEmpty()||at<=0)return;Long before=VIEWED.put(botId,at);if(before!=null&&before==at)return;
+        NotificationManager manager=context.getSystemService(NotificationManager.class);if(manager==null)return;
+        try{for(android.service.notification.StatusBarNotification shown:manager.getActiveNotifications())
+            if(tag(botId).equals(shown.getTag())&&shown.getId()==REPLY&&BotEvents.readAfter(row,shown.getPostTime()))manager.cancel(tag(botId),REPLY);}
+        catch(RuntimeException ignored){}
+    }
     /** Posts a Bot's reply; tapping it starts open (MainActivity) for that Bot. Also used by the debug preview. */
     static void notifyReply(Context context,String botId,String name,String text,Intent open){post(context,botId,name,text,"New reply",open);}
     /** The Bot's notice, with name as its title; hidden is all the lock screen shows. */
@@ -77,12 +91,17 @@ public final class ReplyAlertService extends Service {
     private final Runnable tick=new Runnable(){public void run(){int before=waits.size();waits.expire(SystemClock.elapsedRealtime());if(finishIfDone())return;if(waits.size()!=before)waiting();main.postDelayed(this,15000);}};
     private final EventStream.Listener events=new EventStream.Listener(){
         public void bot(String account,JSONObject row){if(account.equals(identity))handle(()->waits.bot(row,SystemClock.elapsedRealtime()));}
-        public void entry(String account,String botId,JSONObject entry){if(account.equals(identity))handle(()->waits.entry(botId,entry));}
+        public void entry(String account,String botId,JSONObject entry){if(!account.equals(identity))return;handle(()->waits.entry(botId,entry,System.currentTimeMillis()));revealLater(entry.optJSONObject("question"));}
         // The stream had a gap: replies in it never arrive as events.
         public void connected(String account,boolean again){if(again&&account.equals(identity))catchUp();}
         // Grok took the message but the Bot is out of usage: no reply is coming, so say that instead.
         public void usage(String account,JSONObject pushed){if(pushed!=null&&account.equals(identity))handle(()->waits.usage(pushed,SystemClock.elapsedRealtime(),System.currentTimeMillis()));}
     };
+    /** A question from the Bot's phone call that Grok reveals later: look again then (BotEvents.Waits.reveal). */
+    private void revealLater(JSONObject question){
+        long delay=question==null?0:question.optLong("revealAtMs")-System.currentTimeMillis();
+        if(delay>0&&delay<=BotEvents.Waits.LIMIT_MS)main.postDelayed(()->handle(()->waits.reveal(System.currentTimeMillis())),delay+100);
+    }
     private interface Check{JSONObject run()throws Exception;}
     private void handle(Check check){
         if(destroyed)return; // A read that finished after the service ended.
@@ -141,6 +160,8 @@ public final class ReplyAlertService extends Service {
         if(alert.optBoolean("usage")){post(this,botId,BotEvents.Waits.USAGE_TITLE,BotEvents.Waits.USAGE_TEXT,"New notice",new Intent(this,MainActivity.class));return;}
         // The Bot asks for your OK first: tapping opens its chat, where the request can be answered.
         if(alert.optBoolean("approval")){String line=alert.optString("text");post(this,botId,"Needs your OK",line.isEmpty()?"Approval needed":line,"New notice",new Intent(this,MainActivity.class));return;}
+        // A question for you, from someone on the Bot's phone call or the Bot's own with options: who asks, then the question; tapping opens its chat to answer.
+        if(alert.optBoolean("question")){String line=alert.optString("text");post(this,botId,alert.optString("title"),line.isEmpty()?"Answer in the chat":line,"New notice",new Intent(this,MainActivity.class));return;}
         notifyReply(this,botId,alert.optString("name"),alert.optString("text"),new Intent(this,MainActivity.class));
     }
     private Notification waitingNotification(String name){

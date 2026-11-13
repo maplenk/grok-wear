@@ -1,5 +1,6 @@
 package si.zya.grokwear;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -8,14 +9,18 @@ import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
- * Grok's own "usage limit" notices for this process, per Bot: the gateway's usage-limit trays and the server's
- * turnFailed (BotEvents.tray, ServerTranscripts.turnFailed). A Bot out of usage still takes your message, then
+ * Grok's own "usage limit" notices for this process, per Bot: the gateway's usage-limit trays, pushed or read with
+ * getTrays on connecting, and the server's turnFailed (BotEvents.tray, ServerTranscripts.turnFailed). A Bot out of usage still takes your message, then
  * says nothing, so the chat and reply alerts read this instead. The watch never dismisses or clears a tray: trays
  * are shared with the phone, whose Grok app dismisses them once usage is back. No Android here, so it can be tested.
  */
@@ -44,6 +49,32 @@ final class UsageTrays {
             case "cleared":{boolean any=!trays.isEmpty();trays.clear();resets.clear();return any;}
             default:return false;
         }
+    }
+    /** The gateway's notices kept for this account (not the server's turnFailed ones), before asking getTrays. */
+    synchronized Set<String> gatewayIds(String account){
+        Set<String> ids=new HashSet<>();if(account==null||!account.equals(identity))return ids;
+        for(String id:trays.keySet())if(!id.startsWith("server-turn:"))ids.add(id);
+        return ids;
+    }
+    /**
+     * Applies the gateway's current trays (a getTrays reply, read when the stream connects) for this account: each
+     * usage-limit notice in it is kept as if pushed, and one of held (gatewayIds before asking) no longer listed has
+     * gone. A notice pushed while the reply was on its way stays, and so do the server's turnFailed ones. Returns the
+     * changes, as tray events, for listeners.
+     */
+    synchronized List<BotEvents.Event> reconcile(String account,JSONArray listed,Set<String> held){
+        List<BotEvents.Event> changes=new ArrayList<>();
+        if(account==null||account.isEmpty()||listed==null)return changes;
+        if(!account.equals(identity)){trays.clear();resets.clear();identity=account;}
+        Set<String> ids=new HashSet<>();
+        for(int i=0;i<listed.length();i++){JSONObject tray=listed.optJSONObject(i);if(tray==null)continue;
+            try{BotEvents.Event event=BotEvents.tray(new JSONObject().put("type","pushed").put("tray",tray));if(event==null)continue;
+                ids.add(GrokCore.text(tray,"id"));if(apply(account,event))changes.add(event);}
+            catch(Exception unreadable){}}
+        for(String id:held)if(!ids.contains(id))
+            try{BotEvents.Event gone=new BotEvents.Event("tray","",new JSONObject().put("type","dismissed").put("id",id));if(apply(account,gone))changes.add(gone);}
+            catch(Exception unreadable){}
+        return changes;
     }
     /** The Bot's newest usage-limit notice for this account (a copy), or null. */
     synchronized JSONObject latest(String account,String botId){

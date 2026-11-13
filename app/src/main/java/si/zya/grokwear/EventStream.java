@@ -12,7 +12,8 @@ import java.util.concurrent.CopyOnWriteArraySet;
 /**
  * One live event connection per process (see BotEvents), open while anything listens: the open app, or a
  * reply alert after you leave it. It reconnects with backoff, and at once when the watch gets a new network.
- * Events are hints on the main thread; the roster and chat are still read the usual way.
+ * Events are hints on the main thread; the roster and chat are still read the usual way, and the gateway's trays
+ * once per connect.
  */
 final class EventStream {
     interface Listener {
@@ -23,8 +24,10 @@ final class EventStream {
         default void connected(String identity,boolean again){}
         /** Grok's usage-limit notices changed (UsageTrays, already applied): pushed is the new notice, or null when one went. */
         default void usage(String identity,JSONObject pushed){}
+        /** Finished work for a voice call ({agentId, callId, update, kind}, CallNudges); only that call takes it. */
+        default void nudge(String identity,JSONObject nudge){}
     }
-    static final String CHANNELS="transcript,agent-upserted,tray";
+    static final String CHANNELS="transcript,agent-upserted,tray,voice-call-nudge";
     // Leaving the app for the message picker or a permission dialog shouldn't drop and redial the stream.
     private static final long LINGER_MS=20000;
     private static final long[] BACKOFF={1000,2000,5000,10000,30000,60000};
@@ -82,6 +85,7 @@ final class EventStream {
                     connectedAs(mine,account);identity[0]=account;final boolean again=before[0];before[0]=true;
                     android.util.Log.i("GrokWearEvents","events_open open_ms="+(SystemClock.elapsedRealtime()-began)+" again="+again+" failures="+failures[0]);
                     MAIN.post(()->{if(current(mine))for(Listener l:LISTENERS)l.connected(account,again);});
+                    readTrays(mine,account);
                 }
                 public boolean frame(String data){
                     if(!current(mine))return false;BotEvents.Event event=BotEvents.parse(data);if(event==null)return true;
@@ -93,8 +97,11 @@ final class EventStream {
                     // Usage notices are kept once for the process; listeners hear only a change.
                     if(event.kind.equals("tray")&&!UsageTrays.ALL.apply(account,event))return true;
                     MAIN.post(()->{if(!current(mine))return;
+                        // Read on another device: the watch's notice for that Bot goes too.
+                        if(event.kind.equals("bot"))ReplyAlertService.viewed(app,event.value);
                         for(Listener l:LISTENERS){if(event.kind.equals("bot"))l.bot(account,event.value);
-                            else if(event.kind.equals("tray"))l.usage(account,event.value.optJSONObject("tray"));else l.entry(account,event.botId,event.value);}});
+                            else if(event.kind.equals("tray"))l.usage(account,event.value.optJSONObject("tray"));
+                            else if(event.kind.equals("nudge"))l.nudge(account,event.value);else l.entry(account,event.botId,event.value);}});
                     return true;
                 }
             });}
@@ -110,6 +117,23 @@ final class EventStream {
             if(SystemClock.elapsedRealtime()-began>60000)failures[0]=0;
             pause(BACKOFF[Math.min(failures[0]++,BACKOFF.length-1)]);
         }
+    }
+    private static final java.util.concurrent.ExecutorService TRAYS=java.util.concurrent.Executors.newSingleThreadExecutor(r->{Thread t=new Thread(r,"grok-trays");t.setDaemon(true);return t;});
+    /**
+     * Usage notices pushed while the stream was down: like the official app, read the gateway's trays once each time
+     * it connects (UsageTrays.reconcile), beside the stream. A gateway without getTrays (404) leaves it to the stream.
+     */
+    private static void readTrays(long mine,String identity){
+        TRAYS.execute(()->{if(!current(mine))return;java.util.List<BotEvents.Event> changes;
+            try{java.util.Set<String> held=UsageTrays.ALL.gatewayIds(identity);org.json.JSONArray listed=new BotAccount(app).trays(identity);changes=UsageTrays.ALL.reconcile(identity,listed,held);
+                if(BuildConfig.DEBUG)android.util.Log.i("GrokWearEvents","trays listed="+listed.length()+" changes="+changes.size());}
+            catch(Exception unread){
+                if(!(unread instanceof GrokCore.Failure&&((GrokCore.Failure)unread).status==404))
+                    android.util.Log.i("GrokWearEvents","trays_unread cause="+(unread instanceof GrokCore.Failure?"refused_"+((GrokCore.Failure)unread).status:unread.getClass().getSimpleName()));
+                return;}
+            if(changes.isEmpty())return;
+            MAIN.post(()->{if(!current(mine))return;for(BotEvents.Event e:changes)for(Listener l:LISTENERS)l.usage(identity,e.value.optJSONObject("tray"));});
+        });
     }
     private static void pause(long ms){
         synchronized(WAKE){long end=SystemClock.elapsedRealtime()+ms;

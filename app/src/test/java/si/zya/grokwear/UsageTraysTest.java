@@ -2,11 +2,14 @@ package si.zya.grokwear;
 
 import static org.junit.Assert.*;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.Test;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /** The process's usage-limit notices and their reset line; all values synthetic. */
 public class UsageTraysTest {
@@ -29,6 +32,38 @@ public class UsageTraysTest {
         assertFalse("an unknown id is no change",trays.apply(ME,event("dismissed","tray_x")));
         assertTrue(trays.apply(ME,event("cleared",null)));assertNull(trays.latest(ME,"bot-1"));assertNull(trays.latest(ME,"bot-2"));
         assertFalse("nothing left to clear",trays.apply(ME,event("cleared",null)));
+    }
+    private static JSONObject tray(String id,String bot,String errorKind)throws Exception {
+        return new JSONObject().put("kind","error").put("id",id).put("agentId",bot).put("createdAt",500).put("title","Usage limit reached").put("errorKind",errorKind);
+    }
+    @Test public void getTraysOnConnectBringsMissedNoticesAndDropsGoneOnes()throws Exception {
+        UsageTrays trays=new UsageTrays();
+        trays.apply(ME,pushed("tray_old","bot-1",100));trays.apply(ME,pushed("server-turn:9","bot-2",100));
+        Set<String> held=trays.gatewayIds(ME);assertEquals(Set.of("tray_old"),held);
+        // Pushed while getTrays was on its way: not in its reply, yet not gone.
+        trays.apply(ME,pushed("tray_new","bot-4",100));
+        JSONArray listed=new JSONArray().put(tray("tray_missed","bot-3","usage_limit")).put(tray("tray_other","bot-1","provider_overloaded"))
+            .put("not a tray").put(new JSONObject().put("kind","error"));
+        List<BotEvents.Event> changes=trays.reconcile(ME,listed,held);
+        assertEquals(2,changes.size());
+        assertEquals("pushed",changes.get(0).value.getString("type"));assertEquals("tray_missed",changes.get(0).value.getJSONObject("tray").getString("id"));
+        assertEquals("dismissed",changes.get(1).value.getString("type"));assertEquals("tray_old",changes.get(1).value.getString("id"));
+        assertEquals("missed while offline",500,trays.latest(ME,"bot-3").getLong("createdAt"));
+        assertNull("no longer listed, and only usage-limit trays count",trays.latest(ME,"bot-1"));
+        assertEquals("the server's own notice stays","server-turn:9",trays.latest(ME,"bot-2").getString("id"));
+        assertNotNull("pushed meanwhile, stays",trays.latest(ME,"bot-4"));
+        // The next connect's read no longer lists it: gone then. The same read again changes nothing.
+        changes=trays.reconcile(ME,listed,trays.gatewayIds(ME));
+        assertEquals(1,changes.size());assertEquals("tray_new",changes.get(0).value.getString("id"));assertNull(trays.latest(ME,"bot-4"));
+        assertTrue(trays.reconcile(ME,listed,trays.gatewayIds(ME)).isEmpty());assertNotNull(trays.latest(ME,"bot-3"));
+    }
+    @Test public void getTraysForAnotherAccountStartsItsOwnNotices()throws Exception {
+        UsageTrays trays=new UsageTrays();trays.apply(ME,pushed("tray_1","bot-1",100));
+        assertTrue("another account holds nothing",trays.gatewayIds("account/2").isEmpty());
+        assertEquals(1,trays.reconcile("account/2",new JSONArray().put(tray("tray_2","bot-2","usage_limit")),Set.of()).size());
+        assertNull(trays.latest(ME,"bot-1"));assertNotNull(trays.latest("account/2","bot-2"));
+        assertTrue("no account, nothing",trays.reconcile("",new JSONArray().put(tray("tray_3","bot-3","usage_limit")),Set.of()).isEmpty());
+        assertTrue(trays.reconcile("account/2",null,Set.of()).isEmpty());
     }
     @Test public void noticesBelongToOneAccount()throws Exception {
         UsageTrays trays=new UsageTrays();trays.apply(ME,pushed("tray_1","bot-1",100));

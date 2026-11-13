@@ -6,7 +6,8 @@ import java.util.LinkedHashMap;
 /**
  * The gateway's live events, as Grok Bot Android 1.17.0 reads them from {gatewayUrl}/events: a roster row
  * whenever a Bot changes (agent-upserted), each chat entry as it is appended (transcript) and, as 1.25.0 reads
- * them, Grok's usage-limit notices (tray; see UsageTrays). Framing,
+ * them, Grok's usage-limit notices (tray; see UsageTrays) and finished work for a voice call (voice-call-nudge;
+ * see CallNudges). Framing,
  * parsing and the reply-alert rules live here without Android, so they can be tested; EventStream connects.
  */
 final class BotEvents {
@@ -27,7 +28,7 @@ final class BotEvents {
         }
     }
 
-    /** One event the watch acts on: a sanitized roster row ("bot"), a reduced chat entry ("entry") or a usage-limit notice change ("tray"). */
+    /** One event the watch acts on: a sanitized roster row ("bot"), a reduced chat entry ("entry"), a usage-limit notice change ("tray") or a voice call's finished work ("nudge"). */
     static final class Event {
         final String kind,botId;final JSONObject value;
         Event(String kind,String botId,JSONObject value){this.kind=kind;this.botId=botId;this.value=value;}
@@ -43,11 +44,14 @@ final class BotEvents {
             String type=GrokCore.text(payload,"type");
             if(channel.equals("transcript")&&(type.equals("appended")||type.equals("updated"))){
                 String botId=GrokCore.text(payload,"agentId");JSONObject entry=entry(payload.optJSONObject("entry"));
-                // A changed entry matters only as an approval request answered or expired elsewhere, or a phone call
-                // moving on (FEATURES-SPEC §0.3).
-                if(type.equals("updated")&&(entry==null||!entry.has("approval")&&!entry.has("call")))return null;
+                // A changed entry matters only as an approval request answered or expired elsewhere, a phone call
+                // moving on (FEATURES-SPEC §0.3), a question (from that call, or with option buttons) answered or
+                // closed, or an ask for the phone settled.
+                if(type.equals("updated")&&(entry==null||!entry.has("approval")&&!entry.has("call")&&!entry.has("question")&&!entry.has("widget")&&!entry.has("phoneTool")))return null;
                 return botId.isEmpty()||botId.length()>512||entry==null?null:new Event("entry",botId,entry);}
             if(channel.equals("tray"))return tray(payload);
+            // Finished work for a voice call (CallNudges): only the call it names takes it.
+            if(channel.equals("voice-call-nudge")){JSONObject nudge=CallNudges.of(payload);return nudge==null?null:new Event("nudge",nudge.getString("agentId"),nudge);}
         }catch(Exception malformed){}
         return null;
     }
@@ -103,9 +107,28 @@ final class BotEvents {
         if(approval!=null)out.put("approval",new JSONObject().put("status",approval.getString("status")).put("kind",approval.getString("kind")).put("line",approval.getString("line")));
         JSONObject call=hidden||approval!=null||!kind.equals("send-message")?null:PhoneCalls.of(e);
         if(call!=null)out.put("call",new JSONObject().put("status",call.getString("status")));
+        // A question from the Bot's phone call: who asks, what, and when it shows and closes; never the ids an answer needs.
+        JSONObject question=hidden||approval!=null||call!=null||!kind.equals("send-message")?null:CallQuestions.of(e,"");
+        if(question!=null){JSONObject brief=new JSONObject();
+            for(String key:new String[]{"askedBy","prompt","deadlineAtMs","revealAtMs","presentedAtMs","closed","resolution"})if(question.has(key))brief.put(key,question.get(key));
+            out.put("question",brief);}
+        // A question with option buttons: its prompt and whether it's still open; an ask only the phone answers.
+        JSONObject widget=hidden||approval!=null||call!=null||question!=null||!kind.equals("send-message")?null:Widgets.of(e,"");
+        if(widget!=null)out.put("widget",new JSONObject().put("prompt",widget.getString("prompt")).put("open","open".equals(Widgets.state(widget,false))));
+        if(!hidden&&kind.equals("send-message")&&Widgets.phoneTool(e)!=null)out.put("phoneTool",true);
         return out;
     }
     private static boolean present(JSONObject e,String key){return e.opt(key)!=null&&e.opt(key)!=JSONObject.NULL;}
+    /**
+     * When the Bot's chat was last read, if its row says it's read (nothing unread, a lastViewedAt): on another device,
+     * say. The official app then dismisses that Bot's notifications (dismissViewed); else 0.
+     */
+    static long viewedAt(JSONObject row){
+        if(row==null||!Boolean.FALSE.equals(row.opt("hasUnread"))||row.optLong("unreadCount",0)>0)return 0;
+        return Math.max(0,row.optLong("lastViewedAt",0));
+    }
+    /** A notice posted at postedAt is read, by this row's view: posted no later than the chat was read. */
+    static boolean readAfter(JSONObject row,long postedAt){long viewed=viewedAt(row);return viewed>0&&postedAt>0&&postedAt<=viewed;}
 
     /**
      * The Bots a reply alert is waiting on after you sent them a message. A wait ends at the Bot's next
@@ -117,6 +140,8 @@ final class BotEvents {
         static final long LIMIT_MS=10*60_000L,QUIET_MS=2*60_000L;
         private static final class Wait {
             final String name,message;final long since;long unread=-1,idleSince;
+            /** A question from the Bot's phone call that Grok hasn't revealed yet. */
+            JSONObject question;
             Wait(String name,String message,long since){this.name=name;this.message=message;this.since=since;}
         }
         private final LinkedHashMap<String,Wait> waits=new LinkedHashMap<>();
@@ -133,16 +158,39 @@ final class BotEvents {
         boolean waiting(String botId){return waits.containsKey(botId);}
         String firstName(){return waits.isEmpty()?"":waits.values().iterator().next().name;}
         int size(){return waits.size();}
+        JSONObject entry(String botId,JSONObject entry)throws Exception{return entry(botId,entry,System.currentTimeMillis());}
         /**
          * Returns the alert ({bot, name, text}) when this entry is the Bot's reply, else null. A Bot that asks for your
          * OK first won't go on without it: that request ends the wait too ({…, approval:true}, its one line as text).
+         * So does a question from the Bot's phone call, which has a deadline ({…, question:true, title: who asks, its
+         * prompt as text}); one Grok hasn't revealed yet at wall (the clock its times use) waits for reveal(). And so
+         * does the Bot's own question with option buttons, still open (title "{Bot} is asking").
          */
-        JSONObject entry(String botId,JSONObject entry)throws Exception {
+        JSONObject entry(String botId,JSONObject entry,long wall)throws Exception {
             Wait wait=waits.get(botId);if(wait==null)return null;
             JSONObject approval=entry.optJSONObject("approval");
             if(approval!=null&&"pending".equals(approval.optString("status"))){waits.remove(botId);return alert(botId,wait,approval.optString("line")).put("approval",true);}
+            JSONObject question=entry.optJSONObject("question");
+            if(question!=null&&"open".equals(CallQuestions.state(question,wall))){
+                if(CallQuestions.heldBack(question,wall)){wait.question=question;return null;}
+                waits.remove(botId);return asked(botId,wait,question);}
+            JSONObject widget=entry.optJSONObject("widget");
+            if(widget!=null&&widget.optBoolean("open")){waits.remove(botId);return options(botId,wait,widget);}
             if(!entry.optBoolean("reply"))return null;
             waits.remove(botId);return alert(botId,wait,entry.optString("text"));
+        }
+        /** A Bot's own question with option buttons, still open: who asks ("{Bot} is asking") and the question, as a question alert. */
+        private static JSONObject options(String botId,Wait wait,JSONObject widget)throws Exception {
+            String prompt=widget.optString("prompt");return alert(botId,wait,prompt.isEmpty()?"Question":prompt).put("question",true).put("title",wait.name+" is asking");
+        }
+        /** A held-back question Grok has revealed by wall, still open, for a Bot still waited on: its alert, else null. */
+        JSONObject reveal(long wall)throws Exception {
+            for(java.util.Map.Entry<String,Wait> w:waits.entrySet()){JSONObject question=w.getValue().question;
+                if(question!=null&&!CallQuestions.heldBack(question,wall)&&"open".equals(CallQuestions.state(question,wall))){waits.remove(w.getKey());return asked(w.getKey(),w.getValue(),question);}}
+            return null;
+        }
+        private static JSONObject asked(String botId,Wait wait,JSONObject question)throws Exception {
+            return alert(botId,wait,question.optString("prompt")).put("question",true).put("title",CallQuestions.asking(question));
         }
         /** Tracks the Bot's working state and unread count; returns the alert when the count went up. */
         JSONObject bot(JSONObject row,long now)throws Exception {

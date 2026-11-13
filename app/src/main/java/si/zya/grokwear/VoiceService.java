@@ -73,6 +73,25 @@ public final class VoiceService extends Service {
     private final ExecutorService setup=Executors.newSingleThreadExecutor();
     private final ExecutorService historyWriter=Executors.newSingleThreadExecutor();
     private BotAccount callAccount;private HistoryCoordinator.Context callContext;private JSONObject callBot;
+    // Presence writes go out in order and outlive the service, as the official app chains them; failures are dropped.
+    private static final ExecutorService PRESENCE=Executors.newSingleThreadExecutor(r->{Thread t=new Thread(r,"grok-call-presence");t.setDaemon(true);return t;});
+    // The call as its Bot's gateway knows it (once told it's on the line), and the account whose events reach it.
+    private BotAccount presenceAccount;private JSONObject presenceBinding,presenceBody;private volatile String callIdentity="";private boolean hearingNudges;
+    /** Finished work for this call from the Bot's gateway (CallNudges): the session matches and seeds it. */
+    private final EventStream.Listener nudges=new EventStream.Listener(){
+        public void bot(String identity,JSONObject row){}
+        public void entry(String identity,String botId,JSONObject entry){}
+        public void nudge(String identity,JSONObject nudge){
+            NativeVoiceSession live=session;
+            if(live==null||!identity.equals(callIdentity)){android.util.Log.i("GrokWearVoice","call_nudge dropped reason="+(live==null?"no_call":"other_account"));return;}
+            live.nudge(nudge);
+        }
+    };
+    /** setVoiceCallPresence for this call, off the main thread; one content-free line says how it went. */
+    private static void tellHost(BotAccount account,JSONObject binding,JSONObject body){
+        PRESENCE.execute(()->{boolean ok=true;try{account.presence(binding,body);}catch(Exception ignored){ok=false;}
+            android.util.Log.i("GrokWearVoice","call_presence on_the_line="+body.optBoolean("isOnTheLine")+" ok="+ok);});
+    }
     private String syncStatus="";
     private volatile VoiceStartup startup;
     private volatile NativeVoiceSession session;private volatile NativeAudio audio;private PowerManager.WakeLock wake;
@@ -165,6 +184,12 @@ public final class VoiceService extends Service {
             session.redialBackend=account::redialBackend;
             session.preparedStartup(plan,credential,()->account.verifyHistoryBinding(binding,true));
             emit();notifyCall();session.start();prepareAudio(mine);
+            // Like the official app, for every harness: the Bot's gateway learns this call's id, and its finished work
+            // for the call comes back over the live event stream.
+            presenceAccount=account;presenceBinding=binding;
+            presenceBody=new JSONObject().put("id",bot.getString("id")).put("callId",session.callId()).put("isOnTheLine",true).put("acceptsOverheard",plan.optBoolean("hasOverheard",false));
+            tellHost(account,binding,new JSONObject(presenceBody.toString()));
+            callIdentity=binding.optString("accountKey")+"/"+binding.optString("authGeneration");hearingNudges=true;EventStream.add(this,nudges);
         }catch(Exception invalid){finish("Call stopped","Voice could not start safely. Try again.");}
     }
     /** Fixed local messages only: a Failure carries a safe sentence; anything else may hold private detail. */
@@ -274,6 +299,10 @@ public final class VoiceService extends Service {
                 +" lease_ms="+leaseMs+",plan_ms="+planMs+",mint_ms="+mintMs+",dial_ms="+dialMs+",listening_ms="+listeningMs
                 +(session==null?"":" "+session.protocolDiagnostics()));
         unwatchNetwork();replyText="";lastSpoken="";
+        // Off the line: the gateway stops sending this call's work, and the watch stops listening for it.
+        if(hearingNudges){hearingNudges=false;EventStream.remove(nudges);}callIdentity="";
+        if(presenceBody!=null){try{tellHost(presenceAccount,presenceBinding,new JSONObject(presenceBody.toString()).put("isOnTheLine",false));}catch(Exception ignored){}
+            presenceBody=null;presenceAccount=null;presenceBinding=null;}
         running=false;generation++;VoiceStartup preparing=startup;startup=null;if(preparing!=null)preparing.close();main.removeCallbacksAndMessages(null);NativeVoiceSession old=session;session=null;if(old!=null){if(!drained)old.discardUnheardReply();old.end();}
         BotAccount account=callAccount;HistoryCoordinator.Context context=callContext;JSONObject bot=callBot;callAccount=null;callContext=null;callBot=null;
         if(old!=null&&old.didConnect()&&account!=null&&context!=null){

@@ -65,6 +65,28 @@ public class HistoryCoordinatorTest {
         assertEquals("oc_77",card.getJSONObject("call").getString("callId"));assertFalse(card.has("approval"));
         JSONArray turns=f.core.prepare(f.current).turns();assertEquals(1,turns.length());
     }
+    @Test public void aQuestionFromThePhoneCallBecomesACardAndAStaleOneStaysHidden()throws Exception {
+        Fixture f=new Fixture();
+        f.page.put("entries",new JSONArray().put(text("u","user","Book dinner",1))
+            .put(CallQuestionsTest.entry(CallQuestionsTest.phoneCallQuestion()).put("seq",9).put("timestampMs",3))
+            .put(CallQuestionsTest.entry(null).put("id","phone-call-question:oc_77:0").put("seq",8).put("timestampMs",2)));
+        JSONArray result=f.core.page(f.current,null,20).getJSONArray("entries");assertEquals(2,result.length());
+        JSONObject card=result.getJSONObject(1);assertEquals("question",card.getString("role"));assertEquals("Is 7:30 OK instead of 7?",card.getString("text"));
+        JSONObject question=card.getJSONObject("question");assertEquals("phone-call-question:oc_77:1",question.getString("entryId"));
+        assertEquals("the chat's Bot answers","bot-a",question.getString("agentId"));assertFalse(card.has("call")||card.has("approval"));
+        assertEquals("a voice call's context skips it",1,f.core.prepare(f.current).turns().length());
+    }
+    @Test public void aBotsQuestionWithOptionsAndAnAskForThePhoneBecomeCards()throws Exception {
+        Fixture f=new Fixture();
+        JSONObject ask=new JSONObject().put("id","perm-1").put("kind","send-message").put("seq",11).put("timestampMs",4).put("message",new JSONObject().put("type","local-tool-permission")
+            .put("ask",new JSONObject().put("status","pending").put("action","run-phone-tool")));
+        f.page.put("entries",new JSONArray().put(text("u","user","What's on today?",1)).put(WidgetsTest.entry(WidgetsTest.widget()).put("seq",10).put("timestampMs",3)).put(ask));
+        JSONArray result=f.core.page(f.current,null,20).getJSONArray("entries");assertEquals(3,result.length());
+        JSONObject card=result.getJSONObject(1);assertEquals("widget",card.getString("role"));assertEquals("Can I read today's events on your phone calendar?",card.getString("text"));
+        JSONObject widget=card.getJSONObject("widget");assertEquals("t93s406",widget.getString("entryId"));assertEquals("the chat's Bot answers","bot-a",widget.getString("agentId"));
+        JSONObject phone=result.getJSONObject(2);assertEquals("phone_tool",phone.getString("role"));assertEquals("perm-1",phone.getJSONObject("phoneTool").getString("entryId"));
+        assertEquals("a voice call's context skips both",1,f.core.prepare(f.current).turns().length());
+    }
     @Test public void paginationUsesReturnedCursorAndKnownSessionExactly()throws Exception {
         Fixture f=new Fixture();f.current.put("sessionId","dm:known");f.page.put("nextBeforeSeq",123).put("entries",new JSONArray().put(text("r","user","test",1).put("seq",124)));
         JSONObject first=f.core.page(f.current,null,20);assertTrue(first.getBoolean("hasMore"));assertEquals(123,first.getLong("nextBeforeSeq"));

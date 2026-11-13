@@ -25,7 +25,7 @@ import java.util.concurrent.Executors;
 
 /** Native round-watch UI. Debug preview is isolated from account, network and voice code. */
 public final class MainActivity extends Activity {
-    private static final int WHITE=0xffffffff,SECONDARY=0xff8d8d93,SURFACE=0xff1e1e1e,BLUE=0xff006ceb,GLASS=0xff2c2c2e,CARD=0xff202020,RED=0xffe5484d,GREEN=0xff30d158,CARD_ROW=0xff1c1c1e;
+    private static final int WHITE=0xffffffff,SECONDARY=0xff8d8d93,SURFACE=0xff1e1e1e,BLUE=0xff006ceb,GLASS=0xff2c2c2e,CARD=0xff202020,RED=0xffe5484d,GREEN=0xff30d158,CARD_ROW=0xff1c1c1e,ORANGE=0xffff9800;
     private final Handler main=new Handler(Looper.getMainLooper());
     // Debug preview only: a demo reply alert outlives the activity, as ReplyAlertService does for real sends.
     private static final Handler PREVIEW_ALERT=new Handler(Looper.getMainLooper());
@@ -63,12 +63,28 @@ public final class MainActivity extends Activity {
     // refused in words, and the one whose End call waits for a second tap. Keyed by call id; a new chat starts empty.
     private final java.util.Set<String> callsSending=new java.util.HashSet<>();private final java.util.Map<String,String[]> callsAsked=new java.util.HashMap<>();
     private final java.util.Map<String,String> callErrors=new java.util.HashMap<>();private String callArmed="";
-    // Each talking call's timer line, with when the call connected.
-    private final java.util.Map<TextView,Long> callTimers=new java.util.LinkedHashMap<>();
+    // Questions from a Bot's phone call answered from this chat: in flight, answered (the answer sent, or "" for Skip,
+    // until the chat says so), and failures in words. Keyed by entry id; a new chat starts empty. answering is the
+    // question whose answer the input and review screens are writing.
+    private final java.util.Set<String> questionsSending=new java.util.HashSet<>();
+    private final java.util.Map<String,String> questionsAnswered=new java.util.HashMap<>(),questionErrors=new java.util.HashMap<>();private JSONObject answering;
+    // A Bot's questions with option buttons answered from this chat: in flight, answered or dismissed here (shown at once
+    // until Grok's copy says so, gone again if Grok refuses), Grok's refusal in words for a moment, and the picks of a
+    // question where several apply. Keyed by entry id; a new chat starts empty.
+    private final java.util.Set<String> widgetsSending=new java.util.HashSet<>(),widgetsDismissed=new java.util.HashSet<>();
+    private final java.util.Map<String,String> widgetsAnswered=new java.util.HashMap<>(),widgetErrors=new java.util.HashMap<>();
+    private final java.util.Map<String,java.util.Set<Integer>> widgetPicks=new java.util.HashMap<>();
+    // Each talking call's timer line, with when the call connected; each open question's countdown, with its deadline.
+    private final java.util.Map<TextView,Long> callTimers=new java.util.LinkedHashMap<>(),questionTimers=new java.util.LinkedHashMap<>();
     private final Runnable callTimer=new Runnable(){public void run(){
-        if(!visible||!screen.equals("ready")){callTimers.clear();return;}long now=System.currentTimeMillis();
+        if(!visible||!screen.equals("ready")){callTimers.clear();questionTimers.clear();return;}long now=System.currentTimeMillis();
         for(java.util.Map.Entry<TextView,Long> t:callTimers.entrySet())t.getKey().setText(PhoneCalls.clock(now-t.getValue()));
-        if(!callTimers.isEmpty())main.postDelayed(this,1000);}};
+        // At its deadline a question settles to "No reply in time" here, without waiting for Grok.
+        for(java.util.Map.Entry<TextView,Long> t:questionTimers.entrySet()){if(now>=t.getValue()){render();return;}t.getKey().setText(CallQuestions.remaining(t.getValue(),now));}
+        if(!callTimers.isEmpty()||!questionTimers.isEmpty())main.postDelayed(this,1000);}};
+    private void tick(){main.removeCallbacks(callTimer);main.postDelayed(callTimer,1000);}
+    // A question Grok holds back until its reveal time: the chat shows it then.
+    private final Runnable questionReveal=new Runnable(){public void run(){if(visible&&screen.equals("ready"))render();}};
     private android.window.OnBackInvokedCallback modernBack;
     private String screen="welcome",botName="Main Bot",caption="",speaker="",safeError="";
     private boolean previewMuted,previewSaving;private long previewElapsedMs=42000,previewCallStartMs;
@@ -139,6 +155,8 @@ public final class MainActivity extends Activity {
             if(BuildConfig.DEBUG&&"chat".equals(getIntent().getStringExtra("debug_screen")))main.postDelayed(()->{
                 if(!visible)return;if(!selectedMetadata.optString("id").isEmpty()){screen="ready";render();loadBotChat();}
                 else if(primaryBot()!=null)primaryAction(primaryBot(),false);},8000);
+            // Debug builds: once that chat has loaded, show its newest entries, as a fresh reply does.
+            if(BuildConfig.DEBUG&&getIntent().getBooleanExtra("debug_newest",false))main.postDelayed(()->{if(visible&&screen.equals("ready")){scrollToEnd=true;render();}},18000);
             // Debug builds: send one message to the selected Bot through the normal path, then wait for its reply.
             if(BuildConfig.DEBUG&&getIntent().hasExtra("debug_send")){final String text=getIntent().getStringExtra("debug_send");final BotAccount sending=account;
                 main.postDelayed(()->{String bot=selectedMetadata.optString("id");if(bot.isEmpty()&&primaryBot()!=null)bot=primaryBot().optString("id");
@@ -232,8 +250,8 @@ public final class MainActivity extends Activity {
         if(screen.equals("history_detail")){screen="history";render();return;}
         if(screen.equals("bot_actions")){closeBotActions();return;}
         if(screen.equals("reader")){closeReader();return;}
-        if(screen.equals("compose_edit")){screen=draftMessage.isEmpty()?"ready":"compose_review";render();return;}
-        if(screen.equals("compose_review")){if(!messageSending){draftMessage="";screen="ready";render();}return;}
+        if(screen.equals("compose_edit")){if(draftMessage.isEmpty())answering=null;screen=draftMessage.isEmpty()?"ready":"compose_review";render();return;}
+        if(screen.equals("compose_review")){if(!messageSending){draftMessage="";answering=null;screen="ready";render();}return;}
         // Media captures leave from the Bot list as the real app does.
         if(preview&&previewMedia&&screen.equals("bots")){finish();return;}
         if(preview){previewEpoch++;simulated=false;if(isCall()){screen="ready";render();}else if(screen.equals("ready")){screen="bots";render();}else if(!screen.equals("welcome")){screen="ready";render();}else finish();return;}
@@ -251,6 +269,13 @@ public final class MainActivity extends Activity {
         if(screen.equals("compose_review")){draftMessage=previewMedia?previewDraft("Travel Bot"):"Use three sentences to introduce yourself";botName=previewMedia?"Travel Bot":"Wear test";}
         if(screen.equals("reader")){try{readerEntry=new JSONObject().put("role","assistant").put("atMs",System.currentTimeMillis()).put("text","**Alert:** Taipei to Tokyo one-way. The cheapest this month is **Oct 10 (Sat) NT$3,430**, NT$210 below last time (about **5.8%**), and your lowest on record.\n\nThe cheapest day moved to **Oct 10**; only 2 seats left at this fare. Your Oct 27 pick is now NT$3,980.");botName="Travel Bot";}catch(Exception ignored){}}
         if(screen.equals("ready_long")){clearHistory();try{historyEntries.put(new JSONObject().put("id","long-preview").put("role","assistant").put("text","**Research Bot** has an update.\nThe first task is ready for review.\nThe second task is waiting for input.\nThe third task has a draft.\nThe fourth task is ready tomorrow.\nThe fifth task has a short note.\nThe sixth task is still working.\nThe seventh task is waiting.\nThe eighth task is complete.\nThe ninth task needs review.\nThe tenth task has a summary.\nThe final task is done."));}catch(Exception ignored){}screen="ready";}
+        // A question from the Bot's phone call, open with its countdown, and one already answered.
+        if(screen.equals("ready_question")){clearHistory();long now=System.currentTimeMillis();
+            try{historyEntries.put(new JSONObject().put("id","q-done").put("role","question").put("text","Party of two?").put("atMs",now-60000).put("question",new JSONObject().put("entryId","q-done")
+                    .put("askedBy","Luigi's Trattoria").put("prompt","Party of two?").put("deadlineAtMs",now-30000).put("resolution","submitted").put("answer","Yes, two of us")));
+                historyEntries.put(new JSONObject().put("id","q-open").put("role","question").put("text","Is 7:30 OK instead of 7?").put("atMs",now).put("question",new JSONObject().put("entryId","q-open")
+                    .put("askedBy","Luigi's Trattoria").put("prompt","Is 7:30 OK instead of 7?").put("deadlineAtMs",now+65000)));}catch(Exception ignored){}
+            scrollToEnd=true;screen="ready";}
         if(screen.startsWith("history"))previewHistory(screen);
         render();
     }
@@ -366,9 +391,9 @@ public final class MainActivity extends Activity {
         if(primary!=null){FrameLayout.LayoutParams scroll=(FrameLayout.LayoutParams)currentScroll.getLayoutParams();scroll.topMargin=0;scroll.bottomMargin=dp(67);currentScroll.setLayoutParams(scroll);body.setPadding(0,0,0,dp(24));FrameLayout hero=new FrameLayout(this);body.addView(hero,new LinearLayout.LayoutParams(-1,dp(side-67)));
             // With no pins yet, the hero moves up to make room for one hint line.
             boolean hint=pinned.isEmpty()&&!pinHintDone()&&(preview||botsCached);int lift=hint?18:0;
-            BotAvatarView face=new BotAvatarView(this);applyAvatar(face,primary.optString("name"),primary);face.state("ready",WHITE,0);face.running(visible);avatars.add(face);face.setContentDescription(primary.optString("name")+", Primary Bot. Open chat");face.setOnClickListener(v->{navigation++;primaryAction(primary,false);});int faceSize=compactHero()?48:64;FrameLayout.LayoutParams fp=new FrameLayout.LayoutParams(dp(faceSize),dp(faceSize),Gravity.TOP|Gravity.CENTER_HORIZONTAL);fp.topMargin=dp((compactHero()?30:side*.34f-32)-lift);hero.addView(face,fp);
+            BotAvatarView face=new BotAvatarView(this);applyAvatar(face,primary.optString("name"),primary);face.state("ready",WHITE,0);face.running(visible);avatars.add(face);face.setContentDescription(primary.optString("name")+", Primary Bot"+(primary.optBoolean("awaiting")?", needs you":"")+". Open chat");face.setOnClickListener(v->{navigation++;primaryAction(primary,false);});int faceSize=compactHero()?48:64;FrameLayout.LayoutParams fp=new FrameLayout.LayoutParams(dp(faceSize),dp(faceSize),Gravity.TOP|Gravity.CENTER_HORIZONTAL);fp.topMargin=dp((compactHero()?30:side*.34f-32)-lift);hero.addView(face,fp);
             TextView star=text("★",16,WHITE);GradientDrawable badge=shape(0xffff9800,12);badge.setStroke(dp(2),Color.BLACK);star.setBackground(badge);star.setContentDescription("Primary Bot");FrameLayout.LayoutParams st=new FrameLayout.LayoutParams(dp(23),dp(23),Gravity.TOP|Gravity.CENTER_HORIZONTAL);st.leftMargin=dp(22);st.topMargin=fp.topMargin+dp(faceSize-21);hero.addView(star,st);
-            TextView name=text(primary.optString("name"),getResources().getConfiguration().fontScale>1.2f?12:16,WHITE);name.setSingleLine(true);name.setEllipsize(android.text.TextUtils.TruncateAt.END);FrameLayout.LayoutParams np=new FrameLayout.LayoutParams(dp(side*.76f),dp(22),Gravity.TOP|Gravity.CENTER_HORIZONTAL);np.topMargin=dp((compactHero()?80:side*.535f-11)-lift);hero.addView(name,np);TextView sub=text(MessageText.plain(primary.optString("lastMessagePreview","Ready to talk")),compactHero()?11:12,SECONDARY);sub.setTag("bot_excerpt");sub.setSingleLine(true);sub.setEllipsize(android.text.TextUtils.TruncateAt.END);FrameLayout.LayoutParams xp=new FrameLayout.LayoutParams(dp(side*.76f),dp(20),Gravity.TOP|Gravity.CENTER_HORIZONTAL);xp.topMargin=dp(Math.min(side-88,side*.615f-10)-lift);hero.addView(sub,xp);
+            TextView name=text(primary.optString("name"),getResources().getConfiguration().fontScale>1.2f?12:16,WHITE);name.setSingleLine(true);name.setEllipsize(android.text.TextUtils.TruncateAt.END);FrameLayout.LayoutParams np=new FrameLayout.LayoutParams(dp(side*.76f),dp(22),Gravity.TOP|Gravity.CENTER_HORIZONTAL);np.topMargin=dp((compactHero()?80:side*.535f-11)-lift);hero.addView(name,np);TextView sub=text(MessageText.plain(primary.optString("lastMessagePreview","Ready to talk")),compactHero()?11:12,SECONDARY);sub.setTag("bot_excerpt");if(primary.optBoolean("awaiting")){sub.setText(needsYou(MessageText.plain(primary.optString("lastMessagePreview",""))));sub.setTag("bot_status");}sub.setSingleLine(true);sub.setEllipsize(android.text.TextUtils.TruncateAt.END);FrameLayout.LayoutParams xp=new FrameLayout.LayoutParams(dp(side*.76f),dp(20),Gravity.TOP|Gravity.CENTER_HORIZONTAL);xp.topMargin=dp(Math.min(side-88,side*.615f-10)-lift);hero.addView(sub,xp);
             if(hint){TextView line=text("Hold a Bot to pin it",12,SECONDARY);line.setCompoundDrawablesRelativeWithIntrinsicBounds(new PinGlyph(SECONDARY,12,false,false),null,null,null);line.setCompoundDrawablePadding(dp(4));FrameLayout.LayoutParams hp=new FrameLayout.LayoutParams(-2,dp(18),Gravity.TOP|Gravity.CENTER_HORIZONTAL);hp.topMargin=xp.topMargin+dp(22);hero.addView(line,hp);}
             Button talk=button("Talk to "+primary.optString("name","your Primary Bot"),()->primaryAction(primary,true));styleHomeTalk(talk,primary.optString("name","your Primary Bot"));talk.setTag("home_primary_talk");talk.setTextColor(Color.BLACK);talk.setBackground(shape(WHITE,28));talk.setEnabled(!historyStaging()&&!botSelectionPending);FrameLayout.LayoutParams ep=new FrameLayout.LayoutParams(dp(side*.62f),dp(54),Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);ep.bottomMargin=dp(12);root.addView(talk,ep);
             View fade=new View(this);fade.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,new int[]{0x00000000,0xff000000}));FrameLayout.LayoutParams fl=new FrameLayout.LayoutParams(-1,dp(18),Gravity.BOTTOM);fl.bottomMargin=dp(67);root.addView(fade,fl);
@@ -400,23 +425,29 @@ public final class MainActivity extends Activity {
         LinearLayout row=new LinearLayout(this);row.setGravity(Gravity.CENTER_VERTICAL);row.setPadding(dp(10),0,dp(10),0);row.setBackground(shape(CARD_ROW,25));row.setClickable(true);row.setFocusable(true);row.setContentDescription(name);row.setOnClickListener(v->{navigation++;action.run();});row.setEnabled(!botSelectionPending);
         boolean selected=preview?name.equals(botName):metadata!=null&&!selectedMetadata.optString("id","").isEmpty()&&metadata.optString("id","").equals(selectedMetadata.optString("id"));
         row.setSelected(selected);if(selected)row.setStateDescription("Selected");
-        boolean working=working(metadata);int unread=metadata==null?0:Math.max(0,metadata.optInt("unreadCount",0));boolean hasUnread=metadata!=null&&(unread>0||metadata.optBoolean("hasUnread"));
+        boolean working=working(metadata),awaiting=metadata!=null&&metadata.optBoolean("awaiting");int unread=metadata==null?0:Math.max(0,metadata.optInt("unreadCount",0));boolean hasUnread=metadata!=null&&(unread>0||metadata.optBoolean("hasUnread"));
         // Avatar with a green dot while the Bot is working, like the live status in Grok Bot's watch views.
         FrameLayout avatar=new FrameLayout(this);BotAvatarView face=new BotAvatarView(this);applyAvatar(face,name,metadata);face.state("ready",BLUE,0);face.running(visible);avatars.add(face);avatar.addView(face,new FrameLayout.LayoutParams(dp(34),dp(34)));
         if(working)avatar.addView(statusDot(GREEN,CARD_ROW),dotAt(10,24,24));row.addView(avatar,new LinearLayout.LayoutParams(dp(34),dp(34)));
         TextView nameLabel=text(name,15,WHITE);nameLabel.setTag("bot_name");nameLabel.setSingleLine(true);nameLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);LinearLayout names=new LinearLayout(this);names.setOrientation(LinearLayout.VERTICAL);nameLabel.setGravity(Gravity.START);names.addView(nameLabel,new LinearLayout.LayoutParams(-1,-2));
-        // Second line: "Working…" while busy, else the latest message, else the Bot's role.
+        // Second line: "Needs you" while the Bot waits for you, "Working…" while busy, else the latest message, else the Bot's role.
         String previewText=metadata==null?"":metadata.optString("lastMessagePreview",""),role=metadata==null?"":metadata.optString("title","");
         String second=working?"Working…":!previewText.isEmpty()?MessageText.plain(previewText):role;
-        if(!second.isEmpty()){TextView sub=text(second,12,working?GREEN:SECONDARY);sub.setTag(working?"bot_status":"bot_excerpt");sub.setSingleLine(true);sub.setEllipsize(android.text.TextUtils.TruncateAt.END);sub.setGravity(Gravity.START);names.addView(sub,new LinearLayout.LayoutParams(-1,-2));}
+        if(awaiting||!second.isEmpty()){TextView sub=text(second,12,working&&!awaiting?GREEN:SECONDARY);if(awaiting)sub.setText(needsYou(previewText.isEmpty()?"":MessageText.plain(previewText)));
+            sub.setTag(awaiting||working?"bot_status":"bot_excerpt");sub.setSingleLine(true);sub.setEllipsize(android.text.TextUtils.TruncateAt.END);sub.setGravity(Gravity.START);names.addView(sub,new LinearLayout.LayoutParams(-1,-2));}
         LinearLayout.LayoutParams np=new LinearLayout.LayoutParams(0,-2,1);np.leftMargin=dp(8);row.addView(names,np);
         if(hasUnread){View badge=unreadBadge(unread);LinearLayout.LayoutParams ub=new LinearLayout.LayoutParams(-2,dp(unread>0?18:8));ub.leftMargin=dp(4);row.addView(badge,ub);}
-        row.setContentDescription(name+(working?", working":"")+(unread>0?", "+unread+" unread":hasUnread?", unread":""));
+        row.setContentDescription(name+(awaiting?", needs you":"")+(working?", working":"")+(unread>0?", "+unread+" unread":hasUnread?", unread":""));
         if(selected){TextView check=text("✓",16,BLUE);check.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);row.addView(check,new LinearLayout.LayoutParams(dp(20),-2));}
         if(metadata!=null&&!metadata.optString("id","").isEmpty()&&!isPrimaryId(metadata.optString("id")))row.setOnLongClickListener(v->{openBotActions(metadata);return true;});
         LinearLayout.LayoutParams rp=new LinearLayout.LayoutParams(-1,dp(getResources().getConfiguration().fontScale>1.2f?62:52));rp.topMargin=dp(6);body.addView(row,rp);
     }
     private boolean working(JSONObject metadata){return metadata!=null&&(metadata.optBoolean("isRunning")||metadata.optBoolean("isRunningTurn")||metadata.optBoolean("isComposingMessage"));}
+    /** "Needs you" in orange, then the latest message in the line's own grey: the Bot is waiting for your answer. */
+    private CharSequence needsYou(String preview){
+        String mark="Needs you";android.text.SpannableString line=new android.text.SpannableString(preview.isEmpty()?mark:mark+" · "+preview);
+        line.setSpan(new android.text.style.ForegroundColorSpan(ORANGE),0,mark.length(),0);return line;
+    }
     /** A round status dot with a ring in the surface colour, so it reads against the avatar. */
     private View statusDot(int color,int ring){View dot=new View(this);GradientDrawable mark=new GradientDrawable();mark.setShape(GradientDrawable.OVAL);mark.setColor(color);mark.setStroke(dp(2),ring);dot.setBackground(mark);dot.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);return dot;}
     private FrameLayout.LayoutParams dotAt(int size,int left,int top){FrameLayout.LayoutParams at=new FrameLayout.LayoutParams(dp(size),dp(size),Gravity.TOP|Gravity.LEFT);at.leftMargin=dp(left);at.topMargin=dp(top);return at;}
@@ -456,12 +487,13 @@ public final class MainActivity extends Activity {
         BotAvatarView face=new BotAvatarView(this);applyAvatar(face,name,bot);face.state("ready",BLUE,0);face.running(visible);avatars.add(face);face.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         // The avatar view draws its face at 76% of its box: a 58 dp box shows the 44 dp face.
         tile.addView(face,new FrameLayout.LayoutParams(dp(58),dp(58),Gravity.TOP|Gravity.CENTER_HORIZONTAL));
-        int count=Math.max(0,bot.optInt("unreadCount",0));boolean unread=count>0||bot.optBoolean("hasUnread"),working=working(bot);
-        // Working: a green dot at the avatar's lower right. Unread: the count badge (or a dot) at its upper right.
+        int count=Math.max(0,bot.optInt("unreadCount",0));boolean unread=count>0||bot.optBoolean("hasUnread"),working=working(bot),awaiting=bot.optBoolean("awaiting");
+        // Working: a green dot at the avatar's lower right. Unread: the count badge (or a dot) at its upper right. Needs you: an orange dot at its upper left.
         if(working)tile.addView(statusDot(GREEN,Color.BLACK),dotAt(12,47,40));
+        if(awaiting)tile.addView(statusDot(ORANGE,Color.BLACK),dotAt(12,15,6));
         if(unread){View badge=unreadBadge(count);FrameLayout.LayoutParams at=new FrameLayout.LayoutParams(count>0?-2:dp(12),dp(count>0?18:12),Gravity.TOP|Gravity.LEFT);at.leftMargin=dp(count>0?44:47);at.topMargin=dp(count>0?2:6);tile.addView(badge,at);}
         TextView label=text(name,12,WHITE);label.setSingleLine(true);label.setEllipsize(android.text.TextUtils.TruncateAt.END);FrameLayout.LayoutParams lp=new FrameLayout.LayoutParams(-1,dp(16),Gravity.TOP);lp.topMargin=dp(54);tile.addView(label,lp);
-        tile.setContentDescription(name+", pinned"+(working?", working":"")+(count>0?", "+count+" unread":unread?", unread":"")+(selected?", selected":""));
+        tile.setContentDescription(name+", pinned"+(awaiting?", needs you":"")+(working?", working":"")+(count>0?", "+count+" unread":unread?", unread":"")+(selected?", selected":""));
         tile.setOnClickListener(v->{boolean call=pickToCall;navigation++;primaryAction(bot,call);});tile.setOnLongClickListener(v->{openBotActions(bot);return true;});
         if(id.equals(justPinnedId)){justPinnedId="";tile.setScaleX(.6f);tile.setScaleY(.6f);tile.setAlpha(0);tile.animate().scaleX(1).scaleY(1).alpha(1).setDuration(260).setInterpolator(new android.view.animation.OvershootInterpolator()).start();}
         return tile;
@@ -633,7 +665,7 @@ public final class MainActivity extends Activity {
         FrameLayout.LayoutParams ep=new FrameLayout.LayoutParams(dp(side*.62f),dp(54),Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);ep.bottomMargin=dp(12);root.addView(talk,ep);
     }
     private void ready(){
-        callTimers.clear();main.removeCallbacks(callTimer);
+        callTimers.clear();questionTimers.clear();main.removeCallbacks(callTimer);main.removeCallbacks(questionReveal);
         FrameLayout.LayoutParams sp=(FrameLayout.LayoutParams)currentScroll.getLayoutParams();sp.topMargin=0;sp.bottomMargin=dp(67);currentScroll.setLayoutParams(sp);body.setPadding(0,0,0,dp(28));
         // A Bot other than the Primary gets a compact hero with its pin control under the name.
         JSONObject pinBot=currentPinBot();View[] pin=pinBot==null?null:pinViews(pinBot,false);boolean caption=pin!=null&&pin[0]!=null;
@@ -654,7 +686,8 @@ public final class MainActivity extends Activity {
         JSONObject usage=usageTray();int newestEnd=body.getChildCount();
         // Newest first: messages still sending come first, then the chat from its newest message back.
         boolean noticed=newest&&outgoingBubbles(usage);
-        for(int k=0;k<count;k++){JSONObject e=historyEntries.optJSONObject(newest?count-1-k:k);if(e==null)continue;if(e.has("approval"))approvalCard(e.optJSONObject("approval"));else if(e.has("call"))phoneCallCard(e.optJSONObject("call"));else chatBubble(e);}
+        for(int k=0;k<count;k++){JSONObject e=historyEntries.optJSONObject(newest?count-1-k:k);if(e==null)continue;if(e.has("approval"))approvalCard(e.optJSONObject("approval"));else if(e.has("call"))phoneCallCard(e.optJSONObject("call"));else if(e.has("question"))questionCard(e.optJSONObject("question"));
+            else if(e.has("widget"))widgetCard(e,Widgets.movedOn(historyEntries,newest?count-1-k:k));else if(e.has("phoneTool"))phoneToolCard();else chatBubble(e);}
         if(!newest)noticed=outgoingBubbles(usage);
         if(usage!=null&&!noticed)usageNotice(usage,newest?newestEnd:body.getChildCount(),false);
         if(historyHasMore&&historyPages<5){Button older=action("Load older messages",()->loadHistory(true));older.setEnabled(!historyLoading);}
@@ -683,6 +716,7 @@ public final class MainActivity extends Activity {
         message.setContentDescription("Send a text message to "+botName);message.setEnabled(!messageSending&&!botSelectionPending);
     }
     private void composeMessage(){
+        answering=null;
         if(preview){draftMessage=previewDraft(botName);screen="compose_review";render();return;}
         try{
             android.content.Intent input=androidx.wear.input.RemoteInputIntentHelper.createActionRemoteInputIntent();
@@ -702,13 +736,15 @@ public final class MainActivity extends Activity {
     private void composeReview(){
         body.setPadding(dp(side*.12f),dp(20),dp(side*.12f),dp(8));
         // Inset further than the card so a long Bot name wraps inside the round edge.
-        TextView title=label("Send to "+botName+"?",14,WHITE);title.setTypeface(Typeface.create(Typeface.DEFAULT,500,false));title.setMaxLines(2);title.setEllipsize(android.text.TextUtils.TruncateAt.END);title.setPadding(dp(side*.06f),0,dp(side*.06f),0);gap(4);
+        // An answer to a question from the Bot's phone call goes to whoever asks it, through the Bot.
+        String asked=answering==null?"":answering.optString("askedBy");
+        TextView title=label(answering==null?"Send to "+botName+"?":"Answer "+(asked.isEmpty()?"the call":asked)+"?",14,WHITE);title.setTypeface(Typeface.create(Typeface.DEFAULT,500,false));title.setMaxLines(2);title.setEllipsize(android.text.TextUtils.TruncateAt.END);title.setPadding(dp(side*.06f),0,dp(side*.06f),0);gap(4);
         TextView card=label(draftMessage,14,WHITE);card.setGravity(Gravity.START);card.setPadding(dp(12),dp(8),dp(12),dp(8));card.setBackground(shape(GLASS,20));card.setMaxLines(8);card.setEllipsize(android.text.TextUtils.TruncateAt.END);card.setContentDescription("Message: "+draftMessage);
         gap(6);
         LinearLayout row=new LinearLayout(this);row.setGravity(Gravity.CENTER);
         Button change=button("Edit",()->{editDraft=draftMessage;screen="compose_edit";render();});change.setCompoundDrawablesRelativeWithIntrinsicBounds(new PencilGlyph(),null,null,null);change.setCompoundDrawablePadding(dp(6));change.setPadding(dp(16),0,dp(16),0);change.setEnabled(!messageSending);
         row.addView(change,new LinearLayout.LayoutParams(-2,dp(40)));body.addView(row,new LinearLayout.LayoutParams(-1,-2));
-        Button send=pinnedAction(messageSending?"Sending…":"Send",new SendGlyph(),()->sendDraft());send.setEnabled(!messageSending&&!draftMessage.isEmpty());send.setContentDescription("Send to "+botName);
+        Button send=pinnedAction(messageSending?"Sending…":"Send",new SendGlyph(),()->sendDraft());send.setEnabled(!messageSending&&!draftMessage.isEmpty());send.setContentDescription(answering==null?"Send to "+botName:"Send your answer");
         if(!safeError.isEmpty()){gap(6);label(safeError,12,0xffff7a72);}
     }
     /** A big white button pinned above the bottom edge, like Talk, so it can never scroll off the round screen. */
@@ -724,8 +760,8 @@ public final class MainActivity extends Activity {
     /** Fix the text with the watch keyboard (dictation from the keyboard works too). */
     private void composeEdit(){
         body.setPadding(dp(side*.12f),dp(24),dp(side*.12f),dp(8));
-        label("Edit message",13,SECONDARY);gap(6);
-        EditText field=new EditText(this);field.setText(editDraft);field.setTextColor(WHITE);field.setTextSize(15);field.setHint("Message "+botName);field.setHintTextColor(SECONDARY);
+        label(answering==null?"Edit message":"Your answer",13,SECONDARY);gap(6);
+        EditText field=new EditText(this);field.setText(editDraft);field.setTextColor(WHITE);field.setTextSize(15);field.setHint(answering==null?"Message "+botName:CallQuestions.placeholder(answering,botName));field.setHintTextColor(SECONDARY);
         field.setBackground(shape(GLASS,18));field.setPadding(dp(12),dp(10),dp(12),dp(10));
         // The keyboard's action key finishes the edit (a watch keyboard has no other way out); long text still wraps.
         field.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);field.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE);
@@ -738,10 +774,11 @@ public final class MainActivity extends Activity {
     }
     private void finishEdit(View field){
         ((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(field.getWindowToken(),0);
-        draftMessage=editDraft.trim();safeError="";screen=draftMessage.isEmpty()?"ready":"compose_review";render();
+        draftMessage=editDraft.trim();safeError="";if(draftMessage.isEmpty())answering=null;screen=draftMessage.isEmpty()?"ready":"compose_review";render();
     }
     private void sendDraft(){
         if(messageSending||draftMessage.isEmpty())return;
+        if(answering!=null){sendAnswer();return;}
         String text=draftMessage;
         if(preview){
             // Simulated: Sending…, then Sent, then the message and a demo reply land in the chat.
@@ -784,12 +821,13 @@ public final class MainActivity extends Activity {
             String state=job.optString("state"),text=job.optString("text");
             TextView bubble=label(text,14,WHITE);bubble.setGravity(Gravity.START);bubble.setPadding(dp(10),dp(8),dp(10),dp(8));bubble.setBackground(shape(userBubble(),14));
             LinearLayout.LayoutParams bp=(LinearLayout.LayoutParams)bubble.getLayoutParams();bp.topMargin=dp(6);bubble.setLayoutParams(bp);
-            boolean out=job.optString("id").equals(answered);
-            String status=out?BotEvents.Waits.USAGE_TITLE:state.equals("sent")?"Sent":state.equals("failed")?job.optString("notice","Not sent"):state.equals("unknown")?"Not confirmed · Tap to try again":"Sending…";
+            boolean out=job.optString("id").equals(answered),resend=state.equals("failed")&&job.optBoolean("resend"),again=state.equals("unknown")||resend;
+            // Grok said it never got it: not sent, and only a tap sends it again.
+            String status=out?BotEvents.Waits.USAGE_TITLE:state.equals("sent")?"Sent":resend?"Not sent · Tap to send again":state.equals("failed")?job.optString("notice","Not sent"):state.equals("unknown")?"Not confirmed · Tap to try again":"Sending…";
             if(out)usageNotice(usage,body.getChildCount(),true);
             else{TextView line=label(status,11,state.equals("failed")?0xffff7a72:SECONDARY);line.setGravity(Gravity.END);
-                if(state.equals("unknown")){final String id=job.optString("id");line.setClickable(true);line.setOnClickListener(v->retryMessage(id));}}
-            if(state.equals("unknown")){final String id=job.optString("id");bubble.setOnClickListener(v->retryMessage(id));}
+                if(again){final String id=job.optString("id");line.setClickable(true);line.setOnClickListener(v->retryMessage(id));}}
+            if(again){final String id=job.optString("id");bubble.setOnClickListener(v->retryMessage(id));}
             bubble.setContentDescription("You: "+text+". "+status);
         }
         return !answered.isEmpty();
@@ -853,12 +891,16 @@ public final class MainActivity extends Activity {
     }
     private void refreshMessages(String botId){
         if(preview||botId.isEmpty())return;
-        worker.execute(()->{try{JSONArray mine=account.messages(botId);
-            // Confirm anything uncertain from the chat; this never sends.
-            for(int i=0;i<mine.length();i++){JSONObject job=mine.optJSONObject(i);if(job!=null&&("unknown".equals(job.optString("state"))||"submitting".equals(job.optString("state"))))mine.put(i,account.confirmMessage(job.optString("id")));}
-            JSONArray latest=mine;main.post(()->{if(!botId.equals(selectedMetadata.optString("id")))return;botMessages=latest;if(screen.equals("ready"))render();});
+        worker.execute(()->{try{JSONArray mine=account.messages(botId);boolean checking=false;
+            // Confirm anything uncertain from Grok's send status or the chat; this never sends.
+            for(int i=0;i<mine.length();i++){JSONObject job=mine.optJSONObject(i);if(job!=null&&("unknown".equals(job.optString("state"))||"submitting".equals(job.optString("state")))){
+                JSONObject now=account.confirmMessage(job.optString("id"));mine.put(i,now);checking|=account.checkingSend(now);}}
+            JSONArray latest=mine;boolean again=checking;main.post(()->{if(!botId.equals(selectedMetadata.optString("id")))return;botMessages=latest;if(screen.equals("ready"))render();
+                // While Grok is asked about a send, ask again in 2 s.
+                main.removeCallbacks(sendCheck);if(again)main.postDelayed(sendCheck,SendStatus.POLL_MS);});
         }catch(Exception ignored){}});
     }
+    private final Runnable sendCheck=()->{if(visible&&screen.equals("ready"))refreshMessages(selectedMetadata.optString("id",""));};
     /** After sending, refresh the chat with backoff until the Bot replies (about 3 minutes at most). */
     private void watchForReply(String text,long created){
         if(replyWatch!=null)main.removeCallbacks(replyWatch);replyChecks=0;replyWatchText=text;replyWatchSince=created;final String botId=selectedMetadata.optString("id","");
@@ -894,7 +936,7 @@ public final class MainActivity extends Activity {
     private final EventStream.Listener live=new EventStream.Listener(){
         public void bot(String identity,JSONObject row){if(liveCurrent(identity))liveBot(row);}
         // Your message or the Bot's reply; tool steps and other entries don't change the chat.
-        public void entry(String identity,String botId,JSONObject entry){if(liveCurrent(identity)&&(entry.optBoolean("reply")||entry.optBoolean("user")||entry.has("approval")||entry.has("call")))liveEntry(botId);}
+        public void entry(String identity,String botId,JSONObject entry){if(liveCurrent(identity)&&(entry.optBoolean("reply")||entry.optBoolean("user")||entry.has("approval")||entry.has("call")||entry.has("question")||entry.has("widget")||entry.has("phoneTool")))liveEntry(botId);}
         public void connected(String identity,boolean again){
             // Events from the gap are gone: read once the usual way.
             if(!again||!liveCurrent(identity))return;if(screen.equals("ready"))liveEntry(selectedMetadata.optString("id",""));else if(screen.equals("bots"))refreshBots(true);}
@@ -903,16 +945,17 @@ public final class MainActivity extends Activity {
             if(liveCurrent(identity)&&screen.equals("ready")&&(pushed==null||pushed.optString("agentId").equals(selectedMetadata.optString("id"))))render();}
     };
     private boolean liveCurrent(String identity){return visible&&!preview&&!identity.isEmpty()&&identity.equals(botsAccountBinding)&&!VoiceService.snapshot().active&&!isCall();}
-    private static final String[] LIVE_KEYS={"name","title","avatarShape","avatarColor","hasUnread","unreadCount","isRunning","isRunningTurn","isComposingMessage","lastMessagePreview","lastActivityAt","lastViewedAt"};
+    private static final String[] LIVE_KEYS={"name","title","avatarShape","avatarColor","hasUnread","unreadCount","isRunning","isRunningTurn","isComposingMessage","lastMessagePreview","lastActivityAt","lastViewedAt","awaiting"};
     private void liveBot(JSONObject row){
         String id=row.optString("id");boolean found=false,changed=false;
         try{for(int i=0;i<bots.length();i++){JSONObject b=bots.optJSONObject(i);if(b==null||!id.equals(b.optString("id")))continue;found=true;changed|=merge(b,row);}
             if(id.equals(selectedMetadata.optString("id")))merge(selectedMetadata,row);}catch(Exception ignored){}
         // A Bot this watch hasn't listed yet: read the roster the usual way.
         if(!found){if(screen.equals("bots"))refreshBots(false);return;}
-        // Its chat is on screen, so what it just wrote has been seen.
-        long now=android.os.SystemClock.elapsedRealtime();
-        if(id.equals(openChat)&&(row.optLong("unreadCount")>0||row.optBoolean("hasUnread"))&&now-liveReadAt>2000){liveReadAt=now;markRead(id,true);}
+        // Its chat is on screen, so what it just wrote has been seen. Unread follow-up threads alone aren't in that chat:
+        // with a count, only the chat's own unread messages count.
+        long now=android.os.SystemClock.elapsedRealtime(),count=row.optLong("unreadCount",-1);
+        if(id.equals(openChat)&&(count>0||count<0&&row.optBoolean("hasUnread"))&&now-liveReadAt>2000){liveReadAt=now;markRead(id,true);}
         if(changed&&screen.equals("bots")){main.removeCallbacks(liveRender);main.postDelayed(liveRender,300);}
     }
     /** Copies a live row's fields; returns whether a Bot row would look different. */
@@ -921,7 +964,7 @@ public final class MainActivity extends Activity {
         for(String key:LIVE_KEYS){Object value=row.opt(key);if(value==null)into.remove(key);else into.put(key,value);}
         return !before.equals(rowLook(into));
     }
-    private String rowLook(JSONObject b){return b.optString("name")+"|"+b.optString("title")+"|"+b.optString("avatarShape")+"|"+b.optString("avatarColor")+"|"+b.optLong("unreadCount")+"|"+b.optBoolean("hasUnread")+"|"+working(b)+"|"+b.optString("lastMessagePreview");}
+    private String rowLook(JSONObject b){return b.optString("name")+"|"+b.optString("title")+"|"+b.optString("avatarShape")+"|"+b.optString("avatarColor")+"|"+b.optLong("unreadCount")+"|"+b.optBoolean("hasUnread")+"|"+working(b)+"|"+b.optBoolean("awaiting")+"|"+b.optString("lastMessagePreview");}
     private final Runnable liveRender=()->{if(visible&&screen.equals("bots"))renderBotListPreservingScroll();};
     /** A new entry in the open chat: refresh it once the current read (if any) finishes. */
     private void liveEntry(String botId){
@@ -992,7 +1035,7 @@ public final class MainActivity extends Activity {
             String who=PhoneCalls.headline(call,botName),line=PhoneCalls.status(call,pending);
             TextView head=label(who,13,WHITE);head.setTypeface(Typeface.create(Typeface.DEFAULT,600,false));head.setGravity(Gravity.START);gap(3);
             TextView status=label(line==null?PhoneCalls.timer(call,System.currentTimeMillis()):line,12,SECONDARY);status.setGravity(Gravity.START);
-            if(line==null){if(callTimers.isEmpty())main.postDelayed(callTimer,1000);callTimers.put(status,call.optLong("connectedAtMs"));}
+            if(line==null){callTimers.put(status,call.optLong("connectedAtMs"));tick();}
             if(ended||!pending.isEmpty())return;
             boolean sending=callsSending.contains(callId);
             if(PhoneCalls.canTakeOver(call,own)){Button take=action("Take over",()->controlCall(call,true));take.setTextColor(Color.BLACK);take.setBackground(shape(WHITE,24));take.setEnabled(!sending&&!preview);
@@ -1026,6 +1069,159 @@ public final class MainActivity extends Activity {
                 // A server-run Bot's call reaches the watch only on a read: look again shortly.
                 main.postDelayed(()->liveEntry(botId),4000);});
         });
+    }
+    /**
+     * A question someone on the Bot's phone call asks (CallQuestions), as a compact card: who asks, the question, a live
+     * "Respond in m:ss", and for your own Bots Send (the usual message input) and Skip. Held back until Grok reveals it;
+     * a settled one is a line in the official words, with your answer when it went.
+     */
+    private void questionCard(JSONObject question){
+        if(question==null)return;long now=System.currentTimeMillis();
+        if(CallQuestions.heldBack(question,now)){main.postDelayed(questionReveal,Math.min(question.optLong("revealAtMs")-now+50,600_000L));return;}
+        String entryId=question.optString("entryId"),prompt=question.optString("prompt"),server=CallQuestions.state(question,now),local=questionsAnswered.get(entryId);
+        // Answered here and Grok hasn't said so yet: that answer stands, even past the deadline. Grok's own word wins.
+        boolean here=local!=null&&(server.equals("open")||server.equals("timed_out"));
+        String state=here?(local.isEmpty()?"skipped":"sent"):server;boolean open=state.equals("open");
+        boolean own=!(selectedMetadata.has("viewerIsOwner")&&!selectedMetadata.optBoolean("viewerIsOwner",true));
+        LinearLayout card=new LinearLayout(this);card.setOrientation(LinearLayout.VERTICAL);card.setPadding(dp(10),dp(8),dp(10),dp(open?10:8));card.setBackground(shape(CARD,14));card.setTag("call_question");
+        LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(-1,-2);cp.topMargin=dp(6);body.addView(card,cp);
+        LinearLayout outer=body;body=card;
+        try{
+            TextView source=label(open?CallQuestions.asking(question):"Phone call",11,SECONDARY);source.setGravity(Gravity.START);
+            if(!open){
+                TextView done=label((here&&state.equals("sent")?"Sent":CallQuestions.settled(state))+(prompt.isEmpty()?"":" · "+prompt),12,SECONDARY);done.setGravity(Gravity.START);done.setMaxLines(3);done.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                String said=question.optString("answer");if(said.isEmpty()&&local!=null)said=local;
+                if(state.equals("sent")&&!said.isEmpty()){gap(4);TextView yours=label("Your answer",11,SECONDARY);yours.setGravity(Gravity.START);
+                    TextView answer=label(said,13,WHITE);answer.setGravity(Gravity.START);answer.setMaxLines(4);answer.setEllipsize(android.text.TextUtils.TruncateAt.END);}
+                return;
+            }
+            gap(3);TextView head=label(prompt.isEmpty()?"Answer needed":prompt,13,WHITE);head.setTypeface(Typeface.create(Typeface.DEFAULT,600,false));head.setGravity(Gravity.START);head.setMaxLines(5);head.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            long deadline=question.optLong("deadlineAtMs");
+            if(deadline>0){gap(3);TextView left=label(CallQuestions.remaining(deadline,now),12,ORANGE);left.setGravity(Gravity.START);questionTimers.put(left,deadline);tick();}
+            if(!own){gap(4);TextView elsewhere=label("Answer on your phone",11,SECONDARY);elsewhere.setGravity(Gravity.START);}
+            else{boolean sending=questionsSending.contains(entryId);
+                Button send=action(sending?"Sending…":"Send",()->writeAnswer(question));send.setTextColor(Color.BLACK);send.setBackground(shape(WHITE,24));send.setEnabled(!sending&&!preview);send.setContentDescription("Answer: "+prompt);
+                Button skip=action("Skip",()->answerQuestion(question,null));skip.setEnabled(!sending&&!preview);skip.setContentDescription("Skip: "+prompt);}
+            String error=questionErrors.containsKey(entryId)?questionErrors.get(entryId):"";
+            if(!error.isEmpty()){gap(4);TextView problem=label(error,11,0xffff7a72);problem.setGravity(Gravity.START);}
+        }finally{body=outer;}
+    }
+    /** Send: the usual message input (dictate, type or draw) with the question's hint and its suggested answer one tap away, then review. */
+    private void writeAnswer(JSONObject question){
+        if(preview||messageSending)return;answering=question;questionErrors.remove(question.optString("entryId"));String prefill=question.optString("prefill");
+        try{
+            android.content.Intent input=androidx.wear.input.RemoteInputIntentHelper.createActionRemoteInputIntent();
+            android.app.RemoteInput.Builder field=new android.app.RemoteInput.Builder("message").setLabel(CallQuestions.placeholder(question,botName));
+            if(!prefill.isEmpty())field.setChoices(new CharSequence[]{prefill});
+            androidx.wear.input.RemoteInputIntentHelper.putRemoteInputsExtra(input,java.util.Collections.singletonList(field.build()));
+            startActivityForResult(input,MESSAGE_INPUT);
+        }catch(RuntimeException unavailable){draftMessage="";editDraft=prefill;screen="compose_edit";render();}
+    }
+    /** The reviewed answer, if the question is still open; past the deadline the card already says so. */
+    private void sendAnswer(){
+        JSONObject question=answering;if(question==null||messageSending)return;
+        if(!"open".equals(CallQuestions.state(question,System.currentTimeMillis()))){answering=null;draftMessage="";screen="ready";render();return;}
+        answerQuestion(question,draftMessage);
+    }
+    /** Send (answer) or Skip (null), once, off the main thread, then reads the chat again. Never retried on its own. */
+    private void answerQuestion(JSONObject question,String answer){
+        final String entryId=question.optString("entryId"),botId=selectedMetadata.optString("id","");
+        if(preview||botId.isEmpty()||questionsSending.contains(entryId)||questionsAnswered.containsKey(entryId))return;
+        final boolean reviewing=answer!=null;questionsSending.add(entryId);questionErrors.remove(entryId);if(reviewing){messageSending=true;safeError="";}render();final BotAccount asking=account;
+        worker.execute(()->{String problem="";
+            try{asking.answerQuestion(botId,question,answer);}
+            catch(Exception failed){problem=failed instanceof GrokCore.Failure&&failed.getMessage()!=null?failed.getMessage():CallQuestions.FAILED;}
+            final String said=problem;
+            main.post(()->{questionsSending.remove(entryId);if(reviewing)messageSending=false;if(!botId.equals(selectedMetadata.optString("id")))return;
+                if(said.isEmpty()){questionsAnswered.put(entryId,reviewing?answer.trim():"");root.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM);
+                    if(reviewing){answering=null;draftMessage="";screen="ready";}}
+                else{questionErrors.put(entryId,said);if(reviewing)safeError=said;}
+                if(!screen.equals("ready")&&!screen.equals("compose_review"))return;render();if(!screen.equals("ready"))return;liveEntry(botId);
+                // A server-run Bot's question reaches the watch only on a read: look again shortly.
+                main.postDelayed(()->liveEntry(botId),4000);});
+        });
+    }
+    /**
+     * A Bot's question with option buttons (Widgets), as a compact card: the question with ✕ to dismiss it, then a button
+     * per option (red when Grok marks it danger), or toggles and Done when several apply. An answer shows at once and, as
+     * in the official app, goes back to the buttons if Grok refuses it. Answered, it's the question and your answer.
+     */
+    private void widgetCard(JSONObject row,boolean stale){
+        JSONObject widget=row.optJSONObject("widget");if(widget==null)return;
+        String entryId=widget.optString("entryId"),prompt=widget.optString("prompt"),mine=widgetsAnswered.get(entryId),state=Widgets.state(widget,stale);
+        if(state.equals("open")&&mine!=null)state="answered";else if(state.equals("open")&&widgetsDismissed.contains(entryId))state="dismissed";
+        // Answered with the answer as your own chat message: the question is the Bot's bubble, as in the official chat.
+        if(state.equals("echoed")){chatBubble(row);return;}
+        if(prompt.isEmpty())prompt="Question";
+        LinearLayout card=new LinearLayout(this);card.setOrientation(LinearLayout.VERTICAL);card.setPadding(dp(10),dp(8),dp(10),dp(state.equals("open")?10:8));card.setBackground(shape(CARD,14));card.setTag("widget");
+        LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(-1,-2);cp.topMargin=dp(6);body.addView(card,cp);
+        LinearLayout outer=body;body=card;
+        try{
+            boolean sending=widgetsSending.contains(entryId);
+            if(!state.equals("open")){
+                TextView asked=label(prompt,12,SECONDARY);asked.setGravity(Gravity.START);asked.setMaxLines(3);asked.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                if(state.equals("answered")){TextView answer=label(Widgets.answerText(widget,widget.has("answer")?widget.optString("answer"):mine),13,WHITE);answer.setGravity(Gravity.START);answer.setMaxLines(4);answer.setEllipsize(android.text.TextUtils.TruncateAt.END);}
+                else{TextView gone=label("Dismissed",11,SECONDARY);gone.setGravity(Gravity.START);}
+                if(sending){TextView wait=label("Sending…",11,SECONDARY);wait.setGravity(Gravity.START);}
+                return;
+            }
+            boolean own=!(selectedMetadata.has("viewerIsOwner")&&!selectedMetadata.optBoolean("viewerIsOwner",true)),answerable=own&&Widgets.answerable(widget);
+            LinearLayout top=new LinearLayout(this);top.setGravity(Gravity.TOP);
+            TextView head=text(prompt,13,WHITE);head.setTypeface(Typeface.create(Typeface.DEFAULT,600,false));head.setGravity(Gravity.START);head.setMaxLines(6);head.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            top.addView(head,new LinearLayout.LayoutParams(0,-2,1));
+            if(own){Button close=button("✕",()->answerWidget(widget,null));close.setContentDescription("Dismiss question");close.setTextColor(SECONDARY);close.setBackground(shape(Color.TRANSPARENT,0));
+                close.setPadding(0,0,0,0);close.setEnabled(!sending&&!preview);top.addView(close,new LinearLayout.LayoutParams(dp(32),dp(32)));}
+            body.addView(top,new LinearLayout.LayoutParams(-1,-2));
+            String help=widget.optString("helpText");if(!help.isEmpty()){gap(2);TextView helping=label(help,11,SECONDARY);helping.setGravity(Gravity.START);helping.setMaxLines(3);helping.setEllipsize(android.text.TextUtils.TruncateAt.END);}
+            if(!answerable){if(!widget.optBoolean("allowCustom")||!own||widget.optBoolean("special")){gap(4);TextView elsewhere=label("Answer on your phone",11,SECONDARY);elsewhere.setGravity(Gravity.START);}}
+            else{boolean multi=widget.optBoolean("multiSelect");java.util.Set<Integer> picks=widgetPicks.containsKey(entryId)?widgetPicks.get(entryId):new java.util.HashSet<>();
+                if(multi){gap(2);TextView all=label("Choose all that apply",11,SECONDARY);all.setGravity(Gravity.START);}
+                JSONArray options=widget.optJSONArray("options");
+                for(int i=0;i<options.length();i++){JSONObject option=options.optJSONObject(i);final int index=i;boolean picked=multi&&picks.contains(i);String label=option.optString("label"),caption=option.optString("description");
+                    Button choice=action((picked?"✓ ":"")+label,()->{if(multi)togglePick(entryId,index);else answerWidget(widget,option.optString("value"));});
+                    // A long label wraps rather than being cut.
+                    LinearLayout.LayoutParams lp=(LinearLayout.LayoutParams)choice.getLayoutParams();lp.height=-2;choice.setLayoutParams(lp);choice.setMinHeight(dp(44));choice.setMinimumHeight(dp(44));choice.setPadding(dp(12),dp(8),dp(12),dp(8));
+                    if(picked){choice.setBackground(shape(WHITE,24));choice.setTextColor(Color.BLACK);}else if(option.optBoolean("danger"))choice.setTextColor(RED);
+                    choice.setEnabled(!sending&&!preview);choice.setContentDescription(label+(caption.isEmpty()?"":", "+caption)+(multi?(picked?", selected":", not selected"):""));
+                    if(!caption.isEmpty()){gap(2);TextView under=label(caption,11,SECONDARY);under.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);}
+                }
+                if(multi){Button done=action(sending?"Sending…":"Done",()->answerWidget(widget,Widgets.joinPicked(widget,picks)));done.setTextColor(Color.BLACK);done.setBackground(shape(WHITE,24));done.setEnabled(!picks.isEmpty()&&!sending&&!preview);}
+            }
+            if(widget.optBoolean("allowCustom")){gap(4);TextView custom=label("Or answer in the chat below",11,SECONDARY);custom.setGravity(Gravity.START);}
+            String error=widgetErrors.containsKey(entryId)?widgetErrors.get(entryId):"";
+            if(!error.isEmpty()){gap(4);TextView problem=label(error,11,0xffff7a72);problem.setGravity(Gravity.START);}
+        }finally{body=outer;}
+    }
+    private void togglePick(String entryId,int index){
+        java.util.Set<Integer> picks=widgetPicks.computeIfAbsent(entryId,k->new java.util.HashSet<>());if(!picks.remove(index))picks.add(index);render();
+    }
+    /** One answer (or ✕, value null), off the main thread: shown at once, and back to the buttons if Grok refuses it. Never retried on its own. */
+    private void answerWidget(JSONObject widget,String value){
+        final String entryId=widget.optString("entryId"),botId=selectedMetadata.optString("id","");
+        if(preview||botId.isEmpty()||widgetsSending.contains(entryId)||value!=null&&value.isEmpty())return;
+        widgetsSending.add(entryId);widgetErrors.remove(entryId);if(value==null)widgetsDismissed.add(entryId);else widgetsAnswered.put(entryId,value);render();final BotAccount asking=account;
+        worker.execute(()->{String problem="";
+            try{asking.answerWidget(botId,widget,value);}
+            catch(Exception failed){problem=failed instanceof GrokCore.Failure&&failed.getMessage()!=null?failed.getMessage():Widgets.FAILED;}
+            final String said=problem;
+            main.post(()->{widgetsSending.remove(entryId);
+                if(said.isEmpty()){widgetPicks.remove(entryId);root.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM);}
+                else{widgetsAnswered.remove(entryId);widgetsDismissed.remove(entryId);widgetErrors.put(entryId,said);
+                    // Grok's words show for a moment; the card is then as it was.
+                    main.postDelayed(()->{if(said.equals(widgetErrors.get(entryId))){widgetErrors.remove(entryId);if(visible&&screen.equals("ready"))render();}},6000);}
+                if(!botId.equals(selectedMetadata.optString("id"))||!screen.equals("ready"))return;render();liveEntry(botId);
+                // A server-run Bot's answer reaches the watch only on a read: look again shortly.
+                main.postDelayed(()->liveEntry(botId),4000);});
+        });
+    }
+    /** The Bot asks to run one of its tools on your phone (Widgets.phoneTool): only the phone can answer, so the card says so. */
+    private void phoneToolCard(){
+        LinearLayout card=new LinearLayout(this);card.setOrientation(LinearLayout.VERTICAL);card.setPadding(dp(10),dp(8),dp(10),dp(8));card.setBackground(shape(CARD,14));card.setTag("phone_tool");
+        LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(-1,-2);cp.topMargin=dp(6);body.addView(card,cp);
+        LinearLayout outer=body;body=card;
+        try{TextView head=label(botName+" wants to use your phone",13,WHITE);head.setTypeface(Typeface.create(Typeface.DEFAULT,600,false));head.setGravity(Gravity.START);
+            gap(3);TextView where=label("Answer on your phone",11,SECONDARY);where.setGravity(Gravity.START);}
+        finally{body=outer;}
     }
     /** Marks the Bot's chat read on open (and when a reply arrives), as the official apps do. */
     private void markRead(String botId,boolean force){
@@ -1156,7 +1352,7 @@ public final class MainActivity extends Activity {
     }
     private boolean historyStaging(){return preview?previewSaving:VoiceService.historyStaging();}
     private boolean isHistory(){return screen.equals("history")||screen.equals("history_detail");}
-    private void clearHistory(){approvalsSending.clear();approvalsSent.clear();approvalsElsewhere.clear();approvalErrors.clear();callsSending.clear();callsAsked.clear();callErrors.clear();callArmed="";historyRequest++;historyLoading=false;historyStale=false;historyHasMore=false;historyBefore=null;historyBinding=null;historyDetail=null;
+    private void clearHistory(){widgetsSending.clear();widgetsDismissed.clear();widgetsAnswered.clear();widgetErrors.clear();widgetPicks.clear();questionsSending.clear();questionsAnswered.clear();questionErrors.clear();approvalsSending.clear();approvalsSent.clear();approvalsElsewhere.clear();approvalErrors.clear();callsSending.clear();callsAsked.clear();callErrors.clear();callArmed="";historyRequest++;historyLoading=false;historyStale=false;historyHasMore=false;historyBefore=null;historyBinding=null;historyDetail=null;
         historyEntries=new JSONArray();historyError="";historyAgent="";historyAccount="";historyPages=0;pendingHistory=0;}
     private void openHistory(){
         if(!preview&&VoiceService.snapshot().active){renderVoice();return;}
