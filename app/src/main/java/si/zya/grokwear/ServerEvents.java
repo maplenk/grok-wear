@@ -122,10 +122,10 @@ final class ServerEvents {
         if(identity.isEmpty())return;
         MAIN.post(()->{if(!current(mine))return;for(EventStream.Listener l:EventStream.listeners())l.connected(identity,true);});
     }
-    /** Hands a Bot row to EventStream's listeners on the main thread, as a gateway row would be. */
+    /** Hands a Bot row to EventStream's listeners on the main thread, as a gateway row would be (and clears a notice read elsewhere). */
     private static void publish(long mine,String identity,JSONObject row){
         if(row==null||identity.isEmpty())return;
-        MAIN.post(()->{if(!current(mine))return;for(EventStream.Listener l:EventStream.listeners())l.bot(identity,row);});
+        MAIN.post(()->{if(!current(mine))return;ReplyAlertService.viewed(app,row);for(EventStream.Listener l:EventStream.listeners())l.bot(identity,row);});
     }
     /** Keeps a usage-limit notice (UsageTrays) and, if it's news, tells EventStream's listeners on the main thread. */
     private static void usage(long mine,String identity,BotEvents.Event event){

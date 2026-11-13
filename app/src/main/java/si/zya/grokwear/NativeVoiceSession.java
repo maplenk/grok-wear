@@ -57,7 +57,8 @@ public final class NativeVoiceSession {
     private final WireFactory wireFactory;
     private final PcmCodec codec;
     private final String botId,botName;
-    private final String callId=java.util.UUID.randomUUID().toString();
+    // "call-" and a UUID, as the official app mints it: the same id goes in harness tool requests, the call record and presence.
+    private final String callId=CallNudges.newCallId();
     private final Listener listener;
     private final ScheduledExecutorService worker=Executors.newSingleThreadScheduledExecutor();
     // Independent of blocking account HTTP work: a stalled harness/mint cannot postpone startup expiry.
@@ -138,6 +139,30 @@ public final class NativeVoiceSession {
         });
     }
     public boolean didConnect(){return didConnect;}
+    /** This call's id, as the gateway's setVoiceCallPresence and its voice-call-nudge events name it. */
+    String callId(){return callId;}
+    // Updates already put into this call (the official spokenUpdates), and nudges waiting for the line to be ready.
+    private final Set<String> spokenUpdates=new HashSet<>();private final java.util.ArrayList<JSONArray> heldSeeds=new java.util.ArrayList<>();
+    // The Bot's last turn when news came in; news stays owed until it speaks another.
+    private String newsIgnoreItem="";
+    /**
+     * Finished work for this call (a voice-call-nudge, CallNudges), seeded as Grok Bot Android 1.25.0 does: said aloud,
+     * or for an overheard note filed silently, and held while the line isn't ready. One diagnostic line, never its text.
+     */
+    public void nudge(JSONObject nudge){
+        if(nudge==null)return;
+        if(!execute(()->{
+            String why=CallNudges.refusal(nudge,botId,callId,started.get()&&!ending,plan!=null&&plan.optBoolean("hasOverheard"),spokenUpdates);
+            if(why!=null){listener.onDiagnostic("call_nudge dropped reason="+why);return;}
+            spokenUpdates.add(nudge.optString("update"));String kind=nudge.optString("kind");
+            JSONArray frames=CallNudges.frames(nudge,CallNudges.seedId(),System.currentTimeMillis());
+            if(CallNudges.spoken(nudge)){newsOwed=true;newsIgnoreItem=lastAssistantItem();}
+            if(!ready||reconnecting){if(heldSeeds.size()<8)heldSeeds.add(frames);listener.onDiagnostic("call_nudge held kind="+kind);return;}
+            for(int i=0;i<frames.length();i++)send(frames.getJSONObject(i));
+            listener.onDiagnostic("call_nudge injected kind="+kind);
+        }))listener.onDiagnostic("call_nudge dropped reason=off_line");
+    }
+    private String lastAssistantItem(){synchronized(historyGuard){String id="";for(java.util.Map.Entry<String,JSONObject> e:spokenTurns.entrySet())if("assistant".equals(e.getValue().optString("speaker")))id=e.getKey();return id;}}
     /** Conversation state the harness expects alongside the end-of-call handoff; read after the call ended. */
     public JSONObject handoffLine()throws Exception{
         return new JSONObject().put("theyJustTalked",callerSpoke).put("newsOwed",newsOwed).put("receiptOwed",receiptOwed).put("alreadySpokeThisTurn",alreadySpoke);
@@ -618,7 +643,9 @@ public final class NativeVoiceSession {
             case "response.audio_transcript.delta":case "response.output_audio_transcript.delta":
                 if(!interruptedReply&&belongsToCurrentReply(e)&&!interruptedItems.contains(e.optString("item_id","")))captureTurn(e,"assistant",true);break;
             case "response.audio_transcript.done":case "response.output_audio_transcript.done":
-                if(!interruptedReply&&belongsToCurrentReply(e)&&!interruptedItems.contains(e.optString("item_id",""))){captureTurn(e,"assistant",false);caption(botName,e.optString("transcript",""));}break;
+                if(!interruptedReply&&belongsToCurrentReply(e)&&!interruptedItems.contains(e.optString("item_id",""))){captureTurn(e,"assistant",false);caption(botName,e.optString("transcript",""));
+                    // A new turn since the news came in: the caller has heard it.
+                    String said=e.optString("item_id","");if(said.isEmpty())said=assistantItem;if(newsOwed&&!said.equals(newsIgnoreItem))newsOwed=false;}break;
             case "response.function_call_arguments.done":if(!interruptedReply&&belongsToCurrentReply(e))tool(e);break;
             case "error":protocolError(e);break;
             default:break;
@@ -640,6 +667,10 @@ public final class NativeVoiceSession {
             try{startupGuard.check();}catch(Exception changed){fail(setupFailure(changed));return;}
             if(terminal.get())return;
             ready=true;if(readyMs<0)readyMs=sinceStart();cancelStartupDeadline();
+            // Finished work that came in while the line wasn't ready goes in now, in order.
+            if(!heldSeeds.isEmpty()){int held=heldSeeds.size();
+                try{for(JSONArray frames:heldSeeds)for(int i=0;i<frames.length();i++)send(frames.getJSONObject(i));}catch(Exception unsent){fail("Grok voice could not process this call safely.");return;}
+                heldSeeds.clear();listener.onDiagnostic("call_nudge injected held="+held);}
             // The caller goes first, as in the official clients: the Bot's greeting plays only after 15 s with no speech.
             try{worker.schedule(()->execute(this::greetIfQuiet),greetingGraceMs,TimeUnit.MILLISECONDS);}catch(java.util.concurrent.RejectedExecutionException ignored){}
             // Settings that are never confirmed would leave a call that can't hear the caller.

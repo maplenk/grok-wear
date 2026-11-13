@@ -179,6 +179,18 @@ public class GrokAuthCoreTest {
             refused(()->f.core.poll());assertEquals("unlinked",f.core.state().getString("status"));assertEquals(1,f.calls.size());
         }
     }
+    @Test public void grokRefusingTheSignInSaysSoAndStopsAsking()throws Exception {
+        for(int status:new int[]{401,403}){
+            Fixture f=new Fixture();f.core.begin();f.poll=new GrokAuthCore.Reply(status,new JSONObject().put("error","synthetic-policy"));
+            try{f.core.poll();fail("Expected refusal");}
+            catch(GrokCore.Failure refused){assertEquals("Grok refused this sign-in. Check the account, or ask your organisation's admin.",refused.getMessage());assertTrue(refused.rejected);}
+            assertEquals(0,f.core.pendingLogin().length());f.now+=GrokAuthCore.POLL_MS;f.core.poll();
+            assertEquals("no more polling: a new sign-in starts over",1,f.calls.size());
+        }
+        assertFalse(GrokAuthCore.refusedSignIn(404));assertFalse(GrokAuthCore.refusedSignIn(500));
+        Fixture f=new Fixture();f.core.begin();f.poll=new GrokAuthCore.Reply(500,new JSONObject());
+        try{f.core.poll();fail("Expected failure");}catch(GrokCore.Failure failed){assertEquals("Grok sign-in failed (HTTP 500). Start a new sign-in.",failed.getMessage());}
+    }
     @Test public void interruptedPollCannotRepeatAfterRestart()throws Exception {
         Fixture f=new Fixture();f.core.begin();f.interrupt=true;refused(()->f.core.poll());
         assertEquals("login_uncertain",f.core.state().getString("status"));assertEquals(0,f.core.pendingLogin().length());

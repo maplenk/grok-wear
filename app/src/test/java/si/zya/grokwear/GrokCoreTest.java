@@ -122,6 +122,22 @@ public class GrokCoreTest {
             assertFalse(rows.getJSONObject(i).has(key));
         core.select("known");assertTrue(core.view().getJSONObject("bot").getBoolean("hasUnread"));
     }
+    @Test public void unreadThreadsCountAsUnreadLikeTheOfficialBadge()throws Exception {
+        assertTrue(GrokCore.rosterRow(new JSONObject().put("id","a").put("hasUnread",false).put("unreadCount",0).put("unreadThreadCount",2),0).getBoolean("hasUnread"));
+        assertTrue("no flag at all",GrokCore.rosterRow(new JSONObject().put("id","a").put("unreadThreadCount",1),0).getBoolean("hasUnread"));
+        JSONObject read=GrokCore.rosterRow(new JSONObject().put("id","a").put("hasUnread",false).put("unreadThreadCount",0),0);
+        assertFalse(read.getBoolean("hasUnread"));assertEquals("the chat's own count stays its own",0,GrokCore.rosterRow(new JSONObject().put("id","a").put("unreadCount",0).put("unreadThreadCount",3),0).getInt("unreadCount"));
+        assertFalse("not a number",GrokCore.rosterRow(new JSONObject().put("id","a").put("unreadThreadCount","2"),0).has("hasUnread"));
+    }
+    @Test public void aBotWaitingForYouIsKeptAsAFlagOnly()throws Exception {
+        JSONObject waiting=GrokCore.rosterRow(new JSONObject().put("id","a").put("awaitingUserResponse",new JSONObject().put("reason","Approval needed: call Luigi's")
+            .put("reasonCopy",new JSONObject().put("kind","auto_review_approval"))),0);
+        assertTrue(waiting.getBoolean("awaiting"));assertFalse("never its words",waiting.toString().contains("Luigi"));assertFalse(waiting.has("awaitingUserResponse"));
+        assertFalse("null while it isn't waiting",GrokCore.rosterRow(new JSONObject().put("id","a").put("awaitingUserResponse",JSONObject.NULL),0).has("awaiting"));
+        assertFalse(GrokCore.rosterRow(new JSONObject().put("id","a").put("awaitingUserResponse","yes"),0).has("awaiting"));
+        assertFalse(GrokCore.rosterRow(new JSONObject().put("id","a").put("awaiting","true"),0).has("awaiting"));
+        assertTrue("a server row's state says it as a flag",GrokCore.rosterRow(new JSONObject().put("id","a").put("awaiting",true),0).getBoolean("awaiting"));
+    }
     @Test public void verifiedOwnershipSessionAndNativeMissingDefaultSurviveDiscovery()throws Exception {
         GrokCore core=new GrokCore(new Memory(),(cfg,method,body)->new JSONObject().put("agents",new JSONArray()
             .put(new JSONObject().put("id","owner").put("name","Owner"))
@@ -282,6 +298,27 @@ public class GrokCoreTest {
         f.c.retry(id);assertEquals(nonce,f.lastSend.getString("clientNonce"));f.c.retry(id);f.c.retry(id);
         assertEquals("Three attempts at most",3,Collections.frequency(f.calls,"sendPrompt"));
         f.sendError=null;Fixture g=new Fixture();String sent=g.c.prepare("ok");g.c.submit(sent);g.c.retry(sent);assertEquals(1,g.calls.size());
+    }
+    @Test public void grokSendStatusSettlesAnUnconfirmedMessageWithoutSending()throws Exception {
+        Fixture f=new Fixture();f.sendError=new java.io.IOException("network");
+        String id=f.c.prepare("hello");f.c.submit(id);JSONObject sent=f.c.settle(id,null);
+        assertEquals("sent",sent.getString("state"));assertEquals("Sent",sent.getString("notice"));
+        assertEquals("settled once",sent.toString(),f.c.settle(id,new GrokCore.Failure("No",true)).toString());
+        String refused=f.c.prepare("two");f.c.submit(refused);JSONObject no=f.c.settle(refused,new GrokCore.Failure("Grok refused the message. Nothing was sent.",true));
+        assertEquals("failed",no.getString("state"));assertEquals("Grok refused the message. Nothing was sent.",no.getString("notice"));assertFalse(no.has("resend"));
+        f.c.retry(refused);assertEquals("a refused message isn't sent again",2,Collections.frequency(f.calls,"sendPrompt"));
+        assertEquals("only an unconfirmed message settles","prepared",f.c.settle(f.c.prepare("three"),null).getString("state"));
+    }
+    @Test public void aMessageGrokNeverGotIsSentAgainOnlyByTheUserWithItsNonce()throws Exception {
+        Fixture f=new Fixture();f.sendError=new java.io.IOException("network");String id=f.c.prepare("hello");f.c.submit(id);String nonce=f.lastSend.getString("clientNonce");
+        JSONObject lost=f.c.settle(id,new GrokCore.Failure("Grok never got this message. Nothing was sent.",true,GrokCore.NOT_RECEIVED));
+        assertEquals("failed",lost.getString("state"));assertTrue(lost.getBoolean("resend"));
+        assertEquals(1,Collections.frequency(f.calls,"sendPrompt"));
+        f.c.delete(f.c.prepare("next")); // Not sent doesn't hold up the next message.
+        f.sendError=null;JSONObject again=f.c.retry(id);
+        assertEquals("sent",again.getString("state"));assertEquals(nonce,f.lastSend.getString("clientNonce"));assertFalse(again.has("resend"));
+        assertEquals(2,Collections.frequency(f.calls,"sendPrompt"));
+        f.c.retry(id);assertEquals("sent, so never again",2,Collections.frequency(f.calls,"sendPrompt"));
     }
     @Test public void unlinkSeparatesAccountsAndDeletesInbox()throws Exception {
         Fixture f=new Fixture();String id=f.c.prepare("private old text");f.c.unlink();f.c.link(config());

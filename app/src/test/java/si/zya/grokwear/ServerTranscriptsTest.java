@@ -92,11 +92,33 @@ public class ServerTranscriptsTest {
         assertEquals("plain",states.over(base,now).getString("lastMessagePreview"));assertEquals(2,states.over(base,now).getLong("unreadCount"));
         states.apply(new JSONObject().put("snapshot",true));assertFalse(states.knows("A"));
     }
+    @Test public void aBotWaitingForYouSaysSoAndKeepsSayingItWhenItGoesStale()throws Exception {
+        ServerTranscripts.States states=new ServerTranscripts.States();long now=1_800_000_000_000L;
+        JSONObject base=new JSONObject().put("id","A").put("name","TheBot").put("awaitingUserResponse",new JSONObject().put("reason","gateway"));
+        assertTrue("unknown Bots keep the gateway's",states.over(base,now).has("awaitingUserResponse"));
+        // The main session isn't waiting, a task session is: any waiting session counts. A group seat isn't the Bot's own.
+        states.apply(new JSONObject().put("live",new JSONArray()
+            .put(new JSONObject().put("agentId","A").put("isRunning",true).put("updatedAtMs",now-1000))
+            .put(new JSONObject().put("agentId","A").put("sessionId","task:7").put("awaiting",new JSONObject().put("tabId","t").put("reason","approval").put("sinceMs",String.valueOf(now-500))))
+            .put(new JSONObject().put("agentId","B").put("sessionId","group:x").put("awaiting",new JSONObject()))));
+        JSONObject row=states.over(base,now);
+        assertTrue(row.getBoolean("awaiting"));assertFalse("the server's state replaces the gateway's",row.has("awaitingUserResponse"));
+        // Gone stale: idle again, still waiting (settleStale keeps it).
+        JSONObject stale=states.over(base,now+91_000);assertFalse(stale.getBoolean("isRunning"));assertTrue(stale.getBoolean("awaiting"));
+        assertFalse("a group seat waiting doesn't make the Bot wait",states.over(new JSONObject().put("id","B"),now).has("awaiting"));
+        // The waiting session moves on: the Bot no longer waits, whatever the gateway said.
+        states.apply(new JSONObject().put("live",new JSONArray().put(new JSONObject().put("agentId","A").put("sessionId","task:7"))));
+        row=states.over(base,now);assertFalse(row.has("awaiting"));assertFalse(row.has("awaitingUserResponse"));
+        // A server row keeps it through the Bot list's own reduction, as a gateway row does.
+        states.apply(new JSONObject().put("live",new JSONArray().put(new JSONObject().put("agentId","A").put("awaiting",new JSONObject()))));
+        assertTrue(GrokCore.rosterRow(states.over(base,now),0).getBoolean("awaiting"));
+    }
     @Test public void structuredPreviewsReadAsTheOfficialAppShowsThem()throws Exception {
         assertEquals("Messaged Ops: on it",ServerTranscripts.previewOf(new JSONObject().put("lastEntryPreview",new JSONObject().put("sentAgentMessage",new JSONObject().put("peerName","Ops").put("text","on it")))));
         assertEquals("3 attachments",ServerTranscripts.previewOf(new JSONObject().put("lastEntryPreview",new JSONObject().put("attachments",new JSONObject().put("count",3)))));
         assertEquals("Lunch? — Yes / No",ServerTranscripts.previewOf(new JSONObject().put("lastEntryPreview",new JSONObject().put("widgetOptions",new JSONObject().put("prompt","Lunch?").put("options",new JSONArray().put("Yes").put("No"))))));
         assertEquals("",ServerTranscripts.previewOf(new JSONObject()));
+        assertEquals("Done",ServerTranscripts.previewOf(new JSONObject().put("lastEntryPreview",new JSONObject().put("text",new JSONObject().put("text","Done"))).put("lastMessagePreview","older")));
     }
     // A turnFailed frame's fields as FEATURES-SPEC §1.4 lists them; values synthetic.
     static JSONObject turnFailed(Object code)throws Exception {

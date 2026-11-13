@@ -26,10 +26,11 @@ public final class NativeVoiceSessionTest {
             this(history,greeting,prepared,expired,guard,false);
         }
         Fixture(JSONArray history,String greeting,boolean prepared,boolean expired,NativeVoiceSession.StartupGuard guard,boolean deferred)throws Exception {
+            final boolean overheard=nextOverheard;nextOverheard=false;
             NativeVoiceSession.Backend backend=(method,body)->{
                 backendCalls.incrementAndGet();
                 if(method.equals("VoiceCallHarnessSession")){JSONArray offered=new JSONArray();for(String name:new String[]{"recall_text_messages","search_conversations","send_task","end_the_call"})offered.put(new JSONObject().put("type","function").put("name",name));
-                    return new JSONObject().put("instructions","Talk to this Bot").put("tools",offered).put("greeting",new JSONObject().put("direction",greeting));}
+                    return new JSONObject().put("instructions","Talk to this Bot").put("tools",offered).put("greeting",new JSONObject().put("direction",greeting)).put("hasOverheard",overheard);}
                 if(method.equals("MintSandVoiceCallSecret"))return new JSONObject().put("clientSecret","fake-public-test").put("model","fake-model").put("expiresAtUnixSeconds",System.currentTimeMillis()/1000+600).put("websocketUrl","wss://api.x.ai/test-only");
                 tools.add(new JSONObject(body.toString()));
                 if(lookupEntered!=null)lookupEntered.countDown();if(lookupRelease!=null)lookupRelease.await(3,TimeUnit.SECONDS);
@@ -309,8 +310,62 @@ public final class NativeVoiceSessionTest {
             f.ready();f.receive("response.created");f.tool("function-one","recall_text_messages");
             assertEquals("function-one",f.frame("conversation.item.create").getJSONObject("item").getString("call_id"));
             f.tool("function-two","search_conversations");assertEquals("function-two",f.frame("conversation.item.create").getJSONObject("item").getString("call_id"));
-            assertEquals(2,f.tools.size());String id=f.tools.get(0).getString("callId");assertEquals(UUID.fromString(id).toString(),id);
-            assertEquals(id,f.tools.get(1).getString("callId"));assertNotEquals("function-one",id);
+            // "call-" and a UUID, minted on the watch as the official app does (MORE-FEATURES-SPEC §2.2).
+            assertEquals(2,f.tools.size());String id=f.tools.get(0).getString("callId");assertTrue(id,id.startsWith("call-"));assertEquals(UUID.fromString(id.substring(5)).toString(),id.substring(5));
+            assertEquals(id,f.tools.get(1).getString("callId"));assertNotEquals("function-one",id);assertEquals("presence names the same call",id,f.session.callId());
+        }
+    }
+    static volatile boolean nextOverheard;
+    static JSONObject nudge(NativeVoiceSession session,String kind,String update)throws Exception {
+        return CallNudges.of(new JSONObject().put("agentId","bot-test").put("callId",session.callId()).put("update",update).put("kind",kind));
+    }
+    /** Frames sent so far of this type, after everything already queued on the session has run. */
+    static int sentOf(Fixture f,String type)throws Exception {f.barrier();int n=0;for(JSONObject frame:f.sent)if(type.equals(frame.optString("type")))n++;return n;}
+    @Test public void finishedWorkForThisCallIsSpokenOnce()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.ready();f.sent.clear();
+            f.session.nudge(nudge(f.session,"outcome","Booked: table for 2 at 7:30pm."));
+            JSONObject update=f.frame("async_update.add");assertTrue(update.getString("event_id").startsWith("seeded-nudge-nudge-"));
+            JSONObject payload=update.getJSONObject("async_update").getJSONArray("payload").getJSONObject(0);
+            assertEquals("work_landed",update.getJSONObject("async_update").getString("topic"));assertEquals("Booked: table for 2 at 7:30pm.",payload.getJSONObject("message").getString("content"));
+            f.sent.clear();
+            f.session.nudge(nudge(f.session,"ack","Booked: table for 2 at 7:30pm."));
+            f.session.nudge(CallNudges.of(new JSONObject().put("agentId","bot-test").put("callId","call-someone-else").put("update","Other call").put("kind","outcome")));
+            f.session.nudge(CallNudges.of(new JSONObject().put("agentId","bot-other").put("callId",f.session.callId()).put("update","Other Bot").put("kind","outcome")));
+            f.session.nudge(nudge(f.session,"overheard","Calling Luigi's now"));
+            assertEquals("a repeat, another call, another Bot, an overheard note the call doesn't take: none",0,sentOf(f,"async_update.add")+sentOf(f,"conversation.item.create"));
+            for(JSONObject frame:f.sent)assertNotEquals("no reply asked for","response.create",frame.optString("type"));
+        }
+    }
+    @Test public void anOverheardNoteIsFiledSilentlyWhenTheCallTakesThem()throws Exception {
+        nextOverheard=true;
+        try(Fixture f=new Fixture()){
+            f.ready();f.sent.clear();f.session.nudge(nudge(f.session,"overheard","Calling Luigi's now"));
+            JSONObject call=f.frame("conversation.item.create").getJSONObject("item"),output=f.frame("conversation.item.create").getJSONObject("item");
+            assertEquals("work_overheard",call.getString("name"));assertEquals(call.getString("call_id"),output.getString("call_id"));
+            assertTrue(output.getString("output").contains("Calling Luigi's now"));
+            assertEquals("silent",0,sentOf(f,"response.create")+sentOf(f,"async_update.add"));
+            // Filed, not said: the next tool request owes no news.
+            f.receive("response.created");f.tool("lookup-1","search_conversations");f.frame("conversation.item.create");
+            assertFalse(f.tools.get(0).getJSONObject("line").getBoolean("newsOwed"));
+        }
+    }
+    @Test public void workThatLandsBeforeTheLineIsReadyWaitsForIt()throws Exception {
+        try(Fixture f=new Fixture(new JSONArray(),"",true,false,()->{},true)){
+            f.session.nudge(nudge(f.session,"progress","Calling Luigi's now"));
+            assertNull("held while the line isn't ready",f.sent.poll(150,TimeUnit.MILLISECONDS));
+            f.session.provideHistory(new JSONArray());f.receive("session.updated");f.callback("ready");
+            assertEquals("Calling Luigi's now",f.frame("async_update.add").getJSONObject("async_update").getJSONArray("payload").getJSONObject(0).getJSONObject("message").getString("content"));
+        }
+    }
+    @Test public void spokenNewsIsOwedToTheHarnessUntilTheBotSpeaksAgain()throws Exception {
+        try(Fixture f=new Fixture()){
+            f.ready();f.session.nudge(nudge(f.session,"outcome","Booked."));f.frame("async_update.add");
+            f.receive("response.created");f.tool("lookup-1","search_conversations");f.frame("conversation.item.create");
+            assertTrue("owed until the Bot speaks",f.tools.get(0).getJSONObject("line").getBoolean("newsOwed"));
+            f.events.message(new JSONObject().put("type","response.output_audio_transcript.done").put("item_id","news-turn").put("transcript","It's booked.").toString());
+            f.receive("response.done");f.receive("response.created");f.tool("lookup-2","search_conversations");f.frame("conversation.item.create");
+            assertFalse("said",f.tools.get(1).getJSONObject("line").getBoolean("newsOwed"));
         }
     }
     @Test public void unknownToolRefusedWithoutBackendAndErrorStillSpoken()throws Exception {

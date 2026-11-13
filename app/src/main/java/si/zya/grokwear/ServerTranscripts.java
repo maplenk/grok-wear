@@ -182,8 +182,8 @@ final class ServerTranscripts {
         synchronized void clear(){client.clear();live.clear();}
         /**
          * The Bot's row with this state over it: the same fields as a gateway row (hasUnread, unreadCount,
-         * lastActivityAt, lastViewedAt, lastMessagePreview, isRunning, isRunningTurn, isComposingMessage).
-         * Unknown Bots come back unchanged.
+         * lastActivityAt, lastViewedAt, lastMessagePreview, isRunning, isRunningTurn, isComposingMessage), and awaiting
+         * (true while the Bot waits for you) in place of the gateway's awaitingUserResponse. Unknown Bots come back unchanged.
          */
         synchronized JSONObject over(JSONObject base,long now)throws Exception {
             JSONObject row=new JSONObject(base.toString());String id=GrokCore.text(row,"id");
@@ -204,6 +204,9 @@ final class ServerTranscripts {
                 for(JSONObject s:sessions.values()){if(!running(s,now))continue;anyRunning=true;if(s.optBoolean("isRunning")){chosen=s;break;}if(chosen==null)chosen=s;}
                 boolean turn=chosen!=null&&chosen.optBoolean("isRunning");
                 row.put("isRunning",anyRunning).put("isRunningTurn",turn).put("isComposingMessage",turn&&chosen.optBoolean("isComposingMessage"));
+                // Waiting for you outlasts a stale reset (settleStale keeps it), and any of its sessions waiting counts.
+                boolean awaiting=false;for(JSONObject s:sessions.values())awaiting|=s.optJSONObject("awaiting")!=null;
+                row.remove("awaitingUserResponse");if(awaiting)row.put("awaiting",true);else row.remove("awaiting");
             }
             return row;
         }
@@ -233,19 +236,23 @@ final class ServerTranscripts {
     static String previewOf(JSONObject c){
         JSONObject p=c.optJSONObject("lastEntryPreview");String text="";
         if(p!=null){
-            if(!GrokCore.text(p,"text").isEmpty())text=GrokCore.text(p,"text");
+            // Live, text arrives as a message ({text:{text}}), not the bare string the 1.25.0 reader also accepts.
+            if(p.optJSONObject("text")!=null)text=GrokCore.text(p.optJSONObject("text"),"text");
+            else if(!GrokCore.text(p,"text").isEmpty())text=GrokCore.text(p,"text");
             else if(p.optJSONObject("sentAgentMessage")!=null){JSONObject m=p.optJSONObject("sentAgentMessage");text="Messaged "+GrokCore.text(m,"peerName")+(GrokCore.text(m,"text").isEmpty()?"":": "+GrokCore.text(m,"text"));}
             else if(p.optJSONObject("receivedAgentMessage")!=null){JSONObject m=p.optJSONObject("receivedAgentMessage");text="Message from "+GrokCore.text(m,"peerName")+(GrokCore.text(m,"text").isEmpty()?"":": "+GrokCore.text(m,"text"));}
             else if(p.optJSONObject("attachments")!=null){long n=p.optJSONObject("attachments").optLong("count",1);text=n>1?n+" attachments":"Attachment";}
             else if(p.optJSONObject("link")!=null)text=GrokCore.text(p.optJSONObject("link"),"url");
-            else if(p.optJSONObject("widgetAnswered")!=null){JSONObject w=p.optJSONObject("widgetAnswered");text=GrokCore.text(w,"prompt")+" — "+GrokCore.text(w,"answer");}
+            else if(p.optJSONObject("widgetAnswered")!=null){JSONObject w=p.optJSONObject("widgetAnswered");text=question(w)+" — "+GrokCore.text(w,"answer");}
             else if(p.optJSONObject("widgetOptions")!=null){JSONObject w=p.optJSONObject("widgetOptions");JSONArray o=w.optJSONArray("options");List<String> opts=new ArrayList<>();
                 if(o!=null)for(int i=0;i<Math.min(4,o.length());i++)if(o.opt(i) instanceof String)opts.add(o.optString(i));
-                text=GrokCore.text(w,"prompt")+(opts.isEmpty()?"":" — "+String.join(" / ",opts));}
-            else if(p.optJSONObject("widgetPrompt")!=null)text=GrokCore.text(p.optJSONObject("widgetPrompt"),"prompt");
+                text=question(w)+(opts.isEmpty()?"":" — "+String.join(" / ",opts));}
+            else if(p.optJSONObject("widgetPrompt")!=null)text=question(p.optJSONObject("widgetPrompt"));
         }
         if(text.trim().isEmpty())text=GrokCore.text(c,"lastMessagePreview");
         text=text.replaceAll("[\\s\\p{Cc}]+"," ").trim();
         return text.length()>4096?text.substring(0,4096):text;
     }
+    /** A Bot question's prompt in a preview; an empty one reads "Question", as the official preview words it. */
+    private static String question(JSONObject widget){String prompt=GrokCore.text(widget,"prompt").trim();return prompt.isEmpty()?"Question":prompt;}
 }

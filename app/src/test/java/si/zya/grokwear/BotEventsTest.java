@@ -50,6 +50,70 @@ public class BotEventsTest {
         assertFalse(event.value.has("notifyOnUpdatesEnabled"));
         assertNull("groups are not Bots",BotEvents.parse(upserted(agent(0,false).put("isGroup",true))));
     }
+    @Test public void liveRowsCarryWaitingForYouAndUnreadThreads()throws Exception{
+        BotEvents.Event waiting=BotEvents.parse(upserted(agent(0,false).put("awaitingUserResponse",new JSONObject().put("reason","Waiting for you: a question")).put("unreadThreadCount",1)));
+        assertTrue(waiting.value.getBoolean("awaiting"));assertFalse("never its words",waiting.value.toString().contains("question"));
+        assertTrue("an unread thread counts",waiting.value.getBoolean("hasUnread"));assertEquals(0,waiting.value.getLong("unreadCount"));
+        BotEvents.Event idle=BotEvents.parse(upserted(agent(0,false).put("awaitingUserResponse",JSONObject.NULL).put("unreadThreadCount",0)));
+        assertFalse(idle.value.has("awaiting"));assertFalse(idle.value.getBoolean("hasUnread"));
+    }
+    @Test public void aChatReadElsewhereClearsOnlyNoticesPostedBeforeIt()throws Exception{
+        JSONObject read=BotEvents.parse(upserted(agent(0,false).put("lastViewedAt",5000))).value;
+        assertEquals(5000,BotEvents.viewedAt(read));
+        assertTrue(BotEvents.readAfter(read,4000));assertTrue(BotEvents.readAfter(read,5000));assertFalse("posted after the read",BotEvents.readAfter(read,5001));
+        assertFalse("never posted",BotEvents.readAfter(read,0));
+        assertEquals("still unread",0,BotEvents.viewedAt(BotEvents.parse(upserted(agent(2,false).put("lastViewedAt",5000))).value));
+        assertEquals("an unread thread too",0,BotEvents.viewedAt(BotEvents.parse(upserted(agent(0,false).put("lastViewedAt",5000).put("unreadThreadCount",1))).value));
+        assertEquals("never viewed",0,BotEvents.viewedAt(BotEvents.parse(upserted(agent(0,false))).value));
+        assertEquals("unread not known",0,BotEvents.viewedAt(new JSONObject().put("id","bot-1").put("lastViewedAt",5000)));
+        assertEquals(0,BotEvents.viewedAt(null));assertFalse(BotEvents.readAfter(null,1));
+        // A server Bot's row says the same through its stream state.
+        ServerTranscripts.States states=new ServerTranscripts.States();
+        states.apply(new JSONObject().put("client",new JSONArray().put(new JSONObject().put("agentId","bot-1").put("unreadCount",0).put("lastViewedAtMs","7000"))));
+        assertEquals(7000,BotEvents.viewedAt(states.over(new JSONObject().put("id","bot-1"),8000)));
+    }
+    private static String updated(String botId,JSONObject entry)throws Exception{
+        return new JSONObject().put("channel","transcript").put("payload",new JSONObject().put("type","updated").put("agentId",botId).put("entry",entry)).toString();
+    }
+    @Test public void aQuestionFromTheBotsPhoneCallComesLiveWithoutItsIds()throws Exception{
+        BotEvents.Event asked=BotEvents.parse(appended("bot-1",CallQuestionsTest.entry(CallQuestionsTest.phoneCallQuestion())));
+        JSONObject question=asked.value.getJSONObject("question");assertFalse(asked.value.getBoolean("reply"));
+        assertEquals("Luigi's Trattoria",question.getString("askedBy"));assertEquals("Is 7:30 OK instead of 7?",question.getString("prompt"));
+        assertEquals(CallQuestionsTest.DEADLINE,question.getLong("deadlineAtMs"));assertEquals(CallQuestionsTest.REVEAL,question.getLong("revealAtMs"));
+        assertFalse("no ids an answer needs",question.has("entryId")||question.has("agentId"));
+        BotEvents.Event closed=BotEvents.parse(updated("bot-1",CallQuestionsTest.entry(CallQuestionsTest.phoneCallQuestion().put("closed","ended"))));
+        assertEquals("an answered or closed question comes live too","ended",closed.value.getJSONObject("question").getString("closed"));
+        assertNull("a stale row is nothing",BotEvents.parse(updated("bot-1",CallQuestionsTest.entry(null))));
+    }
+    @Test public void aBotsOwnQuestionComesLiveAndEndsTheWaitWhileOpen()throws Exception{
+        BotEvents.Event asked=BotEvents.parse(appended("bot-1",WidgetsTest.entry(WidgetsTest.widget())));
+        JSONObject widget=asked.value.getJSONObject("widget");assertTrue(widget.getBoolean("open"));assertEquals("Can I read today's events on your phone calendar?",widget.getString("prompt"));
+        assertFalse("never its ids",widget.has("entryId"));
+        BotEvents.Event answered=BotEvents.parse(updated("bot-1",WidgetsTest.entry(WidgetsTest.widget()).put("respondedValue","allow")));
+        assertFalse("answered elsewhere comes live too",answered.value.getJSONObject("widget").getBoolean("open"));
+        BotEvents.Waits waits=new BotEvents.Waits();waits.start("bot-1","TheBot","msg-1",0);
+        assertNull("an answered one doesn't buzz",waits.entry("bot-1",answered.value,0));assertTrue(waits.waiting("bot-1"));
+        JSONObject alert=waits.entry("bot-1",asked.value,0);
+        assertTrue(alert.getBoolean("question"));assertEquals("TheBot is asking",alert.getString("title"));assertEquals("Can I read today's events on your phone calendar?",alert.getString("text"));
+        assertFalse(waits.waiting("bot-1"));
+        JSONObject ask=new JSONObject().put("id","perm-1").put("kind","send-message").put("message",new JSONObject().put("type","local-tool-permission")
+            .put("ask",new JSONObject().put("status","pending").put("action","run-phone-tool")));
+        assertTrue("an ask for the phone comes live",BotEvents.parse(updated("bot-1",ask)).value.getBoolean("phoneTool"));
+    }
+    @Test public void aQuestionFromTheBotsPhoneCallEndsTheWaitOnceGrokRevealsIt()throws Exception{
+        long wall=CallQuestionsTest.REVEAL-1000;JSONObject entry=BotEvents.entry(CallQuestionsTest.entry(CallQuestionsTest.phoneCallQuestion()));
+        BotEvents.Waits waits=new BotEvents.Waits();waits.start("bot-1","Ava","msg-1",0);
+        assertNull("held back: no buzz yet",waits.entry("bot-1",entry,wall));assertTrue(waits.waiting("bot-1"));assertNull(waits.reveal(wall+500));
+        JSONObject alert=waits.reveal(CallQuestionsTest.REVEAL);
+        assertTrue(alert.getBoolean("question"));assertEquals("Luigi's Trattoria is asking",alert.getString("title"));assertEquals("Is 7:30 OK instead of 7?",alert.getString("text"));
+        assertEquals("bot-1",alert.getString("bot"));assertFalse(waits.waiting("bot-1"));assertNull(waits.reveal(CallQuestionsTest.REVEAL));
+        // Already revealed: at once. Past its deadline, or closed: nothing to answer, so no buzz.
+        waits.start("bot-1","Ava","msg-2",0);assertTrue(waits.entry("bot-1",entry,CallQuestionsTest.REVEAL).getBoolean("question"));
+        waits.start("bot-1","Ava","msg-3",0);assertNull(waits.entry("bot-1",entry,CallQuestionsTest.DEADLINE));
+        assertNull(waits.entry("bot-1",BotEvents.entry(CallQuestionsTest.entry(CallQuestionsTest.phoneCallQuestion().put("closed","timed_out"))),CallQuestionsTest.REVEAL));
+        assertTrue(waits.waiting("bot-1"));
+        BotEvents.Waits none=new BotEvents.Waits();assertNull("no wait, no buzz",none.entry("bot-1",entry,CallQuestionsTest.REVEAL));
+    }
     @Test public void aBotsSendMessageIsAReplyWithItsText()throws Exception{
         BotEvents.Event event=BotEvents.parse(appended("bot-1",reply("Synthetic\nreply")));
         assertEquals("entry",event.kind);assertEquals("bot-1",event.botId);
