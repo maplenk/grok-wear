@@ -428,6 +428,14 @@ final class GrokAuthCore {
                 network=secret(body,key);break;
             }
             if(!network.isEmpty())headers.put("x-anyrun-network-token",network);
+            // Boxes routed by port instead (Grok, November 2026): without a network token, the gateway's port token
+            // goes in x-anyrun-port-token, as Grok Bot desktop 1.2.0 sends it. Without it the router answers 404.
+            else for(String key:new String[]{"gatewayPortToken","gateway_port_token"}) {
+                if(!body.has(key)||body.isNull(key))continue;
+                Object raw=body.opt(key);
+                if(raw instanceof String&&((String)raw).isEmpty())continue;
+                headers.put("x-anyrun-port-token",secret(body,key));break;
+            }
         }
         return GrokCore.validateConfig(new JSONObject().put("gatewayUrl",url).put("gatewayToken",token).put("headers",headers));
     }

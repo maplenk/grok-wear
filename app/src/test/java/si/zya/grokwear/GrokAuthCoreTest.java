@@ -351,6 +351,27 @@ public class GrokAuthCoreTest {
                 assertEquals("synthetic-gateway",config.getString("gatewayToken"));
             }
     }
+    @Test public void portTokenRoutesWhenThereIsNoNetworkToken()throws Exception {
+        for(String alias:new String[]{"gatewayPortToken","gateway_port_token"}) {
+            JSONObject response=new JSONObject().put("gatewayUrl","https://watch.cursorvm.com").put("gatewayToken","synthetic-gateway")
+                    .put(alias,"synthetic-port").put("networkToken","").put("forkVncPortToken","other-port");
+            JSONObject headers=GrokAuthCore.configFrom(response).getJSONObject("headers");
+            assertEquals("synthetic-port",headers.getString("x-anyrun-port-token"));assertEquals(1,headers.length());
+        }
+        for(Object token:new Object[]{"",JSONObject.NULL}) {
+            JSONObject response=new JSONObject().put("gatewayUrl","https://watch.cursorvm.com").put("gatewayToken","synthetic-gateway").put("gatewayPortToken",token);
+            assertEquals(0,GrokAuthCore.configFrom(response).getJSONObject("headers").length());
+        }
+        // A network token, when Grok still sends one, routes as before and the port token isn't added.
+        JSONObject both=new JSONObject().put("gatewayUrl","https://watch.cursorvm.com").put("gatewayToken","synthetic-gateway")
+                .put("networkToken","synthetic-route").put("gatewayPortToken","synthetic-port");
+        JSONObject headers=GrokAuthCore.configFrom(both).getJSONObject("headers");
+        assertEquals("synthetic-route",headers.getString("x-anyrun-network-token"));assertFalse(headers.has("x-anyrun-port-token"));
+        for(Object token:new Object[]{42,false,new JSONObject(),"line\nbreak"}) {
+            JSONObject response=new JSONObject().put("gatewayUrl","https://watch.cursorvm.com").put("gatewayToken","synthetic-gateway").put("gatewayPortToken",token);
+            refused(()->GrokAuthCore.configFrom(response));
+        }
+    }
     @Test public void optionalRoutingTokenNeverReplacesReturnedRoutingHeaders()throws Exception {
         for(Object token:new Object[]{"",JSONObject.NULL,"other-token"}) {
             JSONObject response=new JSONObject().put("gatewayUrl","https://watch.cursorvm.com").put("gatewayToken","synthetic-gateway")
