@@ -13,6 +13,43 @@ import java.util.Base64;
 import java.util.Set;
 
 public class ServerTranscriptsTest {
+    // ---- the Bot list, server first (Grok Bot 1.25.0 fetchServerRoster / unionNonTemporalBox) ----
+    static final String[] EXTRAS={"avatarDataUrl","title","hasUnread"};
+    static JSONObject serverRow(String internal,String agentId,String harness,String name)throws Exception {
+        return new JSONObject().put("id",internal).put("agentId",agentId).put("harness",harness).put("name",name);
+    }
+    static JSONObject boxRow(String id,String harness,String name)throws Exception {
+        return new JSONObject().put("id",id).put("harness",harness).put("name",name).put("avatarDataUrl","data:photo-"+id).put("title","role-"+id).put("hasUnread",true);
+    }
+    @Test public void rosterWithoutTheGatewayStillListsEveryServerBotByItsBotId()throws Exception {
+        JSONArray server=new JSONArray().put(serverRow("internal-1","A","temporal","Ann")).put(serverRow("internal-2","B","box","Bob"));
+        JSONArray merged=ServerTranscripts.roster(server,new JSONArray(),EXTRAS,null,0);
+        assertEquals(2,merged.length());
+        assertEquals("A",merged.getJSONObject(0).getString("id"));assertEquals("Ann",merged.getJSONObject(0).getString("name"));
+        // A box Bot the gateway couldn't list still gets its Bot id, never the server's internal one.
+        assertEquals("B",merged.getJSONObject(1).getString("id"));assertEquals("box",merged.getJSONObject(1).getString("harness"));
+        assertEquals("server rows are copied, not changed","internal-2",server.getJSONObject(1).getString("id"));
+        assertEquals(0,ServerTranscripts.roster(null,null,EXTRAS,null,0).length());
+    }
+    @Test public void rosterTakesServerRowsForServerBotsAndGatewayRowsForTheRest()throws Exception {
+        JSONArray server=new JSONArray().put(serverRow("i1","A","temporal","Ann (server)")).put(serverRow("i2","B","box","Bob (server)")).put(serverRow("i1b","A","temporal","dup"));
+        JSONArray box=new JSONArray().put(boxRow("A","temporal","Ann (box)")).put(boxRow("B","box","Bob (box)"))
+            .put(boxRow("C","box","Cat")).put(boxRow("D","temporal","Gone"));
+        JSONArray merged=ServerTranscripts.roster(server,box,EXTRAS,null,0);
+        assertEquals(3,merged.length());
+        JSONObject a=merged.getJSONObject(0);
+        assertEquals("A",a.getString("id"));assertEquals("Ann (server)",a.getString("name"));
+        assertEquals("the gateway's photo and extras fill in","data:photo-A",a.getString("avatarDataUrl"));assertEquals("role-A",a.getString("title"));
+        assertEquals("Bob (box)",merged.getJSONObject(1).getString("name"));
+        assertEquals("a box Bot only the gateway lists stays","Cat",merged.getJSONObject(2).getString("name"));
+        for(int i=0;i<merged.length();i++)assertNotEquals("a server Bot the server no longer lists is gone","D",merged.getJSONObject(i).getString("id"));
+    }
+    @Test public void rosterPutsTheLiveStateOverServerBots()throws Exception {
+        ServerTranscripts.States states=new ServerTranscripts.States();
+        states.apply(new JSONObject().put("client",new JSONArray().put(new JSONObject().put("agentId","A").put("unreadCount",3))));
+        JSONArray merged=ServerTranscripts.roster(new JSONArray().put(serverRow("i1","A","temporal","Ann")),new JSONArray(),EXTRAS,states,1000);
+        assertTrue(merged.getJSONObject(0).optBoolean("hasUnread"));
+    }
     static JSONObject row(long seq,JSONObject entry)throws Exception {
         return new JSONObject().put("seq",Long.toString(seq)).put("updatedSeq",Long.toString(seq)).put("entryId",entry.optString("id"))
             .put("body",Base64.getEncoder().encodeToString(entry.toString().getBytes(StandardCharsets.UTF_8)));

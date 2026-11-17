@@ -161,6 +161,34 @@ final class ServerTranscripts {
      * The stream's agentState for each Bot, kept as the official ServerAgentStateOverlays does: client state (unread,
      * last activity, preview) per Bot and live state (running, composing) per Bot and session.
      */
+    /**
+     * The Bot list as Grok Bot Android 1.25.0 builds it (fetchServerRoster, unionNonTemporalBox): the server's list
+     * first. A Bot run on Grok's server takes the server's row, with the gateway's photo and extras over it and the
+     * live stream's state over that; a Bot the box runs takes the gateway's row when there is one. Then the gateway's
+     * other Bots the server doesn't list, except ones the server runs (a Bot it runs but no longer lists is gone).
+     * box may be empty when the gateway's list couldn't be read: the server's list still stands.
+     */
+    static JSONArray roster(JSONArray server,JSONArray box,String[] extras,States states,long now)throws Exception {
+        if(server==null)server=new JSONArray();if(box==null)box=new JSONArray();
+        Map<String,JSONObject> byId=new HashMap<>();
+        for(int i=0;i<box.length();i++){JSONObject b=box.optJSONObject(i);String id=rowId(b);if(!id.isEmpty())byId.put(id,b);}
+        JSONArray merged=new JSONArray();Set<String> listed=new HashSet<>();
+        for(int i=0;i<server.length();i++){
+            // A server row's own "id" is an internal one; its agentId is the Bot id every other request uses.
+            JSONObject row=server.optJSONObject(i);String id=GrokCore.text(row,"agentId");if(id.isEmpty())id=GrokCore.text(row,"legacyAgentId");
+            if(id.isEmpty()||!listed.add(id))continue;
+            JSONObject b=byId.get(id);
+            if(!GrokCore.SERVER_HARNESS.equals(GrokCore.text(row,"harness"))){merged.put(b!=null?b:new JSONObject(row.toString()).put("id",id));continue;}
+            JSONObject mine=new JSONObject(row.toString()).put("id",id);
+            if(b!=null)for(String key:extras)if(b.has(key)&&!mine.has(key))mine.put(key,b.get(key));
+            merged.put(states==null?mine:states.over(mine,now));
+        }
+        for(int i=0;i<box.length();i++){JSONObject b=box.optJSONObject(i);String id=rowId(b);
+            if(b!=null&&!id.isEmpty()&&!listed.contains(id)&&!GrokCore.SERVER_HARNESS.equals(GrokCore.text(b,"harness")))merged.put(b);}
+        return merged;
+    }
+    private static String rowId(JSONObject row){String id=GrokCore.text(row,"id");return id.isEmpty()?GrokCore.text(row,"agentId"):id;}
+
     static final class States {
         private final Map<String,JSONObject> client=new HashMap<>();
         private final Map<String,Map<String,JSONObject>> live=new HashMap<>();
