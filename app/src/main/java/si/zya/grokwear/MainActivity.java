@@ -35,6 +35,9 @@ public final class MainActivity extends Activity {
     private boolean preview,previewMedia,visible,polling,simulated,scrollToEnd;
     private int epoch,previewEpoch,botRequest,navigation,activeRosterRequest;
     private boolean botsLoading,botSelectionPending,botsCached,rosterFetchActive;
+    /** Debug builds: this launch ignores the saved Bot list, as a fresh install would. */
+    private boolean freshList;
+    private String updateReturnScreen="bots";
     private long botsFetchedAtMs,lastBotRefreshAttemptElapsed;
     private static final long BOT_REFRESH_INTERVAL_MS=60000;
     private boolean rosterRetryUsed;
@@ -144,10 +147,18 @@ public final class MainActivity extends Activity {
             if(state==null&&(getIntent().getFlags()&Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY)==0){pendingOpenBot=openBotExtra(getIntent());noteAssist(getIntent());}
             // Debug builds: emulator tests open Settings without touching Home, whose Talk button starts a real call.
             if(BuildConfig.DEBUG&&"settings".equals(getIntent().getStringExtra("debug_screen"))){screen="settings";settingsReturnScreen="bots";}
+            // Debug builds: open on the Bot list (no chat opened, so nothing is marked read).
+            if(BuildConfig.DEBUG&&"bots".equals(getIntent().getStringExtra("debug_screen")))screen="bots";
             // Debug builds: asks GetSandAccessStatus with this sign-in and logs its answer ("Access: granted none").
             if(BuildConfig.DEBUG&&getIntent().getBooleanExtra("access_probe",false)){final BotAccount probing=account;final android.content.Context app=getApplicationContext();
                 worker.execute(()->{try{if(probing.accessProbe()==null)ProblemReport.event(app,"Access check: no answer");}catch(Exception failure){ProblemReport.note(app,"Access check",failure);}});}
             // Debug builds: one read-only GrokBotService List*/Get* request; logcat gets its reply's shape, never its values.
+            // Debug builds: checks before a release. gateway_down fails every gateway request as an outage would;
+            // fresh_list ignores the saved Bot list; pretend_update and update_check_now drive the update notice.
+            if(BuildConfig.DEBUG&&getIntent().getBooleanExtra("gateway_down",false))BotAccount.debugGatewayDown=true;
+            if(BuildConfig.DEBUG&&getIntent().getBooleanExtra("fresh_list",false))freshList=true;
+            if(BuildConfig.DEBUG&&getIntent().hasExtra("pretend_update"))UpdateCheck.debugPretend(this,getIntent().getStringExtra("pretend_update"));
+            if(BuildConfig.DEBUG&&getIntent().getBooleanExtra("update_check_now",false))UpdateCheck.debugForget(this);
             if(BuildConfig.DEBUG&&getIntent().hasExtra("gateway_probe")){final BotAccount probing=account;final String body=getIntent().getStringExtra("gateway_probe");
                 worker.execute(()->{try{android.util.Log.i("GrokWearProbe","gateway "+probing.gatewayProbe(new JSONObject(body)));}catch(Exception failure){android.util.Log.i("GrokWearProbe","gateway failed: "+failure.getMessage());}});}
             if(BuildConfig.DEBUG&&getIntent().hasExtra("replay_rows"))ServerEvents.debugReplay=Math.max(0,Math.min(20,getIntent().getIntExtra("replay_rows",0)));
@@ -221,7 +232,7 @@ public final class MainActivity extends Activity {
         assistUntil=0;talk();
     }
     private static String openBotExtra(Intent intent){String id=intent==null?null:intent.getStringExtra(ReplyAlertService.OPEN_BOT);return id==null||id.length()>512?"":id;}
-    @Override protected void onResume(){super.onResume();visible=true;for(BotAvatarView face:avatars)face.running(true);if(waveform!=null)waveform.running(true);if(isCall()){main.removeCallbacks(callClock);main.post(callClock);}
+    @Override protected void onResume(){super.onResume();visible=true;if(!preview)UpdateCheck.maybeCheck(this,()->{if(visible&&(screen.equals("bots")||screen.equals("settings")))render();});for(BotAvatarView face:avatars)face.running(true);if(waveform!=null)waveform.running(true);if(isCall()){main.removeCallbacks(callClock);main.post(callClock);}
         if(!preview){VoiceService.addListener(voiceListener);EventStream.add(this,live);if(SIGN_OUT_ACTIVE.get()){screen="signout_confirm";render();main.removeCallbacks(signOutObserver);main.post(signOutObserver);return;}if(awaitingMicrophonePermission&&!pendingTalkCurrent())clearPendingTalk();rosterRetryUsed=false;
             // The assistant button during a call just shows the call; after one ends, it starts the next from the Bot page.
             if(pendingAssist&&(VoiceService.snapshot().active||isCall()))pendingAssist=false;
@@ -247,6 +258,7 @@ public final class MainActivity extends Activity {
         if(screen.equals("report")){screen=reportReturnScreen;render();return;}
         if(screen.equals("bot_details")){screen="bots";render();return;}
         if(screen.equals("settings")){leaveSettings();return;}
+        if(screen.equals("update")){screen=updateReturnScreen;render();return;}
         if(screen.equals("history_detail")){screen="history";render();return;}
         if(screen.equals("bot_actions")){closeBotActions();return;}
         if(screen.equals("reader")){closeReader();return;}
@@ -326,6 +338,7 @@ public final class MainActivity extends Activity {
             case "account_error":accountError();break;
             case "access_link":accessLink();break;
             case "settings":settings();break;
+            case "update":update();break;
             case "alerts_setup":alertsSetup();break;
             case "button_setup":buttonSetup();break;
             case "report":report();break;
@@ -390,11 +403,15 @@ public final class MainActivity extends Activity {
         if(!pinned.isEmpty())markPinHintDone();
         if(primary!=null){FrameLayout.LayoutParams scroll=(FrameLayout.LayoutParams)currentScroll.getLayoutParams();scroll.topMargin=0;scroll.bottomMargin=dp(67);currentScroll.setLayoutParams(scroll);body.setPadding(0,0,0,dp(24));FrameLayout hero=new FrameLayout(this);body.addView(hero,new LinearLayout.LayoutParams(-1,dp(side-67)));
             // With no pins yet, the hero moves up to make room for one hint line.
-            boolean hint=pinned.isEmpty()&&!pinHintDone()&&(preview||botsCached);int lift=hint?18:0;
+            // A newer Grok Wear takes the hint line, so it shows without scrolling past every Bot.
+            String update=preview?"":UpdateCheck.available(this);
+            boolean hint=!update.isEmpty()||pinned.isEmpty()&&!pinHintDone()&&(preview||botsCached);int lift=hint?18:0;
             BotAvatarView face=new BotAvatarView(this);applyAvatar(face,primary.optString("name"),primary);face.state("ready",WHITE,0);face.running(visible);avatars.add(face);face.setContentDescription(primary.optString("name")+", Primary Bot"+(primary.optBoolean("awaiting")?", needs you":"")+". Open chat");face.setOnClickListener(v->{navigation++;primaryAction(primary,false);});int faceSize=compactHero()?48:64;FrameLayout.LayoutParams fp=new FrameLayout.LayoutParams(dp(faceSize),dp(faceSize),Gravity.TOP|Gravity.CENTER_HORIZONTAL);fp.topMargin=dp((compactHero()?30:side*.34f-32)-lift);hero.addView(face,fp);
             TextView star=text("★",16,WHITE);GradientDrawable badge=shape(0xffff9800,12);badge.setStroke(dp(2),Color.BLACK);star.setBackground(badge);star.setContentDescription("Primary Bot");FrameLayout.LayoutParams st=new FrameLayout.LayoutParams(dp(23),dp(23),Gravity.TOP|Gravity.CENTER_HORIZONTAL);st.leftMargin=dp(22);st.topMargin=fp.topMargin+dp(faceSize-21);hero.addView(star,st);
             TextView name=text(primary.optString("name"),getResources().getConfiguration().fontScale>1.2f?12:16,WHITE);name.setSingleLine(true);name.setEllipsize(android.text.TextUtils.TruncateAt.END);FrameLayout.LayoutParams np=new FrameLayout.LayoutParams(dp(side*.76f),dp(22),Gravity.TOP|Gravity.CENTER_HORIZONTAL);np.topMargin=dp((compactHero()?80:side*.535f-11)-lift);hero.addView(name,np);TextView sub=text(MessageText.plain(primary.optString("lastMessagePreview","Ready to talk")),compactHero()?11:12,SECONDARY);sub.setTag("bot_excerpt");if(primary.optBoolean("awaiting")){sub.setText(needsYou(MessageText.plain(primary.optString("lastMessagePreview",""))));sub.setTag("bot_status");}sub.setSingleLine(true);sub.setEllipsize(android.text.TextUtils.TruncateAt.END);FrameLayout.LayoutParams xp=new FrameLayout.LayoutParams(dp(side*.76f),dp(20),Gravity.TOP|Gravity.CENTER_HORIZONTAL);xp.topMargin=dp(Math.min(side-88,side*.615f-10)-lift);hero.addView(sub,xp);
-            if(hint){TextView line=text("Hold a Bot to pin it",12,SECONDARY);line.setCompoundDrawablesRelativeWithIntrinsicBounds(new PinGlyph(SECONDARY,12,false,false),null,null,null);line.setCompoundDrawablePadding(dp(4));FrameLayout.LayoutParams hp=new FrameLayout.LayoutParams(-2,dp(18),Gravity.TOP|Gravity.CENTER_HORIZONTAL);hp.topMargin=xp.topMargin+dp(22);hero.addView(line,hp);}
+            if(hint){TextView line;if(update.isEmpty()){line=text("Hold a Bot to pin it",12,SECONDARY);line.setCompoundDrawablesRelativeWithIntrinsicBounds(new PinGlyph(SECONDARY,12,false,false),null,null,null);line.setCompoundDrawablePadding(dp(4));}
+                else{line=text("Grok Wear "+update+" is out ›",12,WHITE);line.setContentDescription("Grok Wear "+update+" is out. Open for the download");line.setOnClickListener(v->openUpdate("bots"));}
+                FrameLayout.LayoutParams hp=new FrameLayout.LayoutParams(-2,dp(18),Gravity.TOP|Gravity.CENTER_HORIZONTAL);hp.topMargin=xp.topMargin+dp(22);hero.addView(line,hp);}
             Button talk=button("Talk to "+primary.optString("name","your Primary Bot"),()->primaryAction(primary,true));styleHomeTalk(talk,primary.optString("name","your Primary Bot"));talk.setTag("home_primary_talk");talk.setTextColor(Color.BLACK);talk.setBackground(shape(WHITE,28));talk.setEnabled(!historyStaging()&&!botSelectionPending);FrameLayout.LayoutParams ep=new FrameLayout.LayoutParams(dp(side*.62f),dp(54),Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);ep.bottomMargin=dp(12);root.addView(talk,ep);
             View fade=new View(this);fade.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,new int[]{0x00000000,0xff000000}));FrameLayout.LayoutParams fl=new FrameLayout.LayoutParams(-1,dp(18),Gravity.BOTTOM);fl.bottomMargin=dp(67);root.addView(fade,fl);
             // The fade appears once the list scrolls, so it never dims the hero at rest.
@@ -404,6 +421,8 @@ public final class MainActivity extends Activity {
             // Every other Bot pinned: no empty "Bots" header.
             if(pinned.isEmpty()||bots.length()-1>pinned.size())label("Bots",17,WHITE);
         }else{TextView title=label("Bots",17,WHITE);title.setTypeface(Typeface.create(Typeface.DEFAULT,600,false));
+            String update=preview?"":UpdateCheck.available(this);
+            if(!update.isEmpty())action("Grok Wear "+update+" is out",()->openUpdate("bots"));
             if(pickToCall)label("Choose a Bot to call",12,WHITE);
             else if(!preview&&preferencesKnown&&bots.length()>0)label("No main Bot. Choose one in the Grok Bot app on your phone.",12,SECONDARY);
             gap(8);if(!pinned.isEmpty())pinnedGrid(pinned);}
@@ -419,6 +438,20 @@ public final class MainActivity extends Activity {
             if(botsCached&&!botsLoading&&botsFetchedAtMs>0&&botListError.isEmpty())label("Updated "+ago(botsFetchedAtMs),11,SECONDARY);}
         if(!preview&&!botListError.isEmpty()){action("Report a problem",()->openReport("Bot list: "+botListError,"bots"));action("Details",()->{screen="bot_details";render();});}
         action("Settings",()->openSettings());
+    }
+    private void openUpdate(String from){updateReturnScreen=from;screen="update";render();}
+    /** A newer Grok Wear: a code for the phone to open its release page, where the download and notes are. */
+    private void update(){
+        String version=UpdateCheck.available(this);
+        title(version.isEmpty()?"Grok Wear is up to date":"Grok Wear "+version);
+        if(!version.isEmpty()){
+            android.util.DisplayMetrics shape=getResources().getDisplayMetrics();gap(3);
+            ImageView code=new ImageView(this);code.setContentDescription("QR code for Grok Wear "+version+" on GitHub");
+            int size=drawDenseQr(code,UpdateCheck.page(version),(int)(Math.min(shape.heightPixels,shape.widthPixels)*.6f));
+            body.addView(code,new LinearLayout.LayoutParams(size,size));gap(4);
+            label("Scan with your phone for the download and what’s new. Install it over this version the way you installed it. Your sign-in and settings stay.",12,SECONDARY);
+        }
+        action("Back",()->{screen=updateReturnScreen;render();});
     }
     private void botChip(String name,int accent,Runnable action){botChip(name,accent,action,null);}
     private void botChip(String name,int accent,Runnable action,JSONObject metadata){
@@ -1616,6 +1649,12 @@ public final class MainActivity extends Activity {
         boolean newest=newestFirst();
         Button order=action("Newest first: "+(newest?"On":"Off"),()->{setNewestFirst(!newest);render();});order.setContentDescription("Newest messages first, "+(newest?"on":"off")+". Double-tap to turn "+(newest?"off":"on"));
         label(newest?"A Bot’s chat starts with its newest message.":"A Bot’s chat ends with its newest message.",12,SECONDARY);gap(8);
+        boolean checking=UpdateCheck.enabled(this);String update=preview?"":UpdateCheck.available(this);
+        Button updates=action("Update check: "+(checking?"On":"Off"),()->{UpdateCheck.setEnabled(this,!checking);if(!checking)UpdateCheck.maybeCheck(this,()->{if(visible&&screen.equals("settings"))render();});render();});
+        updates.setContentDescription("Check for new Grok Wear versions, "+(checking?"on":"off")+". Double-tap to turn "+(checking?"off":"on"));
+        label(!checking?"Grok Wear won’t look for new versions.":update.isEmpty()?"Once a day, asks GitHub whether a newer Grok Wear is out. Nothing about you is sent.":"Grok Wear "+update+" is out.",12,SECONDARY);
+        if(!update.isEmpty())action("Get Grok Wear "+update,()->openUpdate("settings"));
+        gap(8);
         boolean button=buttonOn();
         Button hold=action("Assistant button: "+(button?"On":"Off"),()->toggleButton());hold.setContentDescription("Assistant button, "+(button?"on":"off")+". Double-tap to open the watch’s assistant settings");
         String target=assistTarget(preview?null:primaryBot());
@@ -1777,7 +1816,7 @@ public final class MainActivity extends Activity {
             },value->{
                 if(!accountResultCurrent(route)||!binding.equals(value.optString("identity")))return;
                 JSONObject cached=value.getJSONObject("roster");
-                if(cached.optBoolean("present")&&(!botsCached||cached.optLong("fetchedAtMs")>=botsFetchedAtMs)){
+                if(cached.optBoolean("present")&&!freshList&&(!botsCached||cached.optLong("fetchedAtMs")>=botsFetchedAtMs)){
                     bots=cached.getJSONArray("bots");botPreferences=cached.getJSONObject("preferences");botsCached=true;botsFetchedAtMs=cached.optLong("fetchedAtMs");
                 }
                 JSONObject bot=value.getJSONObject("bot");acceptAccountBot(bot);

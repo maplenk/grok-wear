@@ -12,6 +12,7 @@ import java.util.concurrent.TimeUnit;
 final class BotAccount {
     private final GrokAuthClient auth;
     private final GrokCore core;
+    private final Context app;
     final HistoryCoordinator continuity;
     private static final java.util.concurrent.atomic.AtomicBoolean RECOVERING=new java.util.concurrent.atomic.AtomicBoolean();
     private static final java.util.concurrent.ExecutorService RECOVERY=java.util.concurrent.Executors.newSingleThreadExecutor(r->{Thread t=new Thread(r,"grok-history-recovery");t.setDaemon(true);return t;});
@@ -29,6 +30,7 @@ final class BotAccount {
      */
     static void networkChanged(){try{HTTP.connectionPool().evictAll();}catch(RuntimeException ignored){}GrokAuthClient.networkChanged();NativeVoiceSession.networkChanged();}
     BotAccount(Context context) {
+        app=context.getApplicationContext();
         auth=new GrokAuthClient(context);
         core=new GrokCore(new GrokVault(context),this::coreRequest,new GrokCore.ConfigProvider(){
             public JSONObject current(JSONObject root)throws Exception{
@@ -37,7 +39,7 @@ final class BotAccount {
                 // and let the caller start over rather than finish with the old binding.
                 if(teamChanged(before,after)){relink(config,after.optString("auth_generation"));throw new GrokCore.Failure("Grok dropped an old team from this sign-in. Loading again.",true,TEAM_CHANGED);}
                 verify(root,after);return config;}
-            public void stale(JSONObject config)throws Exception{auth.forgetConfig(config.optString("gatewayToken"));}
+            public void stale(JSONObject config)throws Exception{RETRYING.set(true);auth.forgetConfig(config.optString("gatewayToken"));}
         });
         GrokVault privateHistory=new GrokVault(context,".continuity-v1");
         continuity=new HistoryCoordinator(new HistoryCoordinator.Store(){
@@ -576,6 +578,7 @@ final class BotAccount {
         if(!state.optBoolean("linked"))throw new GrokCore.Failure("Not signed in.",true,SIGNED_OUT);
         String identity=state.optString("account_key","")+"/"+state.optString("auth_generation","");
         JSONObject config=GrokCore.validateConfig(auth.currentConfig());
+        if(BuildConfig.DEBUG&&debugGatewayDown)throw new GrokCore.Failure("Live updates refused (HTTP 404).",true,"",404);
         Request.Builder request=new Request.Builder().get()
             .url(config.getString("gatewayUrl")+"/events?channels="+java.net.URLEncoder.encode(channels,"UTF-8")+"&surface=mobile")
             .header("Accept","text/event-stream").header("Accept-Encoding","identity").header("Authorization","Bearer "+config.getString("gatewayToken"));
@@ -628,6 +631,9 @@ final class BotAccount {
 
     /** The live stream's per-Bot state (unread, preview, working), shared by the Bot list and ServerEvents. */
     static final ServerTranscripts.States SERVER_STATES=new ServerTranscripts.States();
+    private static final ThreadLocal<Boolean> RETRYING=ThreadLocal.withInitial(()->false);
+    /** Debug builds: every gateway request fails as if the gateway were unreachable (404), to check the fallbacks. */
+    static volatile boolean debugGatewayDown;
     /** Gateway row fields a server row lacks: the photo the watch already shrank, the role line, a teammate's session. */
     private static final String[] GATEWAY_EXTRAS={"avatarDataUrl","title","viewerSessionId","hasUnread","unreadCount","isRunning","isRunningTurn","isComposingMessage","lastMessagePreview","lastActivityAt","lastViewedAt","awaitingUserResponse"};
 
@@ -636,9 +642,18 @@ final class BotAccount {
      * everything else, and anything the server doesn't take, goes to the gateway.
      */
     private JSONObject coreRequest(JSONObject config,String method,JSONObject body) throws Exception {
+        // GrokCore's second try after it dropped a stale gateway config (stale) is this thread's next request.
+        boolean retrying=RETRYING.get();RETRYING.set(false);
         switch(method){
             case "listAgents":{
-                JSONObject box=gateway(config,method,body);
+                JSONObject box;
+                try{box=gateway(config,method,body);}
+                catch(Exception unavailable){
+                    // A 401, 404 or 417 (a box asleep) first gets GrokCore's one fresh sandbox start and retry.
+                    if(!retrying&&GrokCore.staleGateway(unavailable))throw unavailable;
+                    // Then, like Grok Bot 1.25, Grok's own list still stands without the gateway's.
+                    return serverRosterOnly(unavailable);
+                }
                 // Report a problem's timings describe the gateway list, not the server's.
                 long[] transfer=LAST_TRANSFER.get().clone();
                 try{return withServerRoster(box);}finally{LAST_TRANSFER.set(transfer);}
@@ -664,25 +679,22 @@ final class BotAccount {
         try{server=serverRoster();}
         catch(Exception unavailable){android.util.Log.i("GrokWearServer","roster from gateway only: "+unavailable.getClass().getSimpleName());return box;}
         JSONArray boxRows=box.optJSONArray("agents");if(boxRows==null)boxRows=new JSONArray();
-        java.util.Map<String,JSONObject> byId=new java.util.HashMap<>();
-        for(int i=0;i<boxRows.length();i++){JSONObject b=boxRows.optJSONObject(i);String id=rowId(b);if(!id.isEmpty())byId.put(id,b);}
-        JSONArray merged=new JSONArray();java.util.Set<String> listed=new java.util.HashSet<>();long now=System.currentTimeMillis();
-        for(int i=0;i<server.length();i++){
-            // A server row's own "id" is an internal one; its agentId is the Bot id every other request uses.
-            JSONObject row=server.optJSONObject(i);String id=GrokCore.text(row,"agentId");if(id.isEmpty())id=GrokCore.text(row,"legacyAgentId");
-            if(id.isEmpty()||!listed.add(id))continue;
-            JSONObject b=byId.get(id);
-            if(!GrokCore.SERVER_HARNESS.equals(GrokCore.text(row,"harness"))){merged.put(b!=null?b:row);continue;}
-            JSONObject mine=new JSONObject(row.toString()).put("id",id);
-            if(b!=null)for(String key:GATEWAY_EXTRAS)if(b.has(key)&&!mine.has(key))mine.put(key,b.get(key));
-            merged.put(SERVER_STATES.over(mine,now));
-        }
-        for(int i=0;i<boxRows.length();i++){JSONObject b=boxRows.optJSONObject(i);String id=rowId(b);
-            if(b!=null&&!id.isEmpty()&&!listed.contains(id)&&!GrokCore.SERVER_HARNESS.equals(GrokCore.text(b,"harness")))merged.put(b);}
+        JSONArray merged=ServerTranscripts.roster(server,boxRows,GATEWAY_EXTRAS,SERVER_STATES,System.currentTimeMillis());
         if(BuildConfig.DEBUG)android.util.Log.i("GrokWearServer","roster server="+server.length()+" gateway="+boxRows.length()+" listed="+merged.length());
         return new JSONObject().put("agents",merged);
     }
-    private static String rowId(JSONObject row){String id=GrokCore.text(row,"id");return id.isEmpty()?GrokCore.text(row,"agentId"):id;}
+    /**
+     * The gateway's list couldn't be read: the server's list alone, so Bots run on Grok's servers stay usable. If
+     * the server's can't be read either, the gateway's failure stands, as before.
+     */
+    private JSONObject serverRosterOnly(Exception gatewayFailure) throws Exception {
+        JSONArray server;
+        try{server=serverRoster();}catch(Exception alsoUnavailable){throw gatewayFailure;}
+        String why=gatewayFailure instanceof GrokCore.Failure&&((GrokCore.Failure)gatewayFailure).status>0?"HTTP "+((GrokCore.Failure)gatewayFailure).status:gatewayFailure.getClass().getSimpleName();
+        android.util.Log.i("GrokWearServer","roster from server only: gateway "+why);
+        ProblemReport.event(app,"Bot list: gateway unavailable ("+why+"), listed Grok's server Bots");
+        return new JSONObject().put("agents",ServerTranscripts.roster(server,new JSONArray(),GATEWAY_EXTRAS,SERVER_STATES,System.currentTimeMillis()));
+    }
     /** ListGrokBotAgents: your own Bots, and with a team the team's Bots you added, as the official app asks. */
     private JSONArray serverRoster() throws Exception {
         JSONArray rows=new JSONArray();
@@ -799,6 +811,7 @@ final class BotAccount {
     private static JSONObject gateway(JSONObject config,String method,JSONObject body) throws Exception {
         if(!java.util.Arrays.asList("listAgents","setVoiceCallPresence","sendPrompt","getAgentTranscriptTail","setAgentUnread","resolveAutoReviewApproval","getTrays","submitUserForm","dismissUserForm","respondToWidget","dismissWidget").contains(method))throw new GrokCore.Failure("This Grok operation is not enabled.",true);
         JSONObject valid=GrokCore.validateConfig(config);
+        if(BuildConfig.DEBUG&&debugGatewayDown)throw new GrokCore.Failure("Grok request failed (HTTP 404).",true,"",404);
         Request.Builder request=new Request.Builder().url(valid.getString("gatewayUrl")+"/api/"+method)
             .header("Authorization","Bearer "+valid.getString("gatewayToken"));
         JSONObject headers=valid.getJSONObject("headers");Iterator<String> keys=headers.keys();
