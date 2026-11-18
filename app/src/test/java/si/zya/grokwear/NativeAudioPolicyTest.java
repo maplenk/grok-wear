@@ -45,8 +45,10 @@ public class NativeAudioPolicyTest {
         assertEquals(1f,NativeAudio.voiceCallFraction(12,0,10),0f);
     }
     @Test public void echoDiagnosticsAreCountsAndBooleansOnly(){
-        String line=NativeAudio.echoDiagnostics(true,false,true,3,4);
-        assertEquals("aec_available=true,aec_created=false,aec_enabled=true,gated=3,passed=4",line);
+        assertEquals("echo 3/7 aec on",NativeAudio.echoDiagnostics(true,true,true,3,4));
+        assertEquals("echo 0/0 aec off",NativeAudio.echoDiagnostics(true,true,false,0,0));
+        assertEquals("echo 1/2 aec failed",NativeAudio.echoDiagnostics(true,false,false,1,1));
+        assertEquals("echo 5/5 aec none",NativeAudio.echoDiagnostics(false,false,false,5,0));
     }
     @Test public void pcmMeterHandlesSignedLittleEndianSilenceAndClipping() {
         assertEquals(0,NativeAudio.level(new byte[20]),0);

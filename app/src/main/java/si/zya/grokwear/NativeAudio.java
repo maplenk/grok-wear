@@ -203,7 +203,8 @@ final class NativeAudio implements AutoCloseable {
     /** Counts and booleans only. {@code enabled} is getEnabled() after setEnabled(true). */
     String echoDiagnostics(){return echoDiagnostics(aecAvailable,aecCreated,aecEnabled,gatedFrames.get(),passedFrames.get());}
     static String echoDiagnostics(boolean available,boolean created,boolean enabled,long gated,long passed){
-        return "aec_available="+available+",aec_created="+created+",aec_enabled="+enabled+",gated="+gated+",passed="+passed;
+        // Short, so a call's report line keeps its failure reason within the log's line cap.
+        return "echo "+gated+"/"+(gated+passed)+" aec "+(enabled?"on":created?"off":available?"failed":"none");
     }
     /** (volume-min)/(max-min), or 0 when the stream has no range. Clamped to 0..1. */
     static float voiceCallFraction(int volume,int min,int max){
@@ -212,11 +213,11 @@ final class NativeAudio implements AutoCloseable {
         if(!(fraction>0f))return 0f;
         return Math.min(fraction,1f);
     }
-    /** Play thread only. */
+    /** Play thread only. The volume of the stream the Bot's voice plays on: media on the watch speaker, call otherwise. */
     private float callVolume(long nowMs){
         if(callVolumeAt>=0&&nowMs-callVolumeAt<CALL_VOLUME_MS)return cachedCallVolume;
         callVolumeAt=nowMs;
-        try{int stream=AudioManager.STREAM_VOICE_CALL;
+        try{int stream=volumeStream();
             cachedCallVolume=voiceCallFraction(manager.getStreamVolume(stream),manager.getStreamMinVolume(stream),manager.getStreamMaxVolume(stream));
         }catch(RuntimeException ignored){}
         return cachedCallVolume;
