@@ -40,7 +40,14 @@ public final class MainActivity extends Activity {
     private String updateReturnScreen="bots";
     private long botsFetchedAtMs,lastBotRefreshAttemptElapsed;
     private static final long BOT_REFRESH_INTERVAL_MS=60000;
-    private boolean rosterRetryUsed;
+    /** Automatic Bot list retries since the last manual load: one with saved Bots, more while none are saved. */
+    private int rosterRetries;
+    private static final long[] ROSTER_RETRY_MS={15000,30000,60000};
+    /** The account couldn't load because Grok was out of reach: not the sign-in's fault, so it retries by itself. */
+    private boolean accountOffline;private int offlineRetries;
+    private static final long[] OFFLINE_RETRY_MS={5000,10000,20000,30000};
+    private final Runnable offlineRetry=this::retryOffline;
+    private void retryOffline(){if(visible&&accountOffline&&screen.equals("account_error"))recover();}
     private Runnable rosterRetry;
     private String settingsReturnScreen="bots";
     private static final java.util.concurrent.atomic.AtomicBoolean SIGN_OUT_ACTIVE=new java.util.concurrent.atomic.AtomicBoolean();
@@ -233,7 +240,7 @@ public final class MainActivity extends Activity {
     }
     private static String openBotExtra(Intent intent){String id=intent==null?null:intent.getStringExtra(ReplyAlertService.OPEN_BOT);return id==null||id.length()>512?"":id;}
     @Override protected void onResume(){super.onResume();visible=true;if(!preview)UpdateCheck.maybeCheck(this,()->{if(visible&&(screen.equals("bots")||screen.equals("settings")))render();});for(BotAvatarView face:avatars)face.running(true);if(waveform!=null)waveform.running(true);if(isCall()){main.removeCallbacks(callClock);main.post(callClock);}
-        if(!preview){VoiceService.addListener(voiceListener);EventStream.add(this,live);if(SIGN_OUT_ACTIVE.get()){screen="signout_confirm";render();main.removeCallbacks(signOutObserver);main.post(signOutObserver);return;}if(awaitingMicrophonePermission&&!pendingTalkCurrent())clearPendingTalk();rosterRetryUsed=false;
+        if(!preview){VoiceService.addListener(voiceListener);EventStream.add(this,live);if(SIGN_OUT_ACTIVE.get()){screen="signout_confirm";render();main.removeCallbacks(signOutObserver);main.post(signOutObserver);return;}if(awaitingMicrophonePermission&&!pendingTalkCurrent())clearPendingTalk();rosterRetries=0;
             // The assistant button during a call just shows the call; after one ends, it starts the next from the Bot page.
             if(pendingAssist&&(VoiceService.snapshot().active||isCall()))pendingAssist=false;
             else if(pendingAssist&&(screen.equals("done")||screen.equals("dropped")||screen.equals("error"))){screen="ready";safeError="";}
@@ -1729,6 +1736,12 @@ public final class MainActivity extends Activity {
     private void recover(){if(preview){setPreviewScreen("ready");}else{safeError="";accountLink="";GrokAuthCore.releaseHold();loadAccount();}}
     /** Needs attention: what Grok said, where to fix it on the phone, and a way to start over. */
     private void accountError(){
+        if(accountOffline&&!preview){
+            title("Can’t reach Grok");label(safeError,14,SECONDARY);label("Trying again by itself.",12,SECONDARY);gap(9);
+            String detail=safeError;action("Report a problem",()->openReport("Can’t reach Grok: "+detail,"account_error"));
+            action("Back",()->goHome());edgeAction("Try again",()->recover());
+            return;
+        }
         title("Needs attention");label(safeError,14,SECONDARY);gap(9);
         if(!accountLink.isEmpty())action("Open on phone",()->{screen="access_link";render();});
         if(!preview)action("Sign in again",()->signInAgain());
@@ -1780,18 +1793,21 @@ public final class MainActivity extends Activity {
      * phone can fix it; a generic line only for errors from the platform or the network stack.
      */
     private void showSafeError(){showSafeError(null);}
-    private void showSafeError(Throwable failure){polling=false;main.removeCallbacks(pollTick);
+    private void showSafeError(Throwable failure){polling=false;main.removeCallbacks(pollTick);main.removeCallbacks(offlineRetry);
         GrokCore.Failure refused=failure instanceof GrokCore.Failure?(GrokCore.Failure)failure:null;
         accountLink=refused==null?"":refused.link;
         safeError=refused!=null&&refused.getMessage()!=null&&!refused.getMessage().isEmpty()?refused.getMessage()
             :"Couldn’t reach Grok. Check the watch’s connection, then try again.";
+        // Out of reach (the watch offline, or its network switching): try again by itself, further apart each time.
+        accountOffline=failure!=null&&(refused==null||GrokAuthCore.OFFLINE.equals(refused.code));
+        if(accountOffline)main.postDelayed(offlineRetry,OFFLINE_RETRY_MS[Math.min(offlineRetries++,OFFLINE_RETRY_MS.length-1)]);else offlineRetries=0;
         screen="account_error";render();}
     private boolean accountResultCurrent(int route){
         if(route!=navigation)return false;
         if(VoiceService.snapshot().active){renderVoice();return false;}
         return true;
     }
-    private void clearBotCache(){cancelRosterRetry();preferencesKnown=false;pickToCall=false;rosterRetryUsed=false;clearPendingTalk();receiptIdentity="";receiptSync="";receiptElapsed=0;receiptRefreshPending=false;clearHistory();botRequest++;botsLoading=false;rosterFetchActive=false;activeRosterRequest=0;bots=new JSONArray();botPreferences=new JSONObject();botsCached=false;botsFetchedAtMs=0;lastBotRefreshAttemptElapsed=0;botsAccountBinding="";selectedMetadata=new JSONObject();botName="Your Bot";}
+    private void clearBotCache(){cancelRosterRetry();preferencesKnown=false;pickToCall=false;rosterRetries=0;clearPendingTalk();receiptIdentity="";receiptSync="";receiptElapsed=0;receiptRefreshPending=false;clearHistory();botRequest++;botsLoading=false;rosterFetchActive=false;activeRosterRequest=0;bots=new JSONArray();botPreferences=new JSONObject();botsCached=false;botsFetchedAtMs=0;lastBotRefreshAttemptElapsed=0;botsAccountBinding="";selectedMetadata=new JSONObject();botName="Your Bot";}
     private void acceptAccountBot(JSONObject bot){
         // A resumed detail belongs to its captured account, Bot and viewer conversation.
         String session=bot.optBoolean("viewerIsOwner",true)?"":bot.optString("viewerSessionId","");
@@ -1838,11 +1854,12 @@ public final class MainActivity extends Activity {
         else{safeError="Sign-in needs attention. Start a new sign-in.";screen="account_error";render();}
     });}
     private void openBotPicker(){
+        accountOffline=false;offlineRetries=0;main.removeCallbacks(offlineRetry);
         if(!preview&&VoiceService.snapshot().active){renderVoice();return;}
         screen="bots";render();if(!preview)refreshBots(false);
     }
     private String accountIdentity(JSONObject state){return state.optString("account_key","")+"/"+state.optString("auth_generation","");}
-    private void loadBots(){rosterRetryUsed=false;cancelRosterRetry();refreshBots(true);}
+    private void loadBots(){rosterRetries=0;cancelRosterRetry();refreshBots(true);}
     private void refreshBots(boolean explicit){
         if(preview||botSelectionPending)return;
         if(VoiceService.snapshot().active){renderVoice();return;}
@@ -1876,7 +1893,7 @@ public final class MainActivity extends Activity {
                 if(!expected.equals(accountIdentity(account.authState())))return;
                 main.post(()->applyBotPreferences(request,expected,prefs));
             }catch(Exception optionalUnavailable){}});
-        }catch(Exception failure){ProblemReport.note(getApplicationContext(),"Bot list",failure,"after "+ProblemReport.seconds(android.os.SystemClock.elapsedRealtime()-elapsed)+" · "+ProblemReport.network(getApplicationContext()));String why=ProblemReport.code(failure);
+        }catch(Exception failure){ProblemReport.note(getApplicationContext(),"Bot list",failure,"after "+ProblemReport.seconds(android.os.SystemClock.elapsedRealtime()-elapsed)+" · "+ProblemReport.network(getApplicationContext()));String why=ProblemReport.offline(failure)?"offline":ProblemReport.code(failure);
             GrokCore.Failure refused=failure instanceof GrokCore.Failure?(GrokCore.Failure)failure:null;
             main.post(()->{if(activeRosterRequest==request)rosterFetchActive=false;
                 // A dropped stale team changed the account binding: load the account again under the new one.
@@ -1904,8 +1921,10 @@ public final class MainActivity extends Activity {
         if(!currentBotRefresh(request,expected))return;botsLoading=false;refreshShown=false;why=why.isEmpty()?"":" ("+why+")";
         // Keep saved rows usable. One foreground retry can recover a transient slow link.
         botListError=botsCached?"Showing saved Bots"+why:"Bots aren’t available yet"+why+". Trying again shortly.";renderBotListPreservingScroll();
-        if(!rosterRetryUsed&&visible&&screen.equals("bots")){
-            rosterRetryUsed=true;rosterRetry=()->{rosterRetry=null;if(visible&&screen.equals("bots")&&currentBotRefresh(request,expected)&&!botSelectionPending&&!VoiceService.snapshot().active)refreshBots(true);};main.postDelayed(rosterRetry,15000);
+        // Nothing saved yet (a first sign-in, say on a flaky connection): a few tries, further apart, before giving up.
+        int allowed=botsCached?1:ROSTER_RETRY_MS.length;
+        if(rosterRetries<allowed&&visible&&screen.equals("bots")){
+            long delay=ROSTER_RETRY_MS[rosterRetries];rosterRetries++;rosterRetry=()->{rosterRetry=null;if(visible&&screen.equals("bots")&&currentBotRefresh(request,expected)&&!botSelectionPending&&!VoiceService.snapshot().active)refreshBots(true);};main.postDelayed(rosterRetry,delay);
         }else if(!botsCached){botListError="Bots aren’t available yet"+why+". Try again later.";renderBotListPreservingScroll();}
     }
     private void cancelRosterRetry(){if(rosterRetry!=null)main.removeCallbacks(rosterRetry);rosterRetry=null;}

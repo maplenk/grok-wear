@@ -27,6 +27,18 @@ public class ProblemReportTest {
         assertEquals(60,full.split("Bot sandbox start").length-1);
         assertTrue(full.contains("Log (UTC, newest first):\n11-03 14:00Z"));
     }
+    @Test public void outOfReachFailuresReadAsOffline() {
+        assertTrue(ProblemReport.offline(GrokAuthCore.offline()));
+        assertTrue(ProblemReport.offline(new java.net.UnknownHostException("api2.cursor.sh")));
+        assertTrue(ProblemReport.offline(new java.net.SocketException("Software caused connection abort")));
+        assertTrue(ProblemReport.offline(new java.net.ConnectException("refused")));
+        assertTrue(ProblemReport.offline(new java.net.SocketTimeoutException("timeout")));
+        GrokCore.Failure wrapped=new GrokCore.Failure("Grok request failed.",false);wrapped.initCause(new java.net.UnknownHostException("x"));
+        assertTrue("a cause counts",ProblemReport.offline(wrapped));
+        assertFalse(ProblemReport.offline(new GrokCore.Failure("Grok request failed (HTTP 404).",true,"",404)));
+        assertFalse(ProblemReport.offline(new java.io.IOException("other")));
+        assertFalse(ProblemReport.offline(null));
+    }
     @Test public void refusalsAreShortAndKeepNoMessage() {
         ServiceRefusal why=ServiceRefusal.parse(401,"",("{\"code\":\"unauthenticated\",\"message\":\"user private@example.com has no access\","
             +"\"details\":[{\"type\":\"aiserver.v1.ErrorDetails\",\"debug\":{\"details\":{\"additionalInfo\":{\"sandUsageScopeError\":\"stale_team\"}}}}]}").getBytes(java.nio.charset.StandardCharsets.UTF_8));
