@@ -44,6 +44,20 @@ public class ServerTranscriptsTest {
         assertEquals("a box Bot only the gateway lists stays","Cat",merged.getJSONObject(2).getString("name"));
         for(int i=0;i<merged.length();i++)assertNotEquals("a server Bot the server no longer lists is gone","D",merged.getJSONObject(i).getString("id"));
     }
+    @Test public void aBoxBotKeepsTheVoiceTheServerListsForIt()throws Exception {
+        // Issue #22: the gateway's row often has no voice, so the call fell back to the voice service's default.
+        JSONArray server=new JSONArray().put(serverRow("i1","B","box","Bob").put("voiceId","orion").put("voiceSpeed",1.2).put("voiceLanguage","en"))
+            .put(serverRow("i2","C","box","Cat").put("voiceId",""));
+        JSONArray box=new JSONArray().put(boxRow("B","box","Bob (box)")).put(boxRow("C","box","Cat").put("voiceId","altair"));
+        JSONArray merged=ServerTranscripts.roster(server,box,EXTRAS,null,0);
+        JSONObject bob=merged.getJSONObject(0);
+        assertEquals("Bob (box)",bob.getString("name"));assertEquals("data:photo-B",bob.getString("avatarDataUrl"));
+        assertEquals("orion",bob.getString("voiceId"));assertEquals(1.2,bob.getDouble("voiceSpeed"),0);assertEquals("en",bob.getString("voiceLanguage"));
+        assertFalse("the gateway's own row isn't changed",box.getJSONObject(0).has("voiceId"));
+        assertEquals("an empty server voice leaves the gateway's","altair",merged.getJSONObject(1).getString("voiceId"));
+        // And the watch's Bot row keeps it for the call.
+        assertEquals("orion",GrokCore.rosterRow(bob,0).getString("voiceId"));
+    }
     @Test public void rosterPutsTheLiveStateOverServerBots()throws Exception {
         ServerTranscripts.States states=new ServerTranscripts.States();
         states.apply(new JSONObject().put("client",new JSONArray().put(new JSONObject().put("agentId","A").put("unreadCount",3))));

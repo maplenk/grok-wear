@@ -178,7 +178,7 @@ final class ServerTranscripts {
             JSONObject row=server.optJSONObject(i);String id=GrokCore.text(row,"agentId");if(id.isEmpty())id=GrokCore.text(row,"legacyAgentId");
             if(id.isEmpty()||!listed.add(id))continue;
             JSONObject b=byId.get(id);
-            if(!GrokCore.SERVER_HARNESS.equals(GrokCore.text(row,"harness"))){merged.put(b!=null?b:new JSONObject(row.toString()).put("id",id));continue;}
+            if(!GrokCore.SERVER_HARNESS.equals(GrokCore.text(row,"harness"))){merged.put(b!=null?withVoice(b,row):new JSONObject(row.toString()).put("id",id));continue;}
             JSONObject mine=new JSONObject(row.toString()).put("id",id);
             if(b!=null)for(String key:extras)if(b.has(key)&&!mine.has(key))mine.put(key,b.get(key));
             merged.put(states==null?mine:states.over(mine,now));
@@ -188,6 +188,20 @@ final class ServerTranscripts {
         return merged;
     }
     private static String rowId(JSONObject row){String id=GrokCore.text(row,"id");return id.isEmpty()?GrokCore.text(row,"agentId"):id;}
+    /** The voice settings a call uses; the server's list keeps them, the gateway's often leaves them out. */
+    static final String[] VOICE={"voiceId","voiceSpeed","voiceLanguage"};
+    /**
+     * A box Bot's gateway row with the voice the server lists for it, so a call speaks with the voice chosen in the
+     * phone app (issue #22). The gateway's own value stays where the server has none.
+     */
+    private static JSONObject withVoice(JSONObject box,JSONObject server)throws Exception {
+        JSONObject out=box;
+        for(String key:VOICE){Object value=server.opt(key);
+            if(value==null||value==JSONObject.NULL||"".equals(value))continue;
+            if(out==box)out=new JSONObject(box.toString());
+            out.put(key,value);}
+        return out;
+    }
 
     static final class States {
         private final Map<String,JSONObject> client=new HashMap<>();

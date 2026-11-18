@@ -55,9 +55,12 @@ final class NativeAudio implements AutoCloseable {
         for(int type:outputs)for(int headset:HEADSETS)if(type==headset)return false;
         return true;
     }
+    /** The volume stream matching the usage selected for this call's AudioTrack. */
+    static int volumeStream(boolean media){return media?AudioManager.STREAM_MUSIC:AudioManager.STREAM_VOICE_CALL;}
     private volatile boolean media;
     /** Whether this call's voice plays as media; for the problem log. */
     boolean voiceAsMedia(){return media;}
+    int volumeStream(){return volumeStream(media);}
     private int[] outputs(){
         try{AudioDeviceInfo[] devices=manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS);int[] types=new int[devices.length];
             for(int i=0;i<devices.length;i++)types[i]=devices[i].getType();return types;}
