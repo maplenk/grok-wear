@@ -130,7 +130,11 @@ final class GrokAuthCore {
     JSONObject poll() throws Exception {
         JSONObject request;String epoch,id;
         synchronized(LOCK) {
-            JSONObject root=pendingRoot();
+            JSONObject root;
+            // A sandbox start that couldn't reach Grok leaves the sign-in as it was: report the sign-in, not the
+            // network. Grok refusing the account still stands.
+            try{root=pendingRoot();}
+            catch(GrokCore.Failure joined){if(!OFFLINE.equals(joined.code))throw joined;root=store.read();}
             JSONObject login=root.optJSONObject("login");
             if(login==null)return stateOf(root);
             if(expired(login)){root.remove("login");store.write(root);throw failure("Grok sign-in expired. Start a new sign-in.");}
@@ -236,7 +240,10 @@ final class GrokAuthCore {
         try {
         Reply response;
         try {response=invoke(BOOTSTRAP,request);}
-        catch(Exception e) {clearNonRotating(epoch,id);throw e;}
+        catch(Exception e) {clearNonRotating(epoch,id);
+            // Lost on the way (the watch went offline, or its network switched mid-request): a network problem, not
+            // one with the sign-in. Callers waiting on this request hear the same.
+            GrokCore.Failure lost=offline();synchronized(LOCK){flight.failure=lost;}throw lost;}
         synchronized(LOCK) {
             JSONObject root=active(epoch,id);
             // This operation is read/bootstrap, not a rotating-token request: it may be asked again.
@@ -516,6 +523,9 @@ final class GrokAuthCore {
         if(!flight.succeeded)throw flight.failure!=null?copyFailure(flight.failure):bootstrapBusy();
         return pendingRoot();
     }
+    /** The code of a sandbox start that couldn't reach Grok; shown in the Bot list as "(offline)". */
+    static final String OFFLINE="offline";
+    static GrokCore.Failure offline(){return new GrokCore.Failure("Couldn’t reach Grok. Check the watch’s connection, then try again.",false,OFFLINE);}
     private static GrokCore.Failure bootstrapBusy() {
         return failure("Grok is still connecting or could not finish connecting. Try again shortly. No message was sent.");
     }

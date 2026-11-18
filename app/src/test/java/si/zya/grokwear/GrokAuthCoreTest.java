@@ -534,6 +534,41 @@ public class GrokAuthCoreTest {
         assertTrue(String.valueOf(followerError.get()),followerError.get() instanceof GrokCore.Failure);
         assertEquals("Grok has blocked this account from Grok Bot. Check your account on your phone.",followerError.get().getMessage());
     }
+    @Test public void aSandboxStartLostOnTheNetworkIsNotASignInProblem()throws Exception {
+        // A first sign-in: the sandbox start loses the network (the watch went offline mid-request) while the
+        // app's account check waits on it. The check must find the sign-in fine, and the start must say why.
+        Fixture f=new Fixture();f.signIn(NOW+3_600_000);
+        java.util.concurrent.CountDownLatch entered=new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release=new java.util.concurrent.CountDownLatch(1);
+        GrokAuthCore leader=new GrokAuthCore(f.memory,(op,input)->{
+            if(!op.equals(GrokAuthCore.BOOTSTRAP))throw new AssertionError(op);
+            entered.countDown();assertTrue(release.await(5,java.util.concurrent.TimeUnit.SECONDS));
+            throw new java.net.SocketException("Software caused connection abort");
+        },()->f.now);
+        GrokAuthCore follower=new GrokAuthCore(f.memory,(op,input)->{throw new AssertionError("Must not replay");},()->f.now);
+        GrokAuthCore joiner=new GrokAuthCore(f.memory,(op,input)->{throw new AssertionError("Must not replay");},()->f.now);
+        java.util.concurrent.atomic.AtomicReference<Throwable> leaderError=new java.util.concurrent.atomic.AtomicReference<>(),
+            pollError=new java.util.concurrent.atomic.AtomicReference<>(),joinError=new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicReference<JSONObject> polled=new java.util.concurrent.atomic.AtomicReference<>();
+        Thread first=new Thread(()->{try{leader.currentConfig();}catch(Throwable e){leaderError.set(e);}});
+        Thread second=new Thread(()->{try{polled.set(follower.poll());}catch(Throwable e){pollError.set(e);}});
+        Thread third=new Thread(()->{try{joiner.currentConfig();}catch(Throwable e){joinError.set(e);}});
+        first.start();assertTrue(entered.await(5,java.util.concurrent.TimeUnit.SECONDS));second.start();third.start();
+        try {
+            long deadline=System.nanoTime()+5_000_000_000L;
+            while((second.getState()!=Thread.State.TIMED_WAITING||third.getState()!=Thread.State.TIMED_WAITING)&&System.nanoTime()<deadline)Thread.yield();
+            assertEquals(Thread.State.TIMED_WAITING,second.getState());assertEquals(Thread.State.TIMED_WAITING,third.getState());
+        }finally{release.countDown();}
+        first.join(5000);second.join(5000);third.join(5000);
+        assertNull(String.valueOf(pollError.get()),pollError.get());
+        assertEquals("the sign-in stands","ready",polled.get().getString("status"));
+        for(Throwable e:new Throwable[]{leaderError.get(),joinError.get()}){
+            assertTrue(String.valueOf(e),e instanceof GrokCore.Failure);
+            assertEquals(GrokAuthCore.OFFLINE,((GrokCore.Failure)e).code);
+            assertEquals("Couldn’t reach Grok. Check the watch’s connection, then try again.",e.getMessage());
+        }
+        assertEquals("ready",f.core.state().getString("status"));assertFalse(f.memory.value.has("operation"));
+    }
     @Test public void otherRequestsRecoverLikeTheSandboxStart()throws Exception {
         Fixture f=new Fixture();f.core.begin();f.poll=new GrokAuthCore.Reply(200,login("owner",NOW+3_600_000).put("selectedTeamId",7));f.core.poll();f.calls.clear();
         JSONObject used=f.core.backendContext();

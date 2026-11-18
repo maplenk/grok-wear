@@ -112,6 +112,13 @@ final class ProblemReport {
         return !code.isEmpty()?code:failure==null?"unknown":String.valueOf(failure.getMessage());
     }
     /** Short enough for the screen: the service's status or code, or the error's type; "" for the app's own refusals. */
+    /** Whether a failure means Grok was out of reach (the watch offline, its network switching), shown as "offline". */
+    static boolean offline(Throwable failure){
+        if(failure instanceof GrokCore.Failure&&GrokAuthCore.OFFLINE.equals(((GrokCore.Failure)failure).code))return true;
+        for(Throwable t=failure;t!=null;t=t.getCause()==t?null:t.getCause())
+            if(t instanceof java.net.UnknownHostException||t instanceof java.net.SocketException||t instanceof java.net.SocketTimeoutException)return true;
+        return false;
+    }
     static String code(Throwable failure){
         if(failure instanceof GrokCore.Failure){GrokCore.Failure refused=(GrokCore.Failure)failure;
             if(refused.status>0)return "HTTP "+refused.status+(refused.code.isEmpty()?"":" "+refused.code);
