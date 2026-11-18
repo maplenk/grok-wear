@@ -480,7 +480,8 @@ public final class MainActivity extends Activity {
         if(awaiting||!second.isEmpty()){TextView sub=text(second,12,working&&!awaiting?GREEN:SECONDARY);if(awaiting)sub.setText(needsYou(previewText.isEmpty()?"":MessageText.plain(previewText)));
             sub.setTag(awaiting||working?"bot_status":"bot_excerpt");sub.setSingleLine(true);sub.setEllipsize(android.text.TextUtils.TruncateAt.END);sub.setGravity(Gravity.START);names.addView(sub,new LinearLayout.LayoutParams(-1,-2));}
         LinearLayout.LayoutParams np=new LinearLayout.LayoutParams(0,-2,1);np.leftMargin=dp(8);row.addView(names,np);
-        if(hasUnread){View badge=unreadBadge(unread);LinearLayout.LayoutParams ub=new LinearLayout.LayoutParams(-2,dp(unread>0?18:8));ub.leftMargin=dp(4);row.addView(badge,ub);}
+        // The dot needs a fixed width: a plain View that wraps its content takes all the room left, hiding the name.
+        if(hasUnread){View badge=unreadBadge(unread);LinearLayout.LayoutParams ub=new LinearLayout.LayoutParams(unread>0?-2:dp(8),dp(unread>0?18:8));ub.leftMargin=dp(4);row.addView(badge,ub);}
         row.setContentDescription(name+(awaiting?", needs you":"")+(working?", working":"")+(unread>0?", "+unread+" unread":hasUnread?", unread":""));
         if(selected){TextView check=text("✓",16,BLUE);check.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);row.addView(check,new LinearLayout.LayoutParams(dp(20),-2));}
         if(metadata!=null&&!metadata.optString("id","").isEmpty()&&!isPrimaryId(metadata.optString("id")))row.setOnLongClickListener(v->{openBotActions(metadata);return true;});

@@ -20,8 +20,8 @@ android {
         applicationId 'si.zya.grokwear'
         minSdk 30
         targetSdk 36
-        versionCode 42
-        versionName '0.7.5'
+        versionCode 43
+        versionName '0.7.6'
         buildConfigField 'String', 'SENTRY_DSN', "\"${sentryDsn}\""
         // On-device tests run on an emulator only (ANDROID_SERIAL), never a personal watch.
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
